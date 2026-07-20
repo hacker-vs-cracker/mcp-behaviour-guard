@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MCP Behaviour Guard - {{ summary.run_id }}</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: Canvas; --text: CanvasText; --panel: color-mix(in srgb, Canvas 94%, CanvasText 6%);
+      --border: color-mix(in srgb, CanvasText 24%, transparent); --muted: color-mix(in srgb, CanvasText 62%, transparent);
+      --critical:#b71c1c; --high:#d84315; --medium:#ef6c00; --low:#6d4c41; --info:#455a64;
+      --passed:#2e7d32; --failed:#c62828; --error:#ef6c00; --skipped:#616161;
+    }
+    * { box-sizing:border-box; }
+    body { font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; margin:0; background:var(--bg); color:var(--text); }
+    main { max-width:1400px; margin:0 auto; padding:2rem; }
+    header { display:flex; justify-content:space-between; gap:2rem; align-items:flex-start; }
+    h1 { margin:0 0 .4rem; }
+    .summary { display:grid; grid-template-columns:repeat(6,minmax(110px,1fr)); gap:.8rem; margin:2rem 0; }
+    .card { border:1px solid var(--border); border-radius:12px; padding:1rem; background:var(--panel); }
+    .card strong { font-size:1.55rem; display:block; }
+    .table-wrap { overflow-x:auto; border:1px solid var(--border); border-radius:12px; }
+    table { width:100%; border-collapse:collapse; min-width:980px; }
+    th { text-align:left; font-size:.78rem; letter-spacing:.04em; text-transform:uppercase; color:var(--muted); background:var(--panel); }
+    th, td { padding:.85rem; border-bottom:1px solid var(--border); vertical-align:top; }
+    tbody tr:last-child td { border-bottom:0; }
+    tbody tr:hover { background:color-mix(in srgb, CanvasText 4%, transparent); }
+    .badge { display:inline-block; border-radius:999px; padding:.2rem .55rem; font-size:.75rem; font-weight:700; text-transform:uppercase; color:white; }
+    .severity-critical { background:var(--critical); } .severity-high { background:var(--high); }
+    .severity-medium { background:var(--medium); } .severity-low { background:var(--low); } .severity-info { background:var(--info); }
+    .status-passed { color:var(--passed); } .status-failed { color:var(--failed); }
+    .status-error { color:var(--error); } .status-skipped { color:var(--skipped); }
+    details { min-width:260px; }
+    summary { cursor:pointer; font-weight:650; }
+    .details-grid { display:grid; grid-template-columns:1fr 1fr; gap:1rem; margin-top:1rem; }
+    .details-grid section { min-width:0; }
+    .wide { grid-column:1 / -1; }
+    code, pre { font-family:ui-monospace, SFMono-Regular, Menlo, monospace; }
+    pre { white-space:pre-wrap; overflow-wrap:anywhere; background:color-mix(in srgb, CanvasText 7%, transparent); padding:.8rem; border-radius:8px; max-height:380px; overflow:auto; }
+    .meta { color:var(--muted); }
+    .tag { border:1px solid var(--border); border-radius:999px; padding:.25rem .65rem; font-size:.8rem; }
+    .filters { display:flex; flex-wrap:wrap; gap:.6rem; margin:0 0 1rem; }
+    .filters input, .filters select, .filters button { padding:.55rem .65rem; border:1px solid var(--border); border-radius:8px; background:var(--bg); color:var(--text); }
+    .filters button { cursor:pointer; }
+    @media (max-width:900px) { .summary { grid-template-columns:repeat(2,1fr); } .details-grid { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>MCP Behaviour Guard</h1>
+      <div class="meta">Run {{ summary.run_id }} · {{ summary.target }}</div>
+      <div class="meta">{{ summary.started_at }} → {{ summary.finished_at }}</div>
+    </div>
+    <span class="tag">deterministic evidence</span>
+  </header>
+
+  <section class="summary">
+    <div class="card"><strong>{{ summary.findings|length }}</strong>checks</div>
+    <div class="card"><strong>{{ counts.critical }}</strong>critical open</div>
+    <div class="card"><strong>{{ counts.high }}</strong>high open</div>
+    <div class="card"><strong>{{ summary.passed }}</strong>passed</div>
+    <div class="card"><strong>{{ summary.failed }}</strong>failed/error</div>
+    <div class="card"><strong>{{ summary.invocations|length }}</strong>tool calls</div>
+  </section>
+
+  <h2>Results</h2>
+  <div class="filters">
+    <input id="search" type="search" placeholder="Filter test, category or title" aria-label="Filter findings">
+    <select id="severity" aria-label="Filter severity">
+      <option value="">All severities</option>
+      <option value="critical">Critical</option><option value="high">High</option>
+      <option value="medium">Medium</option><option value="low">Low</option><option value="info">Info</option>
+    </select>
+    <select id="status" aria-label="Filter status">
+      <option value="">All statuses</option>
+      <option value="failed">Failed</option><option value="error">Error</option>
+      <option value="passed">Passed</option><option value="skipped">Skipped</option>
+    </select>
+    <button id="open-all" type="button">Expand visible</button>
+    <button id="close-all" type="button">Collapse all</button>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Severity</th><th>Status</th><th>Test</th><th>Category</th><th>Result</th><th>Details</th></tr></thead>
+      <tbody id="findings">
+      {% for finding in findings %}
+        <tr data-severity="{{ finding.severity.value }}" data-status="{{ finding.status.value }}" data-search="{{ finding.test_id|lower }} {{ finding.category|lower }} {{ finding.title|lower }}">
+          <td><span class="badge severity-{{ finding.severity.value }}">{{ finding.severity.value }}</span></td>
+          <td><strong class="status-{{ finding.status.value }}">{{ finding.status.value }}</strong></td>
+          <td><code>{{ finding.test_id }}</code></td>
+          <td>{{ finding.category }}</td>
+          <td>{{ finding.title }}</td>
+          <td>
+            <details>
+              <summary>Expand evidence</summary>
+              <div class="details-grid">
+                <section><h4>Expected</h4><pre>{{ finding.expected | tojson(indent=2) }}</pre></section>
+                <section><h4>Observed</h4><pre>{{ finding.observed | tojson(indent=2) }}</pre></section>
+                {% if finding.evidence %}<section class="wide"><h4>Evidence</h4><pre>{{ finding.evidence | tojson(indent=2) }}</pre></section>{% endif %}
+                {% if finding.remediation %}<section class="wide"><h4>Remediation</h4><p>{{ finding.remediation }}</p></section>{% endif %}
+              </div>
+            </details>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</main>
+<script>
+(() => {
+  const search = document.getElementById('search');
+  const severity = document.getElementById('severity');
+  const status = document.getElementById('status');
+  const rows = [...document.querySelectorAll('#findings tr')];
+  const openAll = document.getElementById('open-all');
+  const closeAll = document.getElementById('close-all');
+  const apply = () => {
+    const query = search.value.trim().toLowerCase();
+    rows.forEach(row => {
+      const visible = (!query || row.dataset.search.includes(query)) &&
+        (!severity.value || row.dataset.severity === severity.value) &&
+        (!status.value || row.dataset.status === status.value);
+      row.hidden = !visible;
+    });
+  };
+  [search, severity, status].forEach(control => control.addEventListener('input', apply));
+  openAll.addEventListener('click', () => rows.filter(row => !row.hidden).forEach(row => row.querySelector('details').open = true));
+  closeAll.addEventListener('click', () => rows.forEach(row => row.querySelector('details').open = false));
+})();
+</script>
+</body>
+</html>

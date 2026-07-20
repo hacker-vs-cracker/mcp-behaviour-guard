@@ -1,0 +1,4 @@
+# Ubuntu/Linux example: run at minute 15 every hour.
+# Replace /absolute/path/to/mcp-behaviour-guard and ensure MCP_GUARD_WEBHOOK
+# plus target credentials are loaded from a protected environment file.
+15 * * * * cd /absolute/path/to/mcp-behaviour-guard && . .venv/bin/activate && set -a && . .env && set +a && mcp-guard monitor contracts/http-demo.yaml --once --output reports --database .guard/guard.db >> .guard/monitor.log 2>&1

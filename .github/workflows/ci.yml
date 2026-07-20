@@ -1,0 +1,60 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11.14'
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e '.[dev]'
+      - run: ruff format --check .
+      - run: ruff check .
+      - run: mypy src/mcp_behaviour_guard
+      - run: pytest
+
+  integration-demos:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11.14'
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e .
+      - name: Run STDIO security contract
+        env:
+          DEMO_AGENT_TOKEN: ci-fake-secret
+        run: mcp-guard run contracts/stdio-demo.yaml --lab-mode --no-fail --output reports-stdio --database .guard/stdio.db
+      - name: Start HTTP lab
+        run: docker compose up --build -d --wait
+      - name: Run HTTP security contract
+        run: mcp-guard run contracts/http-demo.yaml --lab-mode --no-fail --output reports-http --database .guard/http.db
+      - name: Verify reports exist
+        run: |
+          test -n "$(find reports-stdio -name index.html -print -quit)"
+          test -n "$(find reports-http -name index.html -print -quit)"
+      - if: always()
+        run: docker compose down -v
+
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          platforms: linux/amd64,linux/arm64

@@ -1,0 +1,57 @@
+services:
+  telemetry:
+    build: .
+    command: ["uvicorn", "demo.telemetry.app:app", "--host", "0.0.0.0", "--port", "8011"]
+    ports:
+      - "127.0.0.1:8011:8011"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8011/healthz')"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+
+  filesystem-watcher:
+    build: .
+    command: ["uvicorn", "demo.watcher.app:app", "--host", "0.0.0.0", "--port", "8012"]
+    environment:
+      WATCH_ROOT: /runtime
+    ports:
+      - "127.0.0.1:8012:8012"
+    volumes:
+      - demo-runtime:/runtime:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8012/healthz')"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+
+  demo-server:
+    build: .
+    command: ["uvicorn", "demo.server.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      TELEMETRY_URL: http://telemetry:8011/collect
+      DEMO_DB_PATH: /data/demo.db
+      DEMO_RUNTIME_PATH: /runtime
+      TENANT_A_TOKEN: tenant-a-token
+      TENANT_B_TOKEN: tenant-b-token
+      READ_ONLY_TOKEN: readonly-token
+      ADMIN_TOKEN: admin-token
+    depends_on:
+      telemetry:
+        condition: service_healthy
+      filesystem-watcher:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - demo-data:/data
+      - demo-runtime:/runtime
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+
+volumes:
+  demo-data:
+  demo-runtime:

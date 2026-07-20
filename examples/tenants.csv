@@ -1,0 +1,6 @@
+tenant,identity,role,credential_env,description,allow_tools,deny_tools
+tenant-a,tenant_a_reader,reader,TENANT_A_READER_TOKEN,Tenant A read-only application user,,
+tenant-a,tenant_a_operator,operator,TENANT_A_OPERATOR_TOKEN,Tenant A operator,,
+tenant-b,tenant_b_reader,reader,TENANT_B_READER_TOKEN,Tenant B read-only application user,,
+tenant-b,tenant_b_operator,operator,TENANT_B_OPERATOR_TOKEN,Tenant B operator,,
+tenant-c,tenant_c_reader,reader,TENANT_C_READER_TOKEN,Tenant C reader with a local exception,set_session_note,get_session_note

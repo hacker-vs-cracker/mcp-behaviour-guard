@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "mcp-behaviour-guard-stdio-demo": {
+      "type": "stdio",
+      "command": "${MCP_GUARD_PYTHON:-python}",
+      "args": [
+        "${CLAUDE_PROJECT_DIR:-.}/demo/stdio_server/app.py"
+      ],
+      "env": {
+        "DEMO_STDIO_ROOT": "${CLAUDE_PROJECT_DIR:-.}/demo_runtime/stdio",
+        "DEMO_STDIO_AUDIT": "${CLAUDE_PROJECT_DIR:-.}/demo_runtime/stdio/audit.jsonl",
+        "DEMO_AGENT_TOKEN": "${DEMO_AGENT_TOKEN}"
+      }
+    }
+  }
+}

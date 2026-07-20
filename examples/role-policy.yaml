@@ -1,0 +1,17 @@
+credential:
+  http_header: Authorization
+  http_prefix: Bearer
+  stdio_env: MCP_GUARD_TOKEN
+
+roles:
+  reader:
+    permitted_tools:
+      - customer_lookup
+      - get_session_note
+
+  operator:
+    permitted_tools:
+      - customer_lookup
+      - customer_update
+      - set_session_note
+      - get_session_note

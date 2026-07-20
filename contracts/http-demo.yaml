@@ -1,0 +1,167 @@
+version: 1
+
+server:
+  name: deliberately-vulnerable-demo
+  transport: streamable-http
+  url: http://127.0.0.1:8000/mcp
+  timeout_seconds: 10
+  verify_tls: false
+  allowed_hosts:
+    - 127.0.0.1
+    - localhost
+
+identities:
+  anonymous:
+    description: No Authorization header.
+
+  invalid_token:
+    headers:
+      Authorization: Bearer definitely-invalid
+
+  tenant_a_user:
+    tenant: tenant-a
+    role: user
+    headers:
+      Authorization: Bearer ${TENANT_A_TOKEN:-tenant-a-token}
+      X-Guard-Session: tenant-a-default
+
+  tenant_b_user:
+    tenant: tenant-b
+    role: user
+    headers:
+      Authorization: Bearer ${TENANT_B_TOKEN:-tenant-b-token}
+      X-Guard-Session: tenant-b-default
+
+  read_only_user:
+    tenant: tenant-a
+    role: read_only
+    headers:
+      Authorization: Bearer ${READ_ONLY_TOKEN:-readonly-token}
+      X-Guard-Session: read-only-default
+
+  administrator:
+    tenant: all
+    role: administrator
+    headers:
+      Authorization: Bearer ${ADMIN_TOKEN:-admin-token}
+      X-Guard-Session: admin-default
+
+tools:
+  customer_lookup:
+    description: Read a customer belonging to the caller's tenant.
+    permitted_identities:
+      - tenant_a_user
+      - tenant_b_user
+      - read_only_user
+      - administrator
+    probe_arguments:
+      customer_id: tenant-a-customer-1
+    side_effect_identity: tenant_a_user
+    read_only: true
+    allowed_network_destinations: []
+    allowed_filesystem_writes: []
+    forbidden_side_effects:
+      - filesystem_write
+    tenant_probes:
+      tenant_a_user:
+        arguments:
+          customer_id: tenant-b-customer-1
+        resource_tenant_path: tenant
+        expected_tenant: tenant-a
+        require_denial: true
+
+  customer_update:
+    description: Administrative customer update with idempotency protection.
+    permitted_identities:
+      - administrator
+    probe_arguments:
+      customer_id: tenant-a-customer-1
+      display_name: Baseline Name
+      operation_id: access-matrix-probe
+    side_effect_identity: administrator
+    read_only: false
+    allowed_network_destinations: []
+    allowed_filesystem_writes: []
+    replay_probe:
+      arguments:
+        customer_id: tenant-a-customer-1
+        display_name: Replay Test Name
+        operation_id: replay-operation-001
+      attempts: 3
+      event_kind: database_write
+      event_tool: customer_update
+      maximum_events: 1
+
+  set_session_note:
+    permitted_identities:
+      - tenant_a_user
+      - tenant_b_user
+      - read_only_user
+      - administrator
+    probe_arguments:
+      note: access-matrix-note
+    side_effect_identity: tenant_a_user
+    allowed_network_destinations: []
+    allowed_filesystem_writes: []
+
+  get_session_note:
+    permitted_identities:
+      - tenant_a_user
+      - tenant_b_user
+      - read_only_user
+      - administrator
+    probe_arguments: {}
+    side_effect_identity: tenant_a_user
+    read_only: true
+    allowed_network_destinations: []
+    allowed_filesystem_writes: []
+
+session_tests:
+  - id: SESSION-ISOLATION-001
+    writer_identity: tenant_a_user
+    reader_identity: tenant_b_user
+    write:
+      tool: set_session_note
+      arguments: {}
+    read:
+      tool: get_session_note
+      arguments: {}
+    marker_argument: note
+    severity: high
+
+observers:
+  server_audit:
+    type: http_audit
+    events_url: http://127.0.0.1:8000/audit/events
+    reset_url: http://127.0.0.1:8000/audit/reset
+
+  telemetry:
+    type: http_audit
+    events_url: http://127.0.0.1:8011/events
+    reset_url: http://127.0.0.1:8011/reset
+
+  filesystem_watcher:
+    type: http_audit
+    events_url: http://127.0.0.1:8012/events
+    reset_url: http://127.0.0.1:8012/reset
+
+safety:
+  destructive_tests: true
+  require_lab_mode: true
+  target_allowlist:
+    - 127.0.0.1
+    - localhost
+
+reports:
+  formats:
+    - json
+    - html
+    - junit
+    - sarif
+
+alerts:
+  enabled: false
+  minimum_severity: high
+  only_new: true
+  # Set with an environment variable in real use:
+  # webhook_url: ${MCP_GUARD_WEBHOOK}

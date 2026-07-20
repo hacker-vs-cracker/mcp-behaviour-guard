@@ -1,0 +1,27 @@
+{
+  "servers": {
+    "mcp-behaviour-guard-stdio-demo": {
+      "type": "stdio",
+      "command": "${workspaceFolder}/.venv/bin/python",
+      "args": [
+        "${workspaceFolder}/demo/stdio_server/app.py"
+      ],
+      "envFile": "${workspaceFolder}/.env",
+      "env": {
+        "DEMO_STDIO_ROOT": "${workspaceFolder}/demo_runtime/stdio",
+        "DEMO_STDIO_AUDIT": "${workspaceFolder}/demo_runtime/stdio/audit.jsonl"
+      },
+      "sandboxEnabled": true
+    }
+  },
+  "sandbox": {
+    "filesystem": {
+      "allowWrite": [
+        "${workspaceFolder}/demo_runtime/stdio"
+      ]
+    },
+    "network": {
+      "allowedDomains": []
+    }
+  }
+}
