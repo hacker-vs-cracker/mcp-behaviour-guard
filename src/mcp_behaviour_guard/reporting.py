@@ -7,6 +7,7 @@ from xml.etree.ElementTree import Element, SubElement, tostring
 
 from jinja2 import Environment, PackageLoader, select_autoescape
 
+from . import __version__
 from .models import Finding, FindingStatus, RunSummary, Severity
 
 _SEVERITY_ORDER = {
@@ -136,7 +137,7 @@ def _sarif(summary: RunSummary) -> dict:
                 "tool": {
                     "driver": {
                         "name": "mcp-behaviour-guard",
-                        "version": "0.2.0",
+                        "version": __version__,
                         "rules": list(rules.values()),
                     }
                 },

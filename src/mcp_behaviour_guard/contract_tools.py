@@ -78,6 +78,19 @@ async def generate_contract_draft(
             "minimum_severity": "high",
             "only_new": True,
         },
+        "temporal_integrity": {
+            "enabled": False,
+            "sessions": 2,
+            "retests_per_session": 5,
+            "rediscover_after_each_call": True,
+            "stop_on_first_drift": True,
+            "monitor_tools": True,
+            "monitor_prompts": True,
+            "monitor_resources": True,
+            "probe_argumentless_prompts": True,
+            "prompt_probes": {},
+            "severity": "high",
+        },
     }
     return _drop_none(payload)
 

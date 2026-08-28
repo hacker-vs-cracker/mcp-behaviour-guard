@@ -4,13 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-behaviour-guard"
-version = "0.2.0"
+version = "0.3.0"
 description = "Deterministic security contract and behavioural regression testing for MCP servers"
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
 license = { file = "LICENSE" }
-authors = [{ name = "Arjun Arjun" }]
-keywords = ["mcp", "security", "appsec", "ai-security", "testing"]
+authors = [{ name = "Arjun" }]
+keywords = ["mcp", "security", "appsec", "mcp-security", "testing"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",

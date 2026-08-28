@@ -19,7 +19,7 @@ make demo-http
 docker compose down -v
 ```
 
-Keep pass/fail rules deterministic. AI-generated suggestions must remain outside the trusted decision path and require normal code review.
+Keep pass/fail rules deterministic. Changes to security checks must remain reviewable and require normal code review.
 
 New checks should include:
 

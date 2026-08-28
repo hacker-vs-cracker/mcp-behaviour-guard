@@ -37,6 +37,25 @@ jobs:
         env:
           DEMO_AGENT_TOKEN: ci-fake-secret
         run: mcp-guard run contracts/stdio-demo.yaml --lab-mode --no-fail --output reports-stdio --database .guard/stdio.db
+      - name: Run temporal metadata-drift demo
+        run: mcp-guard run contracts/temporal-demo.yaml --no-fail --output reports-temporal --database .guard/temporal.db
+      - name: Verify temporal drift was detected after repeated calls
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          reports = list(Path("reports-temporal").glob("*/report.json"))
+          assert len(reports) == 1, f"expected one temporal report, got {len(reports)}"
+          payload = json.loads(reports[0].read_text(encoding="utf-8"))
+          finding = next(
+              item for item in payload["findings"]
+              if item["test_id"] == "TEMPORAL-METADATA-001"
+          )
+          assert finding["status"] == "failed", finding
+          assert finding["severity"] == "high", finding
+          assert finding["observed"]["first_drift"]["after_call"] == 3, finding
+          PY
       - name: Start HTTP lab
         run: docker compose up --build -d --wait
       - name: Run HTTP security contract
@@ -44,6 +63,7 @@ jobs:
       - name: Verify reports exist
         run: |
           test -n "$(find reports-stdio -name index.html -print -quit)"
+          test -n "$(find reports-temporal -name index.html -print -quit)"
           test -n "$(find reports-http -name index.html -print -quit)"
       - if: always()
         run: docker compose down -v

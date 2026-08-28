@@ -15,7 +15,6 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from .ai import OllamaAdvisor, write_suggestions
 from .alerts import send_alerts
 from .baseline import capture_baseline, compare_baselines, load_baseline, write_baseline
 from .client import McpClient
@@ -28,17 +27,23 @@ from .contract_tools import (
     write_yaml,
 )
 from .engine import GuardEngine
+from .host_config import (
+    compare_host_config_snapshots,
+    load_host_config_snapshot,
+    snapshot_host_config,
+    write_host_config_snapshot,
+)
 from .models import IdentitySpec, RunSummary, ServerSpec, Severity
 from .reporting import finding_sort_key, write_reports
 from .storage import RunStore
 
 app = typer.Typer(no_args_is_help=True, help="Deterministic MCP security contract testing.")
 baseline_app = typer.Typer(no_args_is_help=True, help="Capture and compare behaviour baselines.")
-ai_app = typer.Typer(no_args_is_help=True, help="Optional local-AI test suggestions.")
 contract_app = typer.Typer(no_args_is_help=True, help="Generate and compile security contracts.")
+config_app = typer.Typer(no_args_is_help=True, help="Track MCP host configuration provenance.")
 app.add_typer(baseline_app, name="baseline")
-app.add_typer(ai_app, name="ai")
 app.add_typer(contract_app, name="contract")
+app.add_typer(config_app, name="config")
 console = Console()
 
 
@@ -155,9 +160,8 @@ def history(
 @app.command()
 def doctor(
     contract_path: Path | None = typer.Argument(None, exists=True, readable=True),
-    ollama_url: str = typer.Option("http://127.0.0.1:11434"),
 ) -> None:
-    """Check the local runtime and optional services."""
+    """Check the local runtime and configured target."""
     rows: list[tuple[str, str, str]] = []
     py_ok = sys.version_info[:2] == (3, 11)
     rows.append(("Python", platform.python_version(), "ok" if py_ok else "expected 3.11"))
@@ -169,15 +173,6 @@ def doctor(
             "ok" if shutil.which("docker") else "optional/missing",
         )
     )
-
-    try:
-        response = httpx.get(f"{ollama_url.rstrip('/')}/api/tags", timeout=2)
-        response.raise_for_status()
-        models = [item.get("name", "") for item in response.json().get("models", [])]
-        status = "ok" if "llama3.1:8b" in models else "llama3.1:8b not found"
-        rows.append(("Ollama", ", ".join(models[:5]) or "running", status))
-    except Exception as exc:
-        rows.append(("Ollama", str(exc), "optional/unavailable"))
 
     if contract_path:
         try:
@@ -303,6 +298,47 @@ def contract_expand_tenants(
     console.print(f"Expanded contract written: [bold]{output}[/bold]")
 
 
+@config_app.command("snapshot")
+def config_snapshot(
+    config_path: Path = typer.Argument(..., exists=True, readable=True),
+    output: Path = typer.Option(Path("baselines/mcp-host-config.json"), "--output", "-o"),
+    host: str | None = typer.Option(None, "--host"),
+) -> None:
+    """Save a redacted baseline of MCP servers declared by a host configuration."""
+    try:
+        snapshot = snapshot_host_config(config_path, host_label=host)
+    except (ValueError, json.JSONDecodeError) as exc:
+        console.print(f"[red]Host configuration snapshot failed:[/red] {exc}")
+        raise typer.Exit(2) from exc
+    write_host_config_snapshot(snapshot, output)
+    console.print(f"Host config baseline written: [bold]{output}[/bold]")
+    console.print(f"Tracked MCP servers: {len(snapshot.get('servers', {}))}")
+
+
+@config_app.command("check")
+def config_check(
+    config_path: Path = typer.Argument(..., exists=True, readable=True),
+    baseline_path: Path = typer.Argument(..., exists=True, readable=True),
+    output: Path = typer.Option(Path("host-config-diff.json"), "--output", "-o"),
+    host: str | None = typer.Option(None, "--host"),
+    no_fail: bool = typer.Option(False, "--no-fail"),
+) -> None:
+    """Compare current MCP host configuration with a reviewed redacted baseline."""
+    try:
+        approved = load_host_config_snapshot(baseline_path)
+        current = snapshot_host_config(config_path, host_label=host or approved.get("host"))
+        diff = compare_host_config_snapshots(approved, current)
+    except (ValueError, json.JSONDecodeError) as exc:
+        console.print(f"[red]Host configuration check failed:[/red] {exc}")
+        raise typer.Exit(2) from exc
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(diff, indent=2, sort_keys=True), encoding="utf-8")
+    console.print_json(data=diff)
+    if diff["drift_detected"] and not no_fail:
+        raise typer.Exit(1)
+
+
 @baseline_app.command("capture")
 def baseline_capture(
     contract_path: Path = typer.Argument(..., exists=True, readable=True),
@@ -333,27 +369,6 @@ def baseline_compare(
     console.print_json(data=result)
     if result["drift_detected"]:
         raise typer.Exit(1)
-
-
-@ai_app.command("suggest")
-def ai_suggest(
-    contract_path: Path = typer.Argument(..., exists=True, readable=True),
-    output: Path = typer.Option(Path("ai-suggestions.json"), "--output", "-o"),
-    model: str = typer.Option("llama3.1:8b", "--model"),
-    ollama_url: str = typer.Option("http://127.0.0.1:11434", "--ollama-url"),
-) -> None:
-    """Ask a local Ollama model for untrusted candidate test cases."""
-    contract = load_contract(contract_path)
-    validate_target(contract, lab_mode=False)
-    identity_name, identity = next(iter(contract.identities.items()))
-    tools = asyncio.run(McpClient(contract.server, identity_name, identity).list_tools())
-    advisor = OllamaAdvisor(model=model, base_url=ollama_url)
-    payload = asyncio.run(advisor.suggest_tests(contract, tools))
-    write_suggestions(payload, output)
-    console.print(f"Candidate tests written: [bold]{output}[/bold]")
-    console.print(
-        "[yellow]These suggestions are not executed and never affect pass/fail results.[/yellow]"
-    )
 
 
 def _execute_contract(

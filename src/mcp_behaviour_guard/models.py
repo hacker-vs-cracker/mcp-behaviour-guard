@@ -205,6 +205,24 @@ class AlertSpec(BaseModel):
     repeat_after_hours: float | None = Field(default=None, gt=0)
 
 
+class TemporalIntegritySpec(BaseModel):
+    enabled: bool = False
+    identity: str | None = None
+    driver_tool: str | None = None
+    driver_arguments: dict[str, Any] = Field(default_factory=dict)
+    sessions: int = Field(default=2, ge=1, le=10)
+    retests_per_session: int = Field(default=5, ge=1, le=50)
+    delay_between_calls_ms: int = Field(default=0, ge=0, le=60000)
+    rediscover_after_each_call: bool = True
+    stop_on_first_drift: bool = True
+    monitor_tools: bool = True
+    monitor_prompts: bool = True
+    monitor_resources: bool = True
+    probe_argumentless_prompts: bool = True
+    prompt_probes: dict[str, dict[str, str]] = Field(default_factory=dict)
+    severity: Severity = Severity.HIGH
+
+
 class ContractMetadata(BaseModel):
     generated_draft: bool = False
     generated_at: str | None = None
@@ -224,6 +242,7 @@ class Contract(BaseModel):
     safety: SafetySpec = Field(default_factory=SafetySpec)
     reports: ReportSpec = Field(default_factory=ReportSpec)
     alerts: AlertSpec = Field(default_factory=AlertSpec)
+    temporal_integrity: TemporalIntegritySpec = Field(default_factory=TemporalIntegritySpec)
 
     @model_validator(mode="after")
     def references_exist(self) -> Contract:
@@ -256,6 +275,30 @@ class Contract(BaseModel):
                 raise ValueError(f"session test {test.id!r} references an unknown identity")
             if test.write.tool not in tools or test.read.tool not in tools:
                 raise ValueError(f"session test {test.id!r} references an unknown tool")
+
+        temporal = self.temporal_integrity
+        if temporal.enabled:
+            if not temporal.driver_tool:
+                raise ValueError("temporal_integrity.enabled requires driver_tool")
+            if temporal.driver_tool not in tools:
+                raise ValueError(
+                    f"temporal_integrity references unknown driver tool {temporal.driver_tool!r}"
+                )
+            if temporal.identity and temporal.identity not in identities:
+                raise ValueError(
+                    f"temporal_integrity references unknown identity {temporal.identity!r}"
+                )
+            driver_contract = self.tools[temporal.driver_tool]
+            if not driver_contract.read_only:
+                raise ValueError("temporal_integrity driver_tool must be marked read_only: true")
+            if temporal.identity and temporal.identity not in driver_contract.permitted_identities:
+                raise ValueError(
+                    "temporal_integrity identity must be permitted to call the driver tool"
+                )
+            if not (
+                temporal.monitor_tools or temporal.monitor_prompts or temporal.monitor_resources
+            ):
+                raise ValueError("temporal_integrity must monitor at least one metadata family")
 
         return self
 
