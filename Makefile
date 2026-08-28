@@ -1,4 +1,4 @@
-.PHONY: install lint format test demo-up demo-down demo-http demo-stdio run-demo clean
+.PHONY: install lint format test demo-up demo-down demo-http demo-stdio demo-temporal clean
 
 install:
 	python -m pip install -e '.[dev]'
@@ -27,8 +27,9 @@ demo-http:
 demo-stdio:
 	DEMO_AGENT_TOKEN=local-demo-token mcp-guard run contracts/stdio-demo.yaml --lab-mode --no-fail
 
-run-demo: demo-http
+demo-temporal:
+	mcp-guard run contracts/temporal-demo.yaml --no-fail
 
 clean:
-	rm -rf .guard reports reports-http reports-stdio baselines ai-suggestions.json baseline-diff.json
+	rm -rf .guard reports reports-http reports-stdio reports-temporal baselines baseline-diff.json host-config-diff.json
 	find demo_runtime -type f ! -name .gitkeep -delete

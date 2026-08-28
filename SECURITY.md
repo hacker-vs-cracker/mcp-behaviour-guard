@@ -1,6 +1,6 @@
 # Security policy
 
-This project is an alpha security-testing tool. Its deliberately vulnerable HTTP and STDIO demonstrations must never be exposed to untrusted users or production networks.
+This project is an alpha security-testing tool. Its deliberately vulnerable HTTP/STDIO demonstrations and harmless temporal-drift demo must never be exposed to untrusted users or production networks.
 
 Run tests only against MCP servers you own or are explicitly authorized to assess. Use non-production identities and data, review generated contracts, and keep state-changing probes behind the lab-mode gate.
 

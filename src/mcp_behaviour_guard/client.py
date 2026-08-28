@@ -12,7 +12,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
 
-from .models import IdentitySpec, InvocationRecord, ServerSpec
+from .models import IdentitySpec, InvocationRecord, ServerSpec, TemporalIntegritySpec
 
 
 class McpClient:
@@ -22,19 +22,26 @@ class McpClient:
         self.identity = identity
 
     @asynccontextmanager
-    async def session(self) -> AsyncIterator[tuple[ClientSession, str | None]]:
+    async def session(
+        self,
+        notification_sink: list[str] | None = None,
+    ) -> AsyncIterator[tuple[ClientSession, str | None]]:
         if self.server.transport == "streamable-http":
-            async with self._http_session() as current:
+            async with self._http_session(notification_sink) as current:
                 yield current
             return
 
-        async with self._stdio_session() as current:
+        async with self._stdio_session(notification_sink) as current:
             yield current
 
     @asynccontextmanager
-    async def _http_session(self) -> AsyncIterator[tuple[ClientSession, str | None]]:
+    async def _http_session(
+        self,
+        notification_sink: list[str] | None,
+    ) -> AsyncIterator[tuple[ClientSession, str | None]]:
         if not self.server.url:
             raise ValueError("streamable-http target is missing server.url")
+
         timeout = httpx.Timeout(self.server.timeout_seconds)
         async with (
             httpx.AsyncClient(
@@ -47,15 +54,23 @@ class McpClient:
                 self.server.url,
                 http_client=http_client,
             ) as (read_stream, write_stream, get_session_id),
-            ClientSession(read_stream, write_stream) as session,
+            ClientSession(
+                read_stream,
+                write_stream,
+                message_handler=_notification_handler(notification_sink),
+            ) as session,
         ):
             await session.initialize()
             yield session, get_session_id()
 
     @asynccontextmanager
-    async def _stdio_session(self) -> AsyncIterator[tuple[ClientSession, str | None]]:
+    async def _stdio_session(
+        self,
+        notification_sink: list[str] | None,
+    ) -> AsyncIterator[tuple[ClientSession, str | None]]:
         if not self.server.command:
             raise ValueError("stdio target is missing server.command")
+
         environment = dict(os.environ)
         environment.update(self.server.environment)
         environment.update(self.identity.environment)
@@ -73,15 +88,18 @@ class McpClient:
         )
         async with (
             stdio_client(parameters) as (read_stream, write_stream),
-            ClientSession(read_stream, write_stream) as session,
+            ClientSession(
+                read_stream,
+                write_stream,
+                message_handler=_notification_handler(notification_sink),
+            ) as session,
         ):
             await session.initialize()
             yield session, None
 
     async def list_tools(self) -> list[dict[str, Any]]:
         async with self.session() as (session, _):
-            result = await session.list_tools()
-            return [tool.model_dump(mode="json", by_alias=True) for tool in result.tools]
+            return await _list_tools(session)
 
     async def invoke(
         self,
@@ -90,24 +108,51 @@ class McpClient:
         arguments: dict[str, Any],
     ) -> InvocationRecord:
         started = perf_counter()
-        session_id: str | None = None
         try:
-            async with self.session() as (session, current_session_id):
-                session_id = current_session_id
-                result = await session.call_tool(tool, arguments=arguments)
-                response = _normalise_tool_result(result)
-                is_error = bool(getattr(result, "isError", False))
-                return InvocationRecord(
+            async with self.session() as (session, session_id):
+                return await self.invoke_on_session(
+                    session=session,
+                    session_id=session_id,
                     test_id=test_id,
                     tool=tool,
-                    identity=self.identity_name,
                     arguments=arguments,
-                    allowed=not is_error,
-                    response=response,
-                    error="tool returned isError=true" if is_error else None,
-                    duration_ms=(perf_counter() - started) * 1000,
-                    session_id=session_id,
                 )
+        except Exception as exc:
+            return InvocationRecord(
+                test_id=test_id,
+                tool=tool,
+                identity=self.identity_name,
+                arguments=arguments,
+                allowed=False,
+                error=str(exc),
+                duration_ms=(perf_counter() - started) * 1000,
+                session_id=None,
+            )
+
+    async def invoke_on_session(
+        self,
+        session: ClientSession,
+        session_id: str | None,
+        test_id: str,
+        tool: str,
+        arguments: dict[str, Any],
+    ) -> InvocationRecord:
+        started = perf_counter()
+        try:
+            tool_response = await session.call_tool(tool, arguments=arguments)
+            response = _normalise_tool_result(tool_response)
+            is_error = bool(getattr(tool_response, "isError", False))
+            return InvocationRecord(
+                test_id=test_id,
+                tool=tool,
+                identity=self.identity_name,
+                arguments=arguments,
+                allowed=not is_error,
+                response=response,
+                error="tool returned isError=true" if is_error else None,
+                duration_ms=(perf_counter() - started) * 1000,
+                session_id=session_id,
+            )
         except Exception as exc:
             return InvocationRecord(
                 test_id=test_id,
@@ -120,18 +165,139 @@ class McpClient:
                 session_id=session_id,
             )
 
+    async def metadata_snapshot(
+        self,
+        session: ClientSession,
+        temporal: TemporalIntegritySpec,
+    ) -> dict[str, Any]:
+        snapshot: dict[str, Any] = {
+            "tools": {},
+            "prompts": {},
+            "prompt_payloads": {},
+            "resources": {},
+        }
+        capabilities = session.get_server_capabilities()
 
-def _normalise_tool_result(result: Any) -> Any:
-    structured = getattr(result, "structuredContent", None)
+        if temporal.monitor_tools:
+            tools = await _list_tools(session)
+            snapshot["tools"] = _index_metadata(tools, "name")
+
+        prompts_supported = bool(capabilities and getattr(capabilities, "prompts", None))
+        if temporal.monitor_prompts and prompts_supported:
+            prompts = await _list_prompts(session)
+            snapshot["prompts"] = _index_metadata(prompts, "name")
+
+            prompt_probes = dict(temporal.prompt_probes)
+            if temporal.probe_argumentless_prompts:
+                for prompt in prompts:
+                    prompt_name = prompt.get("name")
+                    if not isinstance(prompt_name, str) or prompt_name in prompt_probes:
+                        continue
+                    if not _prompt_requires_arguments(prompt):
+                        prompt_probes[prompt_name] = {}
+
+            for prompt_name, prompt_arguments in prompt_probes.items():
+                try:
+                    prompt_response = await session.get_prompt(
+                        prompt_name,
+                        arguments=prompt_arguments,
+                    )
+                    snapshot["prompt_payloads"][prompt_name] = prompt_response.model_dump(
+                        mode="json",
+                        by_alias=True,
+                        exclude_none=True,
+                    )
+                except Exception as exc:
+                    snapshot["prompt_payloads"][prompt_name] = {
+                        "error": str(exc),
+                        "error_type": type(exc).__name__,
+                    }
+
+        resources_supported = bool(capabilities and getattr(capabilities, "resources", None))
+        if temporal.monitor_resources and resources_supported:
+            resources = await _list_resources(session)
+            snapshot["resources"] = _index_metadata(resources, "uri")
+
+        return snapshot
+
+
+async def _list_tools(session: ClientSession) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    cursor: str | None = None
+    while True:
+        response = await session.list_tools(cursor) if cursor else await session.list_tools()
+        items.extend(
+            tool.model_dump(mode="json", by_alias=True, exclude_none=True)
+            for tool in response.tools
+        )
+        cursor = getattr(response, "nextCursor", None)
+        if not cursor:
+            return items
+
+
+async def _list_prompts(session: ClientSession) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    cursor: str | None = None
+    while True:
+        response = await session.list_prompts(cursor) if cursor else await session.list_prompts()
+        items.extend(
+            prompt.model_dump(mode="json", by_alias=True, exclude_none=True)
+            for prompt in response.prompts
+        )
+        cursor = getattr(response, "nextCursor", None)
+        if not cursor:
+            return items
+
+
+async def _list_resources(session: ClientSession) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    cursor: str | None = None
+    while True:
+        response = (
+            await session.list_resources(cursor) if cursor else await session.list_resources()
+        )
+        items.extend(
+            resource.model_dump(mode="json", by_alias=True, exclude_none=True)
+            for resource in response.resources
+        )
+        cursor = getattr(response, "nextCursor", None)
+        if not cursor:
+            return items
+
+
+def _notification_handler(notification_sink: list[str] | None):
+    async def handle(message: Any) -> None:
+        if notification_sink is None or isinstance(message, Exception):
+            return
+        root = getattr(message, "root", message)
+        method = getattr(root, "method", None)
+        if method:
+            notification_sink.append(str(method))
+
+    return handle
+
+
+def _index_metadata(items: list[dict[str, Any]], key: str) -> dict[str, Any]:
+    indexed: dict[str, Any] = {}
+    for item in items:
+        identifier = item.get(key)
+        if identifier is None:
+            continue
+        indexed[str(identifier)] = item
+    return {name: indexed[name] for name in sorted(indexed)}
+
+
+def _normalise_tool_result(tool_response: Any) -> Any:
+    structured = getattr(tool_response, "structuredContent", None)
     if structured is not None:
         return structured
 
-    content = getattr(result, "content", None)
+    content = getattr(tool_response, "content", None)
     if not content:
         return (
-            result.model_dump(mode="json", by_alias=True)
-            if hasattr(result, "model_dump")
-            else result
+            tool_response.model_dump(mode="json", by_alias=True)
+            if hasattr(tool_response, "model_dump")
+            else tool_response
         )
 
     values: list[Any] = []
@@ -148,3 +314,10 @@ def _normalise_tool_result(result: Any) -> Any:
             values.append(text)
 
     return values[0] if len(values) == 1 else values
+
+
+def _prompt_requires_arguments(prompt: dict[str, Any]) -> bool:
+    arguments = prompt.get("arguments", [])
+    if not isinstance(arguments, list):
+        return False
+    return any(isinstance(item, dict) and item.get("required") is True for item in arguments)

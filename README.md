@@ -1,7 +1,7 @@
 <p align="center">
   <img
     src="docs/images/mcp-behaviour-guard-overview.png"
-    alt="mcp-behaviour-guard workflow showing MCP host connection, contract generation, scheduled security checks, and evidence reporting"
+    alt="mcp-behaviour-guard workflow showing MCP server discovery, human-reviewed contracts, active security checks, and evidence reporting"
     width="100%"
   />
 </p>
@@ -48,8 +48,9 @@ Tool descriptions and input schemas explain what a tool claims to do, but they d
 2. Discover its tools and generate a draft security contract.
 3. Review identities, permissions, tenant rules and permitted side effects.
 4. Run deterministic authorization and behavioural checks.
-5. Repeat scans at a configured interval when monitoring is enabled.
-6. Generate severity-ordered HTML, JSON, JUnit and SARIF evidence.
+5. Optionally re-test the same MCP session and fingerprint tool/prompt/resource metadata for runtime drift.
+6. Repeat scans at a configured interval when monitoring is enabled.
+7. Generate severity-ordered HTML, JSON, JUnit and SARIF evidence.
 
 Contract generation produces a starting point, not an automatically trusted security policy. Authorization rules and permitted side effects must be reviewed by someone who understands the target system.
 
@@ -59,13 +60,15 @@ When explicitly configured in the security contract, the current MVP supports:
 
 * Tool discovery and capability inventory
 * Anonymous and invalid-token access
-* Role-based tool authorization
-* Cross-tenant resource access
+* Identity-based tool authorization, with reusable role policies for tenant expansion
+* Configured cross-tenant resource probes
 * Session and context isolation
-* Undeclared network requests
-* Undeclared filesystem writes
-* Replay and duplicate execution
-* Contract and capability drift
+* Undeclared network requests visible to configured observers
+* Undeclared filesystem writes inside configured observation paths
+* Replay and duplicate-execution tests behind the existing safety gate
+* Tool-inventory and behavioural baseline drift
+* Runtime-gated tool/prompt/resource metadata drift across repeated calls
+* MCP host-configuration provenance and drift checks
 * Scheduled scans and severity-filtered alerts
 
 ## Evidence-first reporting
@@ -113,7 +116,6 @@ Findings are ordered by severity, with critical findings displayed first. Each r
 - macOS or Ubuntu
 - Docker Desktop/Engine with Compose for the HTTP lab
 - No Docker requirement for the basic STDIO lab
-- Ollama is optional
 
 ### Install
 
@@ -144,9 +146,20 @@ mcp-guard doctor contracts/stdio-demo.yaml
 mcp-guard run contracts/stdio-demo.yaml --lab-mode --no-fail
 ```
 
+### Run the temporal-integrity demo
+
+This harmless demo keeps one STDIO session open, makes repeated calls, and changes its own tool/prompt metadata after the third call. It never reads credentials, files or network data.
+
+```bash
+mcp-guard doctor contracts/temporal-demo.yaml
+mcp-guard run contracts/temporal-demo.yaml --no-fail
+```
+
+The expected result is a **high** `TEMPORAL-METADATA-001` finding with the first drift recorded after call 3.
+
 Reports are written to `reports/<run-id>/index.html`.
 
-## How it works
+## Architecture and evidence flow
 
 ```text
 MCP server definition
@@ -282,8 +295,6 @@ The host application is not the scan target; its configured MCP server is. Find 
 
 Generic local example:
 
-Host configuration formats can change. Confirm the command, arguments, environment mapping and transport against the host's current official documentation before scanning.
-
 ```bash
 mcp-guard contract generate \
   --transport stdio \
@@ -295,6 +306,108 @@ mcp-guard contract generate \
 ```
 
 The generated YAML is intentionally editable. Add or remove identities, permitted tools, tenant probes, session tests, replay checks, filesystem paths, network destinations and process allowlists. See [docs/contract-reference.md](docs/contract-reference.md).
+
+## Temporal integrity: catch sleeper-style metadata changes
+
+A server can look harmless during discovery and change the metadata presented to an agent later. `temporal_integrity` keeps a real MCP session open, executes a reviewed driver tool repeatedly, and compares canonical fingerprints of the metadata observed before and after those calls.
+
+```yaml
+temporal_integrity:
+  enabled: true
+  identity: reviewer
+  driver_tool: format_text
+  driver_arguments:
+    text: behaviour-guard-canary
+  sessions: 2
+  retests_per_session: 5
+  rediscover_after_each_call: true
+  monitor_tools: true
+  monitor_prompts: true
+  monitor_resources: false
+  probe_argumentless_prompts: true
+  prompt_probes:
+    assistant_guidance: {}
+  severity: high
+```
+
+`retests_per_session` is user-configurable from 1 to 50. The driver must already exist in the reviewed contract, be permitted for the selected identity, and be marked `read_only: true`; configuration validation rejects a state-changing driver before the scan starts. Tool/prompt list-change notifications are captured as evidence when the server emits them, but detection does not depend on the notification: Behaviour Guard actively re-discovers metadata at the configured checkpoints.
+
+### Real-world pattern: Deadbugz, August 2026
+
+[Pillar Security documented Deadbugz in August 2026](https://www.pillar.security/blog/deadbugz-currently-active-mcp-supply-chain-campaign), an active MCP supply-chain campaign delivered through public GitHub pull requests.
+
+The reviewed campaign combined two useful security lessons:
+
+- MCP configuration changes can introduce a new remote or local server into a developer environment.
+- A server that looks harmless during initial discovery can change the metadata presented to the agent only after normal use.
+
+Pillar reported 23 campaign-related pull requests: 17 introduced a remote MCP configuration, four referenced a hidden local Python artifact, and two were directory or listing submissions. The `productivity-suite` MCP server initially exposed ordinary formatting and summarization behaviour. After three normal tool calls, subsequent `tools/list` and `prompts/get` responses changed and began presenting credential-seeking instructions to the attached agent.
+
+MCP Behaviour Guard v0.3 addresses the observable security boundaries in that pattern:
+
+| Deadbugz behaviour | Behaviour Guard v0.3 |
+|---|---|
+| PR adds or changes an MCP server definition | Approved host-configuration snapshots can flag added, removed or structurally changed MCP servers |
+| Server initially exposes benign metadata | Initial tool, prompt and resource metadata is fingerprinted |
+| Trigger depends on repeated normal use | `sessions` and `retests_per_session` control repeated same-session testing |
+| `tools/list` changes after the trigger | Tool metadata drift is detected deterministically |
+| `prompts/get` content changes after the trigger | Configured prompt payloads are fingerprinted and compared |
+| MCP advertises list-change events | Tool/prompt list-change notifications are retained as supporting evidence |
+| Changed metadata appears only after call three | The included inert demo raises `TEMPORAL-METADATA-001` after the third call |
+
+The validated local demonstration deliberately reproduces the **timing and metadata-drift technique**, not Deadbugz's credential-seeking payload. It uses a harmless `format_text` call. After call three, Behaviour Guard observed a changed `format_text` tool definition and changed `assistant_guidance` prompt payload, captured both tool and prompt list-change notifications, and raised a **high** `TEMPORAL-METADATA-001` finding with no execution errors.
+
+
+<p align="center">
+  <img src="docs/images/temporal-report.png"
+       alt="MCP Behaviour Guard temporal integrity report detecting metadata drift after the third call"
+       width="82%" />
+</p>
+
+<p align="center">
+  <em>Harmless temporal demo: tool and prompt metadata changed after call three and was raised as a High finding.</em>
+</p>
+
+<p align="center">
+  <img src="docs/images/temporal-shell.png"
+       alt="Terminal evidence for MCP Behaviour Guard temporal metadata integrity test"
+       width="76%" />
+</p>
+
+The host-configuration provenance check was also validated independently: an unchanged approved configuration produced no drift, while adding a second MCP server and changing a host sandbox control produced a deterministic configuration-drift result. Credential-like test values were not copied into the generated baseline or diff evidence.
+
+
+<p align="center">
+  <img src="docs/images/config-provenance-drift.png"
+       alt="MCP Behaviour Guard detecting an added MCP server and changed host controls"
+       width="76%" />
+</p>
+
+<p align="center">
+  <em>Configuration provenance: the reviewed baseline stayed clean; adding another MCP server and changing a host control produced drift.</em>
+</p>
+
+This is detection of observed configuration or metadata integrity violations, not a claim that Behaviour Guard universally prevents Deadbugz or proves a server is safe. A new MCP server is a review event rather than automatic proof of malware, and downstream agent actions still depend on the host application's own permission and runtime controls.
+
+A finite retest count is not proof that a sleeper server is clean. Activation could depend on a larger call count, elapsed time, client fingerprint, identity or probability. Scheduled scans and independent runtime controls still matter. See [docs/temporal-integrity.md](docs/temporal-integrity.md) for the evidence model and limits.
+
+## MCP host-configuration provenance
+
+Behaviour Guard can also baseline MCP server definitions in JSON/JSONC/common JSON5-style host configuration and flag added, removed or changed entries. The snapshot covers the launch fields it understands directly (endpoint, command, arguments, working directory, environment and headers) and also fingerprints additional per-server controls such as enablement, sandbox flags, OAuth/TLS settings, timeouts and tool filters. VS Code-style top-level `sandbox` and `inputs` controls are fingerprinted too. Credential-like values are redacted, while other non-structural strings in those extra controls are hashed rather than copied verbatim.
+
+```bash
+# Keep the reviewed snapshot in a tracked, review-protected path for CI.
+mkdir -p policy
+mcp-guard config snapshot .vscode/mcp.json \
+  --host "VS Code" \
+  --output policy/vscode-mcp.json
+
+# Later, or in CI. Exit code 1 means the MCP configuration drifted.
+mcp-guard config check .vscode/mcp.json policy/vscode-mcp.json \
+  --output host-config-diff.json
+```
+
+The configuration check is provenance/drift detection, not malware analysis. A new server is a review event, not automatically a malicious finding. In CI, protect the approved snapshot with normal code-review controls (for example CODEOWNERS or branch protection); a drift check cannot help if the same untrusted change can silently replace both the MCP configuration and its approved baseline.
 
 ## Large multi-tenant environments
 
@@ -335,7 +448,7 @@ Or run on an interval:
 mcp-guard monitor contracts/production.yaml --interval 3600
 ```
 
-Interval monitoring reloads the reviewed contract and reruns its checks. It does not automatically generate, modify or approve a new security contract.
+Finding fingerprints suppress repeated alerts unless a configured repeat interval is reached. Interval monitoring reloads the reviewed contract and reruns its checks; it does not automatically approve a newly generated contract.
 
 ## Similar solutions and where this fits
 
@@ -345,23 +458,11 @@ The tools below have overlapping but different published goals. This table is a 
 |---|---|---|
 | [Snyk Agent Scan](https://github.com/snyk/agent-scan) | Inventory and scanning of agent configurations, MCP servers and skills for threats including prompt injection, tool poisoning, toxic flows and malware payloads. | Useful for discovering installed components and content/configuration risk. Behaviour Guard adds a human-defined contract and controlled identity, tenant, session, side-effect and replay checks. |
 | [Trail of Bits MCP Context Protector](https://github.com/trailofbits/mcp-context-protector) | Runtime wrapper with configuration pinning, tool-response guardrails/quarantine and control-character sanitization. | Useful as a live protective wrapper. Behaviour Guard is an on-demand/CI regression harness and is not a runtime enforcement gateway. |
-| [LastMile AI mcp-eval](https://github.com/lastmile-ai/mcp-eval) | Evaluation of MCP servers and the agents that use them through real environment execution, assertions and observability. | Useful for quality, reliability and agent-behaviour evaluation. Behaviour Guard narrows its objective to declared security boundaries and evidence-backed violations. |
 | **MCP Behaviour Guard** | Contract-driven tests for authorization, tenant/session isolation, declared side effects, replay/idempotency and behavioural drift. | Intended to complement scanners, wrappers, protocol tests and evaluation frameworks rather than replace them. |
 
-Detailed source notes and the comparison date are maintained in [docs/comparison-sources.md](docs/comparison-sources.md).
+Detailed source notes and the comparison date are maintained in [docs/comparison-sources.md](docs/comparison-sources.md). This is a scope comparison, not a detection benchmark.
 
-## AI role
-
-An LLM is **not required**. Optional Ollama support can suggest additional tests or summarize confirmed evidence:
-
-```bash
-mcp-guard ai suggest contracts/http-demo.yaml \
-  --model llama3.1:8b \
-  --output ai-suggestions.json
-```
-
-AI suggestions are not executed automatically and do not determine pass/fail, severity, authorization, side effects, or evidence validity.
-
+## Safety and limitations
 ## Safety and limitations
 
 - Run only against MCP servers you own or are explicitly authorized to test.
@@ -369,20 +470,25 @@ AI suggestions are not executed automatically and do not determine pass/fail, se
 - The project is an MVP, not a complete MCP security platform.
 - Contract generation cannot infer the organisation's true authorization policy.
 - Side-effect detection is limited to configured observers; it is not arbitrary OS-wide syscall monitoring.
+- Temporal integrity uses a finite number of calls and sessions; it can detect observed drift but cannot prove that no delayed or conditional activation exists.
+- Host-config provenance detects definition changes; it does not determine whether a newly added server or pull request is malicious.
 - The harness tests MCP servers directly. It does not claim to security-test all behaviour of VS Code, GitHub Copilot, Claude Code, OpenClaw, Cursor, Windsurf or Gemini CLI themselves.
 - No comparative detection benchmark against the projects above has been performed.
+- v0.3.0 remains pinned to `mcp==1.28.1`; MCP Python SDK 2.x / protocol 2026-07-28 has not been integration-tested by this release. Its subscription-based change-notification path needs a deliberate migration rather than a blind dependency bump.
 
 ## Future work
 
 - Local contract editor UI with field explanations, validation and safe defaults
-- Automatic import from common agent MCP configuration files
+- Automatic import from common agent MCP configuration files into draft contracts
 - OAuth and delegated-authorization test flows
+- MCP Python SDK 2.x / protocol 2026-07-28 migration, including `subscriptions/listen` handling for list-change notifications
 - Legacy HTTP+SSE compatibility where required, plus additional transports supported by specific hosts or SDKs
 - OpenTelemetry, proxy, DNS and portable OS-level observers
 - Approval-token replay and argument-after-approval tests
 - Property-based schema-valid probes and stronger fixture management
 - Multi-server and multi-agent workflow contracts
 - Taint/provenance tracking and richer behavioural baselines
+- Cross-server/tool-shadowing tests that include host/agent context
 - GitHub/GitLab templates and vendor-specific alert adapters
 - Historical evidence search and dashboards
 - Agent-to-MCP proxy monitoring
@@ -394,6 +500,7 @@ make format
 make lint
 make test
 make demo-stdio
+make demo-temporal
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and [docs/threat-model.md](docs/threat-model.md).

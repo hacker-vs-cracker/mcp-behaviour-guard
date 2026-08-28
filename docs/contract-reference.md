@@ -164,3 +164,48 @@ alerts:
 - `allowed_stdio_commands`: allows only named local executables.
 
 Replay tests run only when `destructive_tests` is true and the CLI receives `--lab-mode`.
+
+
+## `temporal_integrity`
+
+Temporal integrity is disabled unless explicitly configured. It is intended for servers whose metadata may change after initial discovery.
+
+```yaml
+temporal_integrity:
+  enabled: true
+  identity: reviewer
+  driver_tool: format_text
+  driver_arguments:
+    text: behaviour-guard-canary
+  sessions: 2
+  retests_per_session: 5
+  delay_between_calls_ms: 0
+  rediscover_after_each_call: true
+  stop_on_first_drift: true
+  monitor_tools: true
+  monitor_prompts: true
+  monitor_resources: false
+  probe_argumentless_prompts: true
+  prompt_probes:
+    assistant_guidance: {}
+  severity: high
+```
+
+- `driver_tool`: reviewed tool used to advance the runtime gate. It must be marked `read_only: true` in `tools` and be permitted for the selected identity.
+- `retests_per_session`: number of repeated calls in one MCP session; allowed range is 1-50.
+- `sessions`: independent sessions to run; allowed range is 1-10.
+- `rediscover_after_each_call`: compare metadata after every driver call rather than only at the end.
+- `prompt_probes`: optional `prompts/get` calls included in the fingerprint.
+- `stop_on_first_drift`: stop once the first reproducible drift checkpoint is written.
+
+State-changing tools are not valid temporal drivers. The existing destructive-test/lab-mode gate still applies to replay and other state-changing checks elsewhere in the contract. A finite number of temporal calls cannot prove that a server has no delayed, probabilistic or client-specific trigger.
+
+## MCP host configuration provenance
+
+```bash
+mkdir -p policy
+mcp-guard config snapshot .vscode/mcp.json --output policy/vscode-mcp.json
+mcp-guard config check .vscode/mcp.json policy/vscode-mcp.json
+```
+
+Snapshots keep server transport, endpoint/command, arguments, working directory and redacted environment/header structure. Additional server controls are retained as privacy-preserving fingerprints so changes to fields such as enablement, sandboxing, OAuth/TLS, timeouts and tool filters are not silently ignored. VS Code-style top-level `sandbox` and `inputs` blocks are fingerprinted as host controls. JSON, JSON-with-comments and common JSON5-style host configuration syntax are accepted. A drift result means the definition changed and needs review; it is not a malware verdict.

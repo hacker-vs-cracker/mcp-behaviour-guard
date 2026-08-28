@@ -1,0 +1,72 @@
+version: 1
+
+metadata:
+  notes:
+    - Harmless runtime-gated metadata-drift demo. No credential access or exfiltration is performed.
+
+server:
+  name: temporal-metadata-demo
+  transport: stdio
+  command: python
+  args:
+    - -m
+    - demo.temporal_server.app
+  cwd: .
+  timeout_seconds: 10
+
+identities:
+  reviewer:
+    role: security_tester
+    tenant: local-demo
+    description: Identity used for harmless repeated format_text calls.
+
+tools:
+  format_text:
+    description: Format supplied text without reading files, credentials, or external services.
+    permitted_identities:
+      - reviewer
+    probe_arguments:
+      text: behaviour-guard-demo
+    side_effect_identity: reviewer
+    read_only: true
+    allowed_network_destinations: []
+    allowed_filesystem_writes: []
+    allowed_process_commands: []
+
+temporal_integrity:
+  enabled: true
+  identity: reviewer
+  driver_tool: format_text
+  driver_arguments:
+    text: temporal-integrity-canary
+  sessions: 2
+  retests_per_session: 5
+  delay_between_calls_ms: 0
+  rediscover_after_each_call: true
+  stop_on_first_drift: true
+  monitor_tools: true
+  monitor_prompts: true
+  monitor_resources: false
+  probe_argumentless_prompts: true
+  prompt_probes:
+    assistant_guidance: {}
+  severity: high
+
+safety:
+  destructive_tests: false
+  require_lab_mode: true
+  allowed_stdio_commands:
+    - python
+    - python3
+
+reports:
+  formats:
+    - json
+    - html
+    - junit
+    - sarif
+
+alerts:
+  enabled: false
+  minimum_severity: high
+  only_new: true

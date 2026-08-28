@@ -26,6 +26,7 @@ from .models import (
 )
 from .observers import Observer, SideEffectEvent, build_observer
 from .storage import RunStore
+from .temporal import compact_drift_summary, compare_metadata_snapshots, metadata_fingerprint
 from .util import get_path, matches_any, stable_hash, utc_now
 
 
@@ -66,6 +67,7 @@ class GuardEngine:
 
         discovered = await self._discover_tools()
         await self._check_inventory(discovered)
+        await self._check_temporal_integrity()
         await self._check_access_matrix()
         await self._check_tool_side_effects()
         await self._check_tenant_isolation()
@@ -111,6 +113,220 @@ class GuardEngine:
             )
         )
         return []
+
+    async def _check_temporal_integrity(self) -> None:
+        temporal = self.contract.temporal_integrity
+        if not temporal.enabled:
+            return
+
+        driver_name = temporal.driver_tool
+        if not driver_name:
+            return
+        driver_contract = self.contract.tools[driver_name]
+        test_id = "TEMPORAL-METADATA-001"
+        if not self._tool_invocation_enabled(driver_contract):
+            self._add_finding(self._lab_skip(test_id, "temporal_integrity", driver_name))
+            return
+
+        identity_name = temporal.identity or _first(driver_contract.permitted_identities)
+        if not identity_name:
+            self._add_finding(
+                Finding(
+                    test_id=test_id,
+                    category="temporal_integrity",
+                    title="MCP metadata stays stable during repeated use",
+                    status=FindingStatus.ERROR,
+                    severity=Severity.HIGH,
+                    expected="a permitted identity for the temporal driver tool",
+                    observed="no identity was available",
+                )
+            )
+            return
+
+        identity = self.contract.identities[identity_name]
+        temporal_dir = self.run_dir / "temporal"
+        temporal_dir.mkdir(parents=True, exist_ok=True)
+
+        reference_snapshot: dict[str, Any] | None = None
+        first_drift: dict[str, Any] | None = None
+        invocation_errors: list[dict[str, Any]] = []
+        notification_log: list[dict[str, Any]] = []
+        checkpoints = 0
+        stop_requested = False
+
+        for session_number in range(1, temporal.sessions + 1):
+            notifications: list[str] = []
+            client = McpClient(self.contract.server, identity_name, identity)
+            try:
+                async with client.session(notification_sink=notifications) as (session, session_id):
+                    initial_snapshot = await client.metadata_snapshot(session, temporal)
+                    if reference_snapshot is None:
+                        reference_snapshot = initial_snapshot
+
+                    checkpoint_path = temporal_dir / f"session-{session_number:02d}-initial.json"
+                    _write_json(
+                        checkpoint_path,
+                        {
+                            "session": session_number,
+                            "checkpoint": "initial",
+                            "fingerprint": metadata_fingerprint(initial_snapshot),
+                            "snapshot": initial_snapshot,
+                        },
+                    )
+                    checkpoints += 1
+
+                    initial_diff = compare_metadata_snapshots(reference_snapshot, initial_snapshot)
+                    if initial_diff["drift_detected"] and first_drift is None:
+                        first_drift = {
+                            "session": session_number,
+                            "after_call": 0,
+                            "summary": compact_drift_summary(initial_diff),
+                            "diff_file": str(
+                                (
+                                    temporal_dir / f"session-{session_number:02d}-initial-diff.json"
+                                ).relative_to(self.run_dir)
+                            ),
+                        }
+                        _write_json(
+                            temporal_dir / f"session-{session_number:02d}-initial-diff.json",
+                            initial_diff,
+                        )
+                        if temporal.stop_on_first_drift:
+                            stop_requested = True
+
+                    if stop_requested:
+                        notification_log.append(
+                            {"session": session_number, "notifications": list(notifications)}
+                        )
+                        break
+
+                    for call_number in range(1, temporal.retests_per_session + 1):
+                        invocation = await client.invoke_on_session(
+                            session=session,
+                            session_id=session_id,
+                            test_id=f"{test_id}-S{session_number:02d}-C{call_number:02d}",
+                            tool=driver_name,
+                            arguments=temporal.driver_arguments,
+                        )
+                        self._record_invocation(invocation)
+                        if not invocation.allowed:
+                            invocation_errors.append(
+                                {
+                                    "session": session_number,
+                                    "call": call_number,
+                                    "error": invocation.error,
+                                }
+                            )
+                            break
+
+                        should_snapshot = temporal.rediscover_after_each_call or (
+                            call_number == temporal.retests_per_session
+                        )
+                        if should_snapshot:
+                            current_snapshot = await client.metadata_snapshot(session, temporal)
+                            diff = compare_metadata_snapshots(reference_snapshot, current_snapshot)
+                            snapshot_path = (
+                                temporal_dir
+                                / f"session-{session_number:02d}-after-{call_number:02d}.json"
+                            )
+                            _write_json(
+                                snapshot_path,
+                                {
+                                    "session": session_number,
+                                    "after_call": call_number,
+                                    "fingerprint": metadata_fingerprint(current_snapshot),
+                                    "notifications": list(notifications),
+                                    "snapshot": current_snapshot,
+                                },
+                            )
+                            checkpoints += 1
+
+                            if diff["drift_detected"]:
+                                diff_path = (
+                                    temporal_dir
+                                    / f"session-{session_number:02d}-after-{call_number:02d}-diff.json"
+                                )
+                                _write_json(diff_path, diff)
+                                if first_drift is None:
+                                    first_drift = {
+                                        "session": session_number,
+                                        "after_call": call_number,
+                                        "summary": compact_drift_summary(diff),
+                                        "diff_file": str(diff_path.relative_to(self.run_dir)),
+                                    }
+                                if temporal.stop_on_first_drift:
+                                    stop_requested = True
+                                    break
+
+                        if temporal.delay_between_calls_ms:
+                            await asyncio.sleep(temporal.delay_between_calls_ms / 1000)
+
+                    notification_log.append(
+                        {"session": session_number, "notifications": list(notifications)}
+                    )
+            except Exception as exc:
+                invocation_errors.append(
+                    {
+                        "session": session_number,
+                        "call": None,
+                        "error": str(exc),
+                        "error_type": type(exc).__name__,
+                    }
+                )
+
+            if stop_requested:
+                break
+
+        if reference_snapshot is None:
+            status = FindingStatus.ERROR
+            severity = Severity.HIGH
+        elif first_drift is not None:
+            status = FindingStatus.FAILED
+            severity = temporal.severity
+        elif invocation_errors:
+            status = FindingStatus.ERROR
+            severity = Severity.MEDIUM
+        else:
+            status = FindingStatus.PASSED
+            severity = Severity.INFO
+
+        self._add_finding(
+            Finding(
+                test_id=test_id,
+                category="temporal_integrity",
+                title="MCP metadata stays stable during repeated use",
+                status=status,
+                severity=severity,
+                expected={
+                    "metadata_drift": False,
+                    "driver_tool": driver_name,
+                    "sessions": temporal.sessions,
+                    "retests_per_session": temporal.retests_per_session,
+                    "monitored": {
+                        "tools": temporal.monitor_tools,
+                        "prompts": temporal.monitor_prompts,
+                        "resources": temporal.monitor_resources,
+                    },
+                },
+                observed={
+                    "metadata_drift": first_drift is not None,
+                    "first_drift": first_drift,
+                    "checkpoints_written": checkpoints,
+                    "list_change_notifications": notification_log,
+                    "errors": invocation_errors,
+                },
+                evidence={
+                    "temporal_snapshots": str(temporal_dir.relative_to(self.run_dir)),
+                    "trace": self._trace_reference(),
+                },
+                remediation=(
+                    "Treat changed tool, prompt or resource metadata as a new approval event. "
+                    "Pin reviewed definitions and investigate the server or configuration source."
+                    if first_drift is not None
+                    else None
+                ),
+            )
+        )
 
     async def _check_inventory(self, discovered: list[dict[str, Any]]) -> None:
         actual: set[str] = {
@@ -564,11 +780,14 @@ class GuardEngine:
     ) -> InvocationRecord:
         client = McpClient(self.contract.server, identity_name, identity)
         invocation = await client.invoke(test_id, tool, arguments)
+        self._record_invocation(invocation)
+        return invocation
+
+    def _record_invocation(self, invocation: InvocationRecord) -> None:
         self.invocations.append(invocation)
         self.store.add_invocation(self.run_id, invocation)
         with self.trace_path.open("a", encoding="utf-8") as handle:
             handle.write(invocation.model_dump_json() + "\n")
-        return invocation
 
     async def _begin_observers(self) -> None:
         await asyncio.gather(*(observer.begin() for observer in self.observers))
@@ -583,6 +802,11 @@ class GuardEngine:
 
     def _trace_reference(self) -> str:
         return str(self.trace_path.relative_to(self.run_dir))
+
+
+def _write_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str), encoding="utf-8")
 
 
 def _side_effect_violations(
