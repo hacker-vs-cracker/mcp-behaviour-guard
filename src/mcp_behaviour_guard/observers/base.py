@@ -15,6 +15,7 @@ class SideEffectEvent:
 
 class Observer(Protocol):
     name: str
+    observes: set[SideEffectKind]
 
     async def begin(self) -> None:
         """Reset or snapshot the observer before a tool call."""

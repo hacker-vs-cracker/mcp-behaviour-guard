@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.0.dev0 (unreleased development patch)
+- Distinguish confirmed denials from failed connections and generic tool errors.
+- Require a working positive control before a negative authorization check passes.
+- Report observer outages and zero-effect replay runs as inconclusive.
+- Do not start replay or state-changing behaviour probes when required observers fail to start.
+- Omit raw invocation arguments and responses from exported traces and reports.
+- Expose the contract runner to Python callers and add a separate CLI runner image.
+- Keep MCP SDK v2 migration and PyPI publishing out of this patch.
+
 ## 0.3.0
 
 - Removed the optional suggestion command and its external suggestion-service probe from the CLI.

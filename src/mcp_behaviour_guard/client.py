@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from collections.abc import AsyncIterator
@@ -12,7 +13,14 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
 
-from .models import IdentitySpec, InvocationRecord, ServerSpec, TemporalIntegritySpec
+from .models import (
+    AuthorizationStatus,
+    ExecutionStatus,
+    IdentitySpec,
+    InvocationRecord,
+    ServerSpec,
+    TemporalIntegritySpec,
+)
 
 
 class McpClient:
@@ -20,6 +28,7 @@ class McpClient:
         self.server = server
         self.identity_name = identity_name
         self.identity = identity
+        self.protocol_version: str | None = None
 
     @asynccontextmanager
     async def session(
@@ -60,7 +69,8 @@ class McpClient:
                 message_handler=_notification_handler(notification_sink),
             ) as session,
         ):
-            await session.initialize()
+            initialised = await session.initialize()
+            self.protocol_version = str(getattr(initialised, "protocolVersion", "unknown"))
             yield session, get_session_id()
 
     @asynccontextmanager
@@ -94,7 +104,8 @@ class McpClient:
                 message_handler=_notification_handler(notification_sink),
             ) as session,
         ):
-            await session.initialize()
+            initialised = await session.initialize()
+            self.protocol_version = str(getattr(initialised, "protocolVersion", "unknown"))
             yield session, None
 
     async def list_tools(self) -> list[dict[str, Any]]:
@@ -106,6 +117,7 @@ class McpClient:
         test_id: str,
         tool: str,
         arguments: dict[str, Any],
+        denial_error_markers: list[str] | None = None,
     ) -> InvocationRecord:
         started = perf_counter()
         try:
@@ -116,6 +128,7 @@ class McpClient:
                     test_id=test_id,
                     tool=tool,
                     arguments=arguments,
+                    denial_error_markers=denial_error_markers,
                 )
         except Exception as exc:
             return InvocationRecord(
@@ -123,10 +136,14 @@ class McpClient:
                 tool=tool,
                 identity=self.identity_name,
                 arguments=arguments,
-                allowed=False,
+                allowed=None,
+                authorization=AuthorizationStatus.UNKNOWN,
+                execution=_exception_execution(exc),
                 error=str(exc),
                 duration_ms=(perf_counter() - started) * 1000,
                 session_id=None,
+                protocol_version=self.protocol_version,
+                transport=self.server.transport,
             )
 
     async def invoke_on_session(
@@ -136,22 +153,34 @@ class McpClient:
         test_id: str,
         tool: str,
         arguments: dict[str, Any],
+        denial_error_markers: list[str] | None = None,
     ) -> InvocationRecord:
         started = perf_counter()
         try:
             tool_response = await session.call_tool(tool, arguments=arguments)
             response = _normalise_tool_result(tool_response)
             is_error = bool(getattr(tool_response, "isError", False))
+            denied = is_error and _matches_denial_marker(response, denial_error_markers or [])
             return InvocationRecord(
                 test_id=test_id,
                 tool=tool,
                 identity=self.identity_name,
                 arguments=arguments,
-                allowed=not is_error,
+                allowed=False if denied else None if is_error else True,
+                authorization=(
+                    AuthorizationStatus.DENY
+                    if denied
+                    else AuthorizationStatus.UNKNOWN
+                    if is_error
+                    else AuthorizationStatus.ALLOW
+                ),
+                execution=ExecutionStatus.REJECTED if is_error else ExecutionStatus.SUCCEEDED,
                 response=response,
                 error="tool returned isError=true" if is_error else None,
                 duration_ms=(perf_counter() - started) * 1000,
                 session_id=session_id,
+                protocol_version=self.protocol_version,
+                transport=self.server.transport,
             )
         except Exception as exc:
             return InvocationRecord(
@@ -159,10 +188,14 @@ class McpClient:
                 tool=tool,
                 identity=self.identity_name,
                 arguments=arguments,
-                allowed=False,
+                allowed=None,
+                authorization=AuthorizationStatus.UNKNOWN,
+                execution=_exception_execution(exc),
                 error=str(exc),
                 duration_ms=(perf_counter() - started) * 1000,
                 session_id=session_id,
+                protocol_version=self.protocol_version,
+                transport=self.server.transport,
             )
 
     async def metadata_snapshot(
@@ -321,3 +354,18 @@ def _prompt_requires_arguments(prompt: dict[str, Any]) -> bool:
     if not isinstance(arguments, list):
         return False
     return any(isinstance(item, dict) and item.get("required") is True for item in arguments)
+
+
+def _matches_denial_marker(response: Any, markers: list[str]) -> bool:
+    if not markers:
+        return False
+    text = json.dumps(response, sort_keys=True, default=str).casefold()
+    return any(marker.strip() and marker.casefold() in text for marker in markers)
+
+
+def _exception_execution(exc: Exception) -> ExecutionStatus:
+    return (
+        ExecutionStatus.TIMEOUT
+        if isinstance(exc, (TimeoutError, asyncio.TimeoutError, httpx.TimeoutException))
+        else ExecutionStatus.FAILED
+    )

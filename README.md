@@ -159,6 +159,25 @@ The expected result is a **high** `TEMPORAL-METADATA-001` finding with the first
 
 Reports are written to `reports/<run-id>/index.html`.
 
+The local development patch is not published to PyPI. Its [evidence status guide](docs/evidence-status.md) explains why a denied result needs a positive control and why an observer outage is inconclusive. For direct Python use:
+
+```python
+import asyncio
+from mcp_behaviour_guard import run_contract
+
+result = asyncio.run(run_contract("contracts/stdio-demo.yaml", lab_mode=True))
+print(result.summary.assessment.value, result.run_dir)
+```
+
+For a runner image separate from the deliberately vulnerable Docker demo:
+
+```bash
+docker build -f Dockerfile.runner -t mcp-guard-runner:dev .
+docker run --rm -v "$PWD:/work" mcp-guard-runner:dev run contracts/stdio-demo.yaml --lab-mode --no-fail
+```
+
+The container can reach only mounted files and networks available from its runtime. This demo mounts the checkout read-write because the STDIO lab writes controlled fixtures under `demo_runtime/stdio`; do not use an unrestricted read-write source checkout mount for production runner jobs. The demo's original `Dockerfile` and Compose setup remain unchanged.
+
 ## Architecture and evidence flow
 
 ```text
@@ -474,7 +493,7 @@ Detailed source notes and the comparison date are maintained in [docs/comparison
 - Host-config provenance detects definition changes; it does not determine whether a newly added server or pull request is malicious.
 - The harness tests MCP servers directly. It does not claim to security-test all behaviour of VS Code, GitHub Copilot, Claude Code, OpenClaw, Cursor, Windsurf or Gemini CLI themselves.
 - No comparative detection benchmark against the projects above has been performed.
-- v0.3.0 remains pinned to `mcp==1.28.1`; MCP Python SDK 2.x / protocol 2026-07-28 has not been integration-tested by this release. Its subscription-based change-notification path needs a deliberate migration rather than a blind dependency bump.
+- This development patch remains pinned to `mcp==1.28.1`; MCP Python SDK 2.x / protocol 2026-07-28 has not been integration-tested. The `2026-07-28` protocol removes protocol-level HTTP sessions, so the temporal state model needs compatibility testing before migration.
 
 ## Future work
 

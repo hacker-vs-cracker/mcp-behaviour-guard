@@ -11,6 +11,7 @@ class JsonlAuditObserver:
     def __init__(self, name: str, spec: JsonlAuditObserverSpec) -> None:
         self.name = name
         self.spec = spec
+        self.observes = set(spec.observes)
         self._offset = 0
 
     async def begin(self) -> None:
@@ -25,7 +26,7 @@ class JsonlAuditObserver:
     async def collect(self) -> list[SideEffectEvent]:
         path = self.spec.path
         if not path.exists():
-            return []
+            raise FileNotFoundError(f"audit file disappeared during observation: {path}")
 
         events: list[SideEffectEvent] = []
         with path.open("r", encoding="utf-8") as handle:
@@ -46,15 +47,5 @@ class JsonlAuditObserver:
                         )
                     )
                 except (KeyError, ValueError, json.JSONDecodeError) as exc:
-                    events.append(
-                        SideEffectEvent(
-                            observer=self.name,
-                            kind=SideEffectKind.FILESYSTEM_WRITE,
-                            details={
-                                "path": str(path),
-                                "parse_error": str(exc),
-                                "line_number": line_number,
-                            },
-                        )
-                    )
+                    raise ValueError(f"invalid audit event at line {line_number}: {exc}") from exc
         return events

@@ -4,7 +4,14 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 
 class Severity(StrEnum):
@@ -20,6 +27,37 @@ class FindingStatus(StrEnum):
     FAILED = "failed"
     ERROR = "error"
     SKIPPED = "skipped"
+
+
+class AuthorizationStatus(StrEnum):
+    ALLOW = "allow"
+    DENY = "deny"
+    UNKNOWN = "unknown"
+    NOT_APPLICABLE = "not_applicable"
+
+
+class ExecutionStatus(StrEnum):
+    SUCCEEDED = "succeeded"
+    REJECTED = "rejected"
+    FAILED = "failed"
+    TIMEOUT = "timeout"
+    NOT_ATTEMPTED = "not_attempted"
+    UNKNOWN = "unknown"
+
+
+class ObservationStatus(StrEnum):
+    COMPLETE = "complete"
+    PARTIAL = "partial"
+    UNAVAILABLE = "unavailable"
+    NOT_REQUIRED = "not_required"
+
+
+class AssessmentStatus(StrEnum):
+    # Bandit B105 false positive: assessment status, not a credential.
+    PASS = "pass"  # nosec B105
+    FAIL = "fail"
+    INCONCLUSIVE = "inconclusive"
+    NOT_TESTED = "not_tested"
 
 
 class SideEffectKind(StrEnum):
@@ -80,6 +118,13 @@ class ReplayProbe(BaseModel):
     event_kind: SideEffectKind = SideEffectKind.DATABASE_WRITE
     event_tool: str | None = None
     maximum_events: int = Field(default=1, ge=0)
+    minimum_events: int = Field(default=1, ge=1)
+
+    @model_validator(mode="after")
+    def required_effect_is_within_limit(self) -> ReplayProbe:
+        if self.minimum_events > self.maximum_events:
+            raise ValueError("replay minimum_events cannot exceed maximum_events")
+        return self
 
 
 class DeniedCheck(BaseModel):
@@ -121,6 +166,7 @@ class ToolContract(BaseModel):
     description: str | None = None
     permitted_identities: list[str]
     probe_arguments: dict[str, Any] = Field(default_factory=dict)
+    denial_error_markers: list[str] = Field(default_factory=list)
     side_effect_identity: str | None = None
     read_only: bool = False
     approval_required: bool = False
@@ -160,18 +206,33 @@ class HttpAuditObserverSpec(BaseModel):
     events_url: str
     reset_url: str
     timeout_seconds: float = Field(default=5, gt=0, le=60)
+    observes: list[SideEffectKind] = Field(default_factory=list)
 
 
 class FilesystemObserverSpec(BaseModel):
     type: Literal["filesystem"]
     roots: list[Path]
     ignore: list[str] = Field(default_factory=lambda: [".DS_Store", "*.tmp"])
+    observes: list[SideEffectKind] = Field(
+        default_factory=lambda: [SideEffectKind.FILESYSTEM_WRITE]
+    )
+
+    @field_validator("observes")
+    @classmethod
+    def filesystem_coverage_is_fixed(
+        cls,
+        value: list[SideEffectKind],
+    ) -> list[SideEffectKind]:
+        if value != [SideEffectKind.FILESYSTEM_WRITE]:
+            raise ValueError("filesystem observers can only observe filesystem_write")
+        return value
 
 
 class JsonlAuditObserverSpec(BaseModel):
     type: Literal["jsonl_audit"]
     path: Path
     truncate_on_begin: bool = True
+    observes: list[SideEffectKind] = Field(default_factory=list)
 
 
 ObserverSpec = HttpAuditObserverSpec | FilesystemObserverSpec | JsonlAuditObserverSpec
@@ -308,11 +369,23 @@ class InvocationRecord(BaseModel):
     tool: str
     identity: str
     arguments: dict[str, Any]
-    allowed: bool
+    allowed: bool | None
+    authorization: AuthorizationStatus = AuthorizationStatus.UNKNOWN
+    execution: ExecutionStatus = ExecutionStatus.NOT_ATTEMPTED
     response: Any = None
     error: str | None = None
     duration_ms: float
     session_id: str | None = None
+    protocol_version: str | None = None
+    transport: str | None = None
+
+    @model_validator(mode="after")
+    def preserve_legacy_success_records(self) -> InvocationRecord:
+        if self.allowed is True and self.authorization == AuthorizationStatus.UNKNOWN:
+            self.authorization = AuthorizationStatus.ALLOW
+        if self.allowed is True and self.execution == ExecutionStatus.NOT_ATTEMPTED:
+            self.execution = ExecutionStatus.SUCCEEDED
+        return self
 
 
 class Finding(BaseModel):
@@ -325,9 +398,11 @@ class Finding(BaseModel):
     observed: Any
     evidence: dict[str, Any] = Field(default_factory=dict)
     remediation: str | None = None
+    observation: ObservationStatus = ObservationStatus.NOT_REQUIRED
 
 
 class RunSummary(BaseModel):
+    schema_version: int = 2
     run_id: str
     target: str
     contract_path: str
@@ -335,6 +410,27 @@ class RunSummary(BaseModel):
     finished_at: str
     findings: list[Finding]
     invocations: list[InvocationRecord]
+    transport: str | None = None
+    sdk_version: str | None = None
+    state_strategy: str | None = None
+
+    @property
+    def assessment(self) -> AssessmentStatus:
+        if any(item.status == FindingStatus.FAILED for item in self.findings):
+            return AssessmentStatus.FAIL
+        if any(item.status == FindingStatus.ERROR for item in self.findings):
+            return AssessmentStatus.INCONCLUSIVE
+        if any(item.status == FindingStatus.SKIPPED for item in self.findings):
+            return AssessmentStatus.NOT_TESTED
+        if not any(item.status == FindingStatus.PASSED for item in self.findings):
+            return AssessmentStatus.NOT_TESTED
+        return AssessmentStatus.PASS
+
+    @model_serializer(mode="wrap")
+    def include_assessment(self, handler: Any) -> dict[str, Any]:
+        result: dict[str, Any] = handler(self)
+        result["assessment"] = self.assessment.value
+        return result
 
     @property
     def failed(self) -> int:

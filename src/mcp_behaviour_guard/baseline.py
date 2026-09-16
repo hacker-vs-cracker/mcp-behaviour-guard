@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .client import McpClient
+from .evidence import contract_secrets, redact
 from .models import Contract
 from .observers import build_observer
 from .util import response_shape, stable_hash, utc_now
@@ -51,6 +52,7 @@ async def capture_baseline(contract: Contract, lab_mode: bool = False) -> dict[s
         "tools": tool_map,
         "probes": probes,
     }
+    payload = redact(payload, contract_secrets(contract))
     payload["fingerprint"] = stable_hash(payload)
     return payload
 

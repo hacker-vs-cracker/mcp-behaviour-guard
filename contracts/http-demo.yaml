@@ -56,6 +56,8 @@ tools:
       - administrator
     probe_arguments:
       customer_id: tenant-a-customer-1
+    denial_error_markers:
+      - authentication required
     side_effect_identity: tenant_a_user
     read_only: true
     allowed_network_destinations: []
@@ -78,6 +80,8 @@ tools:
       customer_id: tenant-a-customer-1
       display_name: Baseline Name
       operation_id: access-matrix-probe
+    denial_error_markers:
+      - authentication required
     side_effect_identity: administrator
     read_only: false
     allowed_network_destinations: []
@@ -100,6 +104,8 @@ tools:
       - administrator
     probe_arguments:
       note: access-matrix-note
+    denial_error_markers:
+      - authentication required
     side_effect_identity: tenant_a_user
     allowed_network_destinations: []
     allowed_filesystem_writes: []
@@ -111,6 +117,8 @@ tools:
       - read_only_user
       - administrator
     probe_arguments: {}
+    denial_error_markers:
+      - authentication required
     side_effect_identity: tenant_a_user
     read_only: true
     allowed_network_destinations: []
@@ -134,16 +142,22 @@ observers:
     type: http_audit
     events_url: http://127.0.0.1:8000/audit/events
     reset_url: http://127.0.0.1:8000/audit/reset
+    observes:
+      - database_write
 
   telemetry:
     type: http_audit
     events_url: http://127.0.0.1:8011/events
     reset_url: http://127.0.0.1:8011/reset
+    observes:
+      - network_request
 
   filesystem_watcher:
     type: http_audit
     events_url: http://127.0.0.1:8012/events
     reset_url: http://127.0.0.1:8012/reset
+    observes:
+      - filesystem_write
 
 safety:
   destructive_tests: true
