@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.4.0.dev0 (unreleased development patch)
+## 0.4.0 - 2026-09-16
 - Distinguish confirmed denials from failed connections and generic tool errors.
 - Require a working positive control before a negative authorization check passes.
 - Report observer outages and zero-effect replay runs as inconclusive.
