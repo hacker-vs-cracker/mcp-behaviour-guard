@@ -6,7 +6,7 @@ from datetime import UTC
 from pathlib import Path
 from typing import Any
 
-from .models import Finding, InvocationRecord, RunSummary
+from .models import AssessmentStatus, Finding, InvocationRecord, RunSummary
 from .util import utc_now
 
 
@@ -104,7 +104,7 @@ class RunStore:
                 invocation.test_id,
                 invocation.tool,
                 invocation.identity,
-                int(invocation.allowed),
+                int(invocation.allowed is True),
                 invocation.duration_ms,
                 invocation.model_dump_json(),
                 utc_now(),
@@ -132,7 +132,13 @@ class RunStore:
         self.connection.commit()
 
     def finish_run(self, summary: RunSummary) -> None:
-        status = "failed" if summary.failed else "passed"
+        status = (
+            "failed"
+            if summary.assessment == AssessmentStatus.FAIL
+            else "passed"
+            if summary.assessment == AssessmentStatus.PASS
+            else summary.assessment.value
+        )
         self.connection.execute(
             """
             UPDATE runs

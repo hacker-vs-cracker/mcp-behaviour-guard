@@ -12,6 +12,7 @@ class HttpAuditObserver:
     def __init__(self, name: str, spec: HttpAuditObserverSpec) -> None:
         self.name = name
         self.spec = spec
+        self.observes = set(spec.observes)
 
     async def begin(self) -> None:
         async with httpx.AsyncClient(timeout=self.spec.timeout_seconds) as client:
@@ -24,20 +25,23 @@ class HttpAuditObserver:
             response.raise_for_status()
             payload = response.json()
 
-        raw_events: list[dict[str, Any]]
+        raw_events: Any
         if isinstance(payload, dict):
-            raw_events = payload.get("events", [])
+            raw_events = payload.get("events")
         elif isinstance(payload, list):
             raw_events = payload
         else:
-            raw_events = []
+            raise ValueError(f"observer {self.name} returned an invalid event payload")
+        if not isinstance(raw_events, list):
+            raise ValueError(f"observer {self.name} did not return an events list")
 
         events: list[SideEffectEvent] = []
         for raw in raw_events:
-            kind_value = raw.get("kind", SideEffectKind.NETWORK_REQUEST.value)
+            if not isinstance(raw, dict) or "kind" not in raw:
+                raise ValueError(f"observer {self.name} returned an event without a kind")
             try:
-                kind = SideEffectKind(kind_value)
-            except ValueError:
-                continue
+                kind = SideEffectKind(raw["kind"])
+            except ValueError as exc:
+                raise ValueError(f"observer {self.name} returned an unknown event kind") from exc
             events.append(SideEffectEvent(observer=self.name, kind=kind, details=raw))
         return events

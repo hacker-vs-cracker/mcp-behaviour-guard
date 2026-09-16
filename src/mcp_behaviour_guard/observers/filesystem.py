@@ -11,6 +11,7 @@ class FilesystemObserver:
     def __init__(self, name: str, spec: FilesystemObserverSpec) -> None:
         self.name = name
         self.spec = spec
+        self.observes = set(spec.observes)
         self._before: dict[str, tuple[int, str]] = {}
 
     async def begin(self) -> None:
@@ -34,13 +35,21 @@ class FilesystemObserver:
                     },
                 )
             )
+        for path in self._before.keys() - after.keys():
+            events.append(
+                SideEffectEvent(
+                    observer=self.name,
+                    kind=SideEffectKind.FILESYSTEM_WRITE,
+                    details={"path": path, "operation": "deleted"},
+                )
+            )
         return events
 
     def _snapshot(self) -> dict[str, tuple[int, str]]:
         snapshot: dict[str, tuple[int, str]] = {}
         for root in self.spec.roots:
             if not root.exists():
-                continue
+                raise FileNotFoundError(f"filesystem observation root is missing: {root}")
             for path in root.rglob("*"):
                 if not path.is_file() or self._ignored(path.name):
                     continue

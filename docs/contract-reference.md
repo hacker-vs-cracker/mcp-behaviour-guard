@@ -45,6 +45,7 @@ Values support `${NAME}` and `${NAME:-default}` expansion. Do not commit real to
 
 - `permitted_identities`: identities expected to invoke the tool successfully.
 - `probe_arguments`: safe schema-valid input used by access and behaviour probes.
+- `denial_error_markers`: optional case-insensitive phrases in a tool error that the contract identifies as a denial. An `isError` result alone is not a denial. Prefer a documented structured denial code when the server provides one. A phrase can also appear in a business or validation error, so review it against the target and run a permitted positive control.
 - `side_effect_identity`: permitted identity used for side-effect observation.
 - `read_only`: prohibits observed filesystem, database, process and messaging writes.
 - `allowed_network_destinations`: glob patterns matched against observer destinations.
@@ -54,6 +55,8 @@ Values support `${NAME}` and `${NAME:-default}` expansion. Do not commit real to
 - `tenant_probes`: identity-specific cross-tenant inputs.
 - `policy_probes`: custom deterministic response/security checks.
 - `replay_probe`: concurrent duplicate-call configuration.
+
+Replay probes require at least one observed effect (`minimum_events`, default 1) and enforce `maximum_events` (default 1). No observed effect is inconclusive, not proof of idempotency.
 
 Supported side-effect kinds:
 

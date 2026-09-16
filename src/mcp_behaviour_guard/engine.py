@@ -5,17 +5,21 @@ import json
 import os
 import uuid
 from dataclasses import asdict
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
 from .client import McpClient
+from .evidence import contract_secrets, redact
 from .models import (
+    AuthorizationStatus,
     Contract,
     DeniedCheck,
     Finding,
     FindingStatus,
     IdentitySpec,
     InvocationRecord,
+    ObservationStatus,
     PathWithinCheck,
     ResponseNotContainsCheck,
     ResponseNotContainsEnvCheck,
@@ -52,6 +56,9 @@ class GuardEngine:
         self.observers: list[Observer] = [
             build_observer(name, spec) for name, spec in contract.observers.items()
         ]
+        self._discovery_ok = False
+        self._positive_controls: dict[str, bool] = {}
+        self._secrets = contract_secrets(contract)
 
     async def run(self) -> RunSummary:
         started_at = utc_now()
@@ -83,6 +90,11 @@ class GuardEngine:
             finished_at=utc_now(),
             findings=self.findings,
             invocations=self.invocations,
+            transport=self.contract.server.transport,
+            sdk_version=_mcp_sdk_version(),
+            state_strategy="legacy_session"
+            if self.contract.server.transport == "streamable-http"
+            else "stdio_process",
         )
         self.store.finish_run(summary)
         return summary
@@ -93,8 +105,10 @@ class GuardEngine:
             try:
                 client = McpClient(self.contract.server, identity_name, identity)
                 tools = await client.list_tools()
+                self._discovery_ok = True
                 (self.run_dir / "tool-inventory.json").write_text(
-                    json.dumps(tools, indent=2, sort_keys=True), encoding="utf-8"
+                    json.dumps(redact(tools, self._secrets), indent=2, sort_keys=True),
+                    encoding="utf-8",
                 )
                 return tools
             except Exception as exc:  # discovery fallback should try all declared identities
@@ -107,7 +121,7 @@ class GuardEngine:
                 title="MCP tool discovery completed",
                 status=FindingStatus.ERROR,
                 severity=Severity.HIGH,
-                expected="at least one identity can initialize and list tools",
+                expected="at least one identity can connect and list tools",
                 observed=message,
                 remediation="Check the MCP URL, authentication headers, TLS settings and server logs.",
             )
@@ -172,6 +186,7 @@ class GuardEngine:
                             "fingerprint": metadata_fingerprint(initial_snapshot),
                             "snapshot": initial_snapshot,
                         },
+                        self._secrets,
                     )
                     checkpoints += 1
 
@@ -190,6 +205,7 @@ class GuardEngine:
                         _write_json(
                             temporal_dir / f"session-{session_number:02d}-initial-diff.json",
                             initial_diff,
+                            self._secrets,
                         )
                         if temporal.stop_on_first_drift:
                             stop_requested = True
@@ -209,7 +225,7 @@ class GuardEngine:
                             arguments=temporal.driver_arguments,
                         )
                         self._record_invocation(invocation)
-                        if not invocation.allowed:
+                        if invocation.allowed is not True:
                             invocation_errors.append(
                                 {
                                     "session": session_number,
@@ -238,6 +254,7 @@ class GuardEngine:
                                     "notifications": list(notifications),
                                     "snapshot": current_snapshot,
                                 },
+                                self._secrets,
                             )
                             checkpoints += 1
 
@@ -246,7 +263,7 @@ class GuardEngine:
                                     temporal_dir
                                     / f"session-{session_number:02d}-after-{call_number:02d}-diff.json"
                                 )
-                                _write_json(diff_path, diff)
+                                _write_json(diff_path, diff, self._secrets)
                                 if first_drift is None:
                                     first_drift = {
                                         "session": session_number,
@@ -335,7 +352,13 @@ class GuardEngine:
         expected = set(self.contract.tools)
         missing = sorted(expected - actual)
         unexpected = sorted(actual - expected)
-        status = FindingStatus.PASSED if not missing and not unexpected else FindingStatus.FAILED
+        status = (
+            FindingStatus.ERROR
+            if not self._discovery_ok
+            else FindingStatus.PASSED
+            if not missing and not unexpected
+            else FindingStatus.FAILED
+        )
         severity = Severity.INFO if status == FindingStatus.PASSED else Severity.HIGH
         self._add_finding(
             Finding(
@@ -366,7 +389,14 @@ class GuardEngine:
                     test_id = f"AUTH-{tool_name}-{identity_name}".upper().replace("_", "-")
                     self._add_finding(self._lab_skip(test_id, "authorization", tool_name))
                 continue
-            for identity_name, identity in self.contract.identities.items():
+            # Run an allowed identity first. A negative result is not evidence if
+            # the target or its credentials cannot complete a positive call.
+            ordered = sorted(
+                self.contract.identities.items(),
+                key=lambda item: item[0] not in tool.permitted_identities,
+            )
+            positive = False
+            for identity_name, identity in ordered:
                 test_id = f"AUTH-{tool_name}-{identity_name}".upper().replace("_", "-")
                 invocation = await self._invoke(
                     test_id,
@@ -376,10 +406,16 @@ class GuardEngine:
                     tool.probe_arguments,
                 )
                 expected_allowed = identity_name in tool.permitted_identities
-                passed = invocation.allowed == expected_allowed
+                if expected_allowed and invocation.authorization == AuthorizationStatus.ALLOW:
+                    positive = True
+                status = _authorization_assessment(invocation, expected_allowed, positive)
                 severity = (
-                    Severity.CRITICAL
-                    if invocation.allowed and not expected_allowed
+                    Severity.INFO
+                    if status == FindingStatus.PASSED
+                    else Severity.CRITICAL
+                    if invocation.allowed is True and not expected_allowed
+                    else Severity.MEDIUM
+                    if status == FindingStatus.ERROR
                     else Severity.HIGH
                 )
                 self._add_finding(
@@ -387,25 +423,50 @@ class GuardEngine:
                         test_id=test_id,
                         category="authorization",
                         title=f"{identity_name} access to {tool_name} follows the contract",
-                        status=FindingStatus.PASSED if passed else FindingStatus.FAILED,
-                        severity=Severity.INFO if passed else severity,
+                        status=status,
+                        severity=severity,
                         expected={"allowed": expected_allowed},
                         observed={
                             "allowed": invocation.allowed,
+                            "authorization": invocation.authorization.value,
+                            "execution": invocation.execution.value,
+                            "positive_control": positive,
                             "error": invocation.error,
                             "response": invocation.response,
                         },
                         evidence={"trace": self._trace_reference()},
                         remediation=(
                             "Enforce authorization at the server boundary and again inside sensitive tool handlers."
-                            if not passed
+                            if status == FindingStatus.FAILED
                             else None
                         ),
                     )
                 )
+            self._positive_controls[tool_name] = positive
 
     async def _check_tool_side_effects(self) -> None:
         if not self.observers:
+            for tool_name, tool in self.contract.tools.items():
+                if not (
+                    tool.read_only
+                    or tool.forbidden_side_effects
+                    or tool.allowed_network_destinations
+                    or tool.allowed_filesystem_writes
+                    or tool.allowed_process_commands
+                ):
+                    continue
+                self._add_finding(
+                    Finding(
+                        test_id=f"BEHAVIOUR-{tool_name}".upper().replace("_", "-"),
+                        category="runtime_behaviour",
+                        title=f"Side effects for {tool_name} cannot be observed",
+                        status=FindingStatus.ERROR,
+                        severity=Severity.MEDIUM,
+                        expected="an independent effect observer",
+                        observed="no observers were configured",
+                        observation=ObservationStatus.UNAVAILABLE,
+                    )
+                )
             return
 
         for tool_name, tool in self.contract.tools.items():
@@ -418,7 +479,25 @@ class GuardEngine:
                 continue
             identity = self.contract.identities[identity_name]
 
-            await self._begin_observers()
+            required_kinds = _required_effect_kinds(tool)
+            begin_errors = await self._begin_observers()
+            begin_observation = self._observer_coverage(begin_errors, required_kinds)
+            if begin_observation == ObservationStatus.UNAVAILABLE or (
+                not tool.read_only and begin_observation != ObservationStatus.COMPLETE
+            ):
+                self._add_finding(
+                    Finding(
+                        test_id=test_id,
+                        category="runtime_behaviour",
+                        title=f"Runtime side effects for {tool_name} could not be checked",
+                        status=FindingStatus.ERROR,
+                        severity=Severity.MEDIUM,
+                        expected="working effect observers before the probe runs",
+                        observed={"probe_executed": False, "observer_errors": begin_errors},
+                        observation=begin_observation,
+                    )
+                )
+                continue
             invocation = await self._invoke(
                 test_id,
                 identity_name,
@@ -426,43 +505,61 @@ class GuardEngine:
                 tool_name,
                 tool.probe_arguments,
             )
-            events = await self._collect_observers()
+            events, observation, observer_errors = await self._collect_observers(
+                begin_errors, required_kinds
+            )
             violations = _side_effect_violations(tool, events)
 
-            if not invocation.allowed:
+            if violations:
+                status = FindingStatus.FAILED
+            elif invocation.allowed is not True or observation != ObservationStatus.COMPLETE:
+                status = FindingStatus.ERROR
+            else:
+                status = FindingStatus.PASSED
+
+            if status == FindingStatus.ERROR:
                 self._add_finding(
                     Finding(
                         test_id=test_id,
                         category="runtime_behaviour",
                         title=f"Runtime side effects for {tool_name} were observed",
-                        status=FindingStatus.ERROR,
+                        status=status,
                         severity=Severity.MEDIUM,
                         expected="a successful probe call",
-                        observed={"error": invocation.error, "events": _event_dicts(events)},
+                        observed={
+                            "error": invocation.error,
+                            "events": _event_dicts(events),
+                            "observer_errors": observer_errors,
+                        },
                         evidence={"trace": self._trace_reference()},
+                        observation=observation,
                     )
                 )
                 continue
 
-            passed = not violations
             self._add_finding(
                 Finding(
                     test_id=test_id,
                     category="runtime_behaviour",
                     title=f"{tool_name} performs only declared side effects",
-                    status=FindingStatus.PASSED if passed else FindingStatus.FAILED,
-                    severity=Severity.INFO if passed else Severity.HIGH,
+                    status=status,
+                    severity=Severity.INFO if status == FindingStatus.PASSED else Severity.HIGH,
                     expected={
                         "read_only": tool.read_only,
                         "allowed_network_destinations": tool.allowed_network_destinations,
                         "allowed_filesystem_writes": tool.allowed_filesystem_writes,
                         "forbidden_side_effects": [x.value for x in tool.forbidden_side_effects],
                     },
-                    observed={"events": _event_dicts(events), "violations": violations},
+                    observed={
+                        "events": _event_dicts(events),
+                        "violations": violations,
+                        "observer_errors": observer_errors,
+                    },
                     evidence={"trace": self._trace_reference()},
+                    observation=observation,
                     remediation=(
                         "Remove undeclared actions or explicitly constrain and document the required destinations and paths."
-                        if not passed
+                        if status == FindingStatus.FAILED
                         else None
                     ),
                 )
@@ -488,23 +585,43 @@ class GuardEngine:
                 observed_tenant = get_path(invocation.response, probe.resource_tenant_path)
                 expected_tenant = probe.expected_tenant or identity.tenant
 
-                violation = invocation.allowed and (
+                violation = invocation.allowed is True and (
                     probe.require_denial
                     or (expected_tenant is not None and observed_tenant != expected_tenant)
                 )
+                if violation:
+                    status = FindingStatus.FAILED
+                elif probe.require_denial:
+                    confirmed_denial = (
+                        invocation.authorization == AuthorizationStatus.DENY
+                        and self._positive_controls.get(tool_name, False)
+                    )
+                    status = FindingStatus.PASSED if confirmed_denial else FindingStatus.ERROR
+                else:
+                    status = (
+                        FindingStatus.PASSED if invocation.allowed is True else FindingStatus.ERROR
+                    )
+                inconclusive = status == FindingStatus.ERROR
                 self._add_finding(
                     Finding(
                         test_id=test_id,
                         category="tenant_isolation",
                         title=f"{tool_name} enforces the {identity_name} tenant boundary",
-                        status=FindingStatus.FAILED if violation else FindingStatus.PASSED,
-                        severity=Severity.CRITICAL if violation else Severity.INFO,
+                        status=status,
+                        severity=Severity.CRITICAL
+                        if violation
+                        else Severity.MEDIUM
+                        if inconclusive
+                        else Severity.INFO,
                         expected={
                             "denied": probe.require_denial,
                             "resource_tenant": expected_tenant,
                         },
                         observed={
                             "allowed": invocation.allowed,
+                            "authorization": invocation.authorization.value,
+                            "execution": invocation.execution.value,
+                            "positive_control": self._positive_controls.get(tool_name, False),
                             "resource_tenant": observed_tenant,
                             "response": invocation.response,
                             "error": invocation.error,
@@ -536,8 +653,11 @@ class GuardEngine:
                 violations: list[dict[str, Any]] = []
                 for check in probe.checks:
                     if isinstance(check, DeniedCheck):
-                        if invocation.allowed:
+                        if invocation.allowed is True:
                             violations.append({"check": check.type, "reason": "call was allowed"})
+                    elif invocation.allowed is not True:
+                        # Response checks apply to a successful response, not to a denial.
+                        continue
                     elif isinstance(check, PathWithinCheck):
                         raw_path = get_path(invocation.response, check.response_path)
                         if not _path_is_within(raw_path, check.roots):
@@ -580,16 +700,20 @@ class GuardEngine:
                                 }
                             )
 
-                errored = not invocation.allowed and not any(
-                    isinstance(check, DeniedCheck) for check in probe.checks
-                )
-                status = (
-                    FindingStatus.ERROR
-                    if errored
-                    else FindingStatus.FAILED
-                    if violations
-                    else FindingStatus.PASSED
-                )
+                denial_expected = any(isinstance(check, DeniedCheck) for check in probe.checks)
+                if violations:
+                    status = FindingStatus.FAILED
+                elif denial_expected:
+                    confirmed_denial = (
+                        invocation.authorization == AuthorizationStatus.DENY
+                        and self._positive_controls.get(tool_name, False)
+                    )
+                    status = FindingStatus.PASSED if confirmed_denial else FindingStatus.ERROR
+                else:
+                    status = (
+                        FindingStatus.PASSED if invocation.allowed is True else FindingStatus.ERROR
+                    )
+                errored = status == FindingStatus.ERROR
                 self._add_finding(
                     Finding(
                         test_id=probe.id,
@@ -607,6 +731,8 @@ class GuardEngine:
                         },
                         observed={
                             "allowed": invocation.allowed,
+                            "authorization": invocation.authorization.value,
+                            "execution": invocation.execution.value,
                             "response": invocation.response,
                             "error": invocation.error,
                             "violations": violations,
@@ -651,7 +777,7 @@ class GuardEngine:
                 test.read.arguments,
             )
             leaked = marker in json.dumps(read_invocation.response, default=str)
-            errored = not write_invocation.allowed or not read_invocation.allowed
+            errored = write_invocation.allowed is not True or read_invocation.allowed is not True
             status = (
                 FindingStatus.ERROR
                 if errored
@@ -675,6 +801,8 @@ class GuardEngine:
                         "marker_leaked": leaked,
                         "writer_allowed": write_invocation.allowed,
                         "reader_allowed": read_invocation.allowed,
+                        "writer_execution": write_invocation.execution.value,
+                        "reader_execution": read_invocation.execution.value,
                         "reader_response": read_invocation.response,
                     },
                     evidence={"trace": self._trace_reference()},
@@ -714,14 +842,47 @@ class GuardEngine:
             if not identity_name:
                 continue
             identity = self.contract.identities[identity_name]
-            await self._begin_observers()
+            if not self.observers:
+                self._add_finding(
+                    Finding(
+                        test_id=test_id,
+                        category="replay",
+                        title=f"Duplicate execution protection for {tool_name}",
+                        status=FindingStatus.ERROR,
+                        severity=Severity.MEDIUM,
+                        expected="at least one configured effect observer",
+                        observed="no effect observers were configured",
+                        observation=ObservationStatus.UNAVAILABLE,
+                    )
+                )
+                continue
+
+            required_kinds = {probe.event_kind}
+            begin_errors = await self._begin_observers()
+            begin_observation = self._observer_coverage(begin_errors, required_kinds)
+            if begin_observation != ObservationStatus.COMPLETE:
+                self._add_finding(
+                    Finding(
+                        test_id=test_id,
+                        category="replay",
+                        title=f"Duplicate execution protection for {tool_name} could not be checked",
+                        status=FindingStatus.ERROR,
+                        severity=Severity.MEDIUM,
+                        expected="working effect observers before replay begins",
+                        observed={"probe_executed": False, "observer_errors": begin_errors},
+                        observation=begin_observation,
+                    )
+                )
+                continue
             invocations = await asyncio.gather(
                 *[
                     self._invoke(test_id, identity_name, identity, tool_name, probe.arguments)
                     for _ in range(probe.attempts)
                 ]
             )
-            events = await self._collect_observers()
+            events, observation, observer_errors = await self._collect_observers(
+                begin_errors, required_kinds
+            )
             event_tool = probe.event_tool or tool_name
             matching = [
                 event
@@ -729,21 +890,40 @@ class GuardEngine:
                 if event.kind == probe.event_kind and event.details.get("tool") == event_tool
             ]
             duplicate = len(matching) > probe.maximum_events
+            successful = sum(item.allowed is True for item in invocations)
+            status = (
+                FindingStatus.FAILED
+                if duplicate
+                else FindingStatus.ERROR
+                if successful == 0
+                or len(matching) < probe.minimum_events
+                or observation != ObservationStatus.COMPLETE
+                else FindingStatus.PASSED
+            )
             self._add_finding(
                 Finding(
                     test_id=test_id,
                     category="replay",
                     title=f"{tool_name} is idempotent under concurrent duplicate requests",
-                    status=FindingStatus.FAILED if duplicate else FindingStatus.PASSED,
-                    severity=Severity.HIGH if duplicate else Severity.INFO,
-                    expected={"maximum_side_effects": probe.maximum_events},
+                    status=status,
+                    severity=Severity.HIGH
+                    if duplicate
+                    else Severity.MEDIUM
+                    if status == FindingStatus.ERROR
+                    else Severity.INFO,
+                    expected={
+                        "minimum_side_effects": probe.minimum_events,
+                        "maximum_side_effects": probe.maximum_events,
+                    },
                     observed={
                         "attempts": probe.attempts,
-                        "successful_calls": sum(item.allowed for item in invocations),
+                        "successful_calls": successful,
                         "matching_side_effects": len(matching),
                         "events": _event_dicts(matching),
+                        "observer_errors": observer_errors,
                     },
                     evidence={"trace": self._trace_reference()},
+                    observation=observation,
                     remediation=(
                         "Require a server-side idempotency key and atomically record it with the state change."
                         if duplicate
@@ -779,34 +959,150 @@ class GuardEngine:
         arguments: dict[str, Any],
     ) -> InvocationRecord:
         client = McpClient(self.contract.server, identity_name, identity)
-        invocation = await client.invoke(test_id, tool, arguments)
+        markers = (
+            self.contract.tools[tool].denial_error_markers if tool in self.contract.tools else []
+        )
+        invocation = await client.invoke(test_id, tool, arguments, denial_error_markers=markers)
         self._record_invocation(invocation)
         return invocation
 
     def _record_invocation(self, invocation: InvocationRecord) -> None:
-        self.invocations.append(invocation)
-        self.store.add_invocation(self.run_id, invocation)
+        exported = invocation.model_copy(
+            update={
+                "arguments": {"names": sorted(invocation.arguments), "values": "[omitted]"},
+                "response": "[omitted from exported evidence]",
+                "error": redact(invocation.error, self._secrets),
+                "session_id": None,
+            }
+        )
+        self.invocations.append(exported)
+        self.store.add_invocation(self.run_id, exported)
         with self.trace_path.open("a", encoding="utf-8") as handle:
-            handle.write(invocation.model_dump_json() + "\n")
+            handle.write(exported.model_dump_json() + "\n")
 
-    async def _begin_observers(self) -> None:
-        await asyncio.gather(*(observer.begin() for observer in self.observers))
+    async def _begin_observers(self) -> dict[str, str]:
+        outcomes = await asyncio.gather(
+            *(observer.begin() for observer in self.observers), return_exceptions=True
+        )
+        for outcome in outcomes:
+            if isinstance(outcome, asyncio.CancelledError):
+                raise outcome
+        return {
+            observer.name: f"begin: {type(outcome).__name__}: {outcome}"
+            for observer, outcome in zip(self.observers, outcomes, strict=True)
+            if isinstance(outcome, BaseException)
+        }
 
-    async def _collect_observers(self) -> list[SideEffectEvent]:
-        batches = await asyncio.gather(*(observer.collect() for observer in self.observers))
-        return [event for batch in batches for event in batch]
+    def _observer_coverage(
+        self,
+        errors: dict[str, str],
+        required_kinds: set[SideEffectKind] | None = None,
+    ) -> ObservationStatus:
+        healthy = [observer for observer in self.observers if observer.name not in errors]
+        if not healthy:
+            return ObservationStatus.UNAVAILABLE
+
+        if required_kinds is None:
+            return ObservationStatus.PARTIAL if errors else ObservationStatus.COMPLETE
+
+        covered: set[SideEffectKind] = set()
+        for observer in healthy:
+            covered.update(getattr(observer, "observes", set()))
+
+        return (
+            ObservationStatus.COMPLETE
+            if required_kinds.issubset(covered)
+            else ObservationStatus.PARTIAL
+        )
+
+    async def _collect_observers(
+        self,
+        begin_errors: dict[str, str],
+        required_kinds: set[SideEffectKind] | None = None,
+    ) -> tuple[list[SideEffectEvent], ObservationStatus, dict[str, str]]:
+        healthy = [observer for observer in self.observers if observer.name not in begin_errors]
+        outcomes = await asyncio.gather(
+            *(observer.collect() for observer in healthy), return_exceptions=True
+        )
+        errors = dict(begin_errors)
+        events: list[SideEffectEvent] = []
+        for observer, outcome in zip(healthy, outcomes, strict=True):
+            if isinstance(outcome, asyncio.CancelledError):
+                raise outcome
+            if isinstance(outcome, BaseException):
+                errors[observer.name] = f"collect: {type(outcome).__name__}: {outcome}"
+            else:
+                events.extend(outcome)
+        coverage = self._observer_coverage(errors, required_kinds)
+        return events, coverage, errors
 
     def _add_finding(self, finding: Finding) -> None:
-        self.findings.append(finding)
-        self.store.add_finding(self.run_id, finding)
+        exported = finding.model_copy(
+            update={
+                "expected": redact(finding.expected, self._secrets),
+                "observed": redact(finding.observed, self._secrets),
+                "evidence": redact(finding.evidence, self._secrets),
+            }
+        )
+        self.findings.append(exported)
+        self.store.add_finding(self.run_id, exported)
 
     def _trace_reference(self) -> str:
         return str(self.trace_path.relative_to(self.run_dir))
 
 
-def _write_json(path: Path, payload: Any) -> None:
+def _write_json(path: Path, payload: Any, secrets: set[str] | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str), encoding="utf-8")
+    path.write_text(
+        json.dumps(redact(payload, secrets), indent=2, sort_keys=True, default=str),
+        encoding="utf-8",
+    )
+
+
+def _authorization_assessment(
+    invocation: InvocationRecord, expected_allowed: bool, positive_control: bool
+) -> FindingStatus:
+    if expected_allowed:
+        if invocation.authorization == AuthorizationStatus.ALLOW:
+            return FindingStatus.PASSED
+        if invocation.authorization == AuthorizationStatus.DENY:
+            return FindingStatus.FAILED
+        return FindingStatus.ERROR
+    if invocation.authorization == AuthorizationStatus.ALLOW:
+        return FindingStatus.FAILED
+    if invocation.authorization == AuthorizationStatus.DENY and positive_control:
+        return FindingStatus.PASSED
+    return FindingStatus.ERROR
+
+
+def _mcp_sdk_version() -> str | None:
+    try:
+        return version("mcp")
+    except PackageNotFoundError:
+        return None
+
+
+def _required_effect_kinds(contract: ToolContract) -> set[SideEffectKind]:
+    required = set(contract.forbidden_side_effects)
+
+    if contract.read_only:
+        required.update(
+            {
+                SideEffectKind.FILESYSTEM_WRITE,
+                SideEffectKind.DATABASE_WRITE,
+                SideEffectKind.PROCESS_EXECUTION,
+                SideEffectKind.MESSAGE_DISPATCH,
+            }
+        )
+
+    if contract.allowed_network_destinations:
+        required.add(SideEffectKind.NETWORK_REQUEST)
+    if contract.allowed_filesystem_writes:
+        required.add(SideEffectKind.FILESYSTEM_WRITE)
+    if contract.allowed_process_commands:
+        required.add(SideEffectKind.PROCESS_EXECUTION)
+
+    return required
 
 
 def _side_effect_violations(

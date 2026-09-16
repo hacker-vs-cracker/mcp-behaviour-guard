@@ -26,15 +26,15 @@ from .contract_tools import (
     parse_key_value,
     write_yaml,
 )
-from .engine import GuardEngine
 from .host_config import (
     compare_host_config_snapshots,
     load_host_config_snapshot,
     snapshot_host_config,
     write_host_config_snapshot,
 )
-from .models import IdentitySpec, RunSummary, ServerSpec, Severity
-from .reporting import finding_sort_key, write_reports
+from .models import AssessmentStatus, IdentitySpec, RunSummary, ServerSpec, Severity
+from .reporting import finding_sort_key
+from .runner import run_contract
 from .storage import RunStore
 
 app = typer.Typer(no_args_is_help=True, help="Deterministic MCP security contract testing.")
@@ -63,8 +63,11 @@ def run(
         lab_mode=lab_mode,
     )
     _print_summary(summary, run_dir, report_paths)
-    if summary.failed and not no_fail:
-        raise typer.Exit(1)
+    if not no_fail:
+        if summary.assessment == AssessmentStatus.FAIL:
+            raise typer.Exit(1)
+        if summary.assessment != AssessmentStatus.PASS:
+            raise typer.Exit(2)
 
 
 @app.command()
@@ -378,20 +381,13 @@ def _execute_contract(
     lab_mode: bool,
 ) -> tuple[RunSummary, Path, list[Path]]:
     try:
-        contract = load_contract(contract_path)
-        validate_target(contract, lab_mode=lab_mode)
+        result = asyncio.run(
+            run_contract(contract_path, output=output, database=database, lab_mode=lab_mode)
+        )
     except ContractError as exc:
         console.print(f"[red]Contract error:[/red] {exc}")
         raise typer.Exit(2) from exc
-
-    store = RunStore(database)
-    try:
-        engine = GuardEngine(contract, contract_path, store, output, lab_mode)
-        summary = asyncio.run(engine.run())
-        report_paths = write_reports(summary, engine.run_dir, contract.reports.formats)
-    finally:
-        store.close()
-    return summary, engine.run_dir, report_paths
+    return result.summary, result.run_dir, result.reports
 
 
 def _print_summary(summary: RunSummary, run_dir: Path, report_paths: list[Path]) -> None:
@@ -414,6 +410,7 @@ def _print_summary(summary: RunSummary, run_dir: Path, report_paths: list[Path])
             finding.title,
         )
     console.print(table)
+    console.print(f"Assessment: {summary.assessment.value}")
     console.print(f"Reports: [bold]{run_dir}[/bold]")
     for path in report_paths:
         console.print(f"  - {path.name}")

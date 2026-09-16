@@ -132,6 +132,9 @@ observers:
     type: jsonl_audit
     path: demo_runtime/stdio/audit.jsonl
     truncate_on_begin: true
+    observes:
+      - filesystem_write
+      - process_execution
 
 safety:
   destructive_tests: true

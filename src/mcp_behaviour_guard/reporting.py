@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from pathlib import Path
-from xml.etree.ElementTree import Element, SubElement, tostring
+
+# Bandit B405 false positive: this module generates XML but never parses input.
+from xml.etree.ElementTree import Element, SubElement, tostring  # nosec B405
 
 from jinja2 import Environment, PackageLoader, select_autoescape
 
