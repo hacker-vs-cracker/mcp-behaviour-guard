@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fnmatch import fnmatch
+from pathlib import Path
 
 from ..models import FilesystemObserverSpec, SideEffectKind
 from ..util import file_sha256
@@ -15,6 +16,7 @@ class FilesystemObserver:
         self.name = name
         self.spec = spec
         self.observes = set(spec.observes)
+        self.complete_observes: set[SideEffectKind] = set()
         self._before: dict[SnapshotKey, SnapshotValue] = {}
 
     async def begin(self) -> None:
@@ -63,7 +65,8 @@ class FilesystemObserver:
                 if not path.is_file() or self._ignored(path.name):
                     continue
                 relative_path = path.relative_to(root).as_posix()
-                display_path = f"{root.name}/{relative_path}"
+                root_label = self._root_label(root_index, root)
+                display_path = f"{root_label}/{relative_path}"
                 stat = path.stat()
                 snapshot[(root_index, relative_path)] = (
                     display_path,
@@ -71,6 +74,11 @@ class FilesystemObserver:
                     file_sha256(path),
                 )
         return snapshot
+
+    def _root_label(self, root_index: int, root: Path) -> str:
+        base = root.name or "root"
+        duplicates = sum(1 for candidate in self.spec.roots if (candidate.name or "root") == base)
+        return f"{base}#{root_index + 1}" if duplicates > 1 else base
 
     def _ignored(self, name: str) -> bool:
         return any(fnmatch(name, pattern) for pattern in self.spec.ignore)

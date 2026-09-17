@@ -8,8 +8,10 @@ from pydantic import ValidationError
 from mcp_behaviour_guard.engine import GuardEngine
 from mcp_behaviour_guard.models import (
     Contract,
+    ExecutionStatus,
     FilesystemObserverSpec,
     InvocationRecord,
+    ObservationStatus,
     SideEffectKind,
 )
 from mcp_behaviour_guard.observers.filesystem import FilesystemObserver
@@ -83,12 +85,125 @@ async def test_filesystem_observer_keeps_same_basename_roots_distinct(
     )
 
     await observer.begin()
-    (first / "record.txt").write_text("changed", encoding="utf-8")
+    (first / "record.txt").write_text("changed-one", encoding="utf-8")
+    (second / "record.txt").write_text("changed-two", encoding="utf-8")
     events = await observer.collect()
 
-    assert len(events) == 1
-    assert events[0].kind == SideEffectKind.FILESYSTEM_WRITE
-    assert events[0].details["operation"] == "modified"
+    assert len(events) == 2
+    assert all(event.kind == SideEffectKind.FILESYSTEM_WRITE for event in events)
+    paths = sorted(str(event.details["path"]) for event in events)
+    assert paths == ["data#1/record.txt", "data#2/record.txt"]
+    assert all(str(tmp_path) not in item for item in paths)
+
+
+def test_filesystem_snapshot_is_partial_for_filesystem_coverage(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir()
+
+    guard, store = _guard(
+        tmp_path,
+        {
+            "version": 1,
+            "server": {
+                "name": "offline",
+                "url": "http://127.0.0.1:8000/mcp",
+            },
+            "identities": {"user": {}},
+            "tools": {},
+        },
+    )
+    observer = FilesystemObserver(
+        "filesystem",
+        FilesystemObserverSpec(type="filesystem", roots=[root]),
+    )
+    guard.observers = [observer]
+
+    try:
+        assert (
+            guard._observer_coverage(
+                {},
+                {SideEffectKind.FILESYSTEM_WRITE},
+            )
+            == ObservationStatus.PARTIAL
+        )
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_only_filesystem_observer_blocks_mutating_probe(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir()
+
+    guard, store = _guard(
+        tmp_path,
+        {
+            "version": 1,
+            "server": {
+                "name": "offline",
+                "url": "http://127.0.0.1:8000/mcp",
+            },
+            "identities": {"user": {}},
+            "tools": {
+                "write": {
+                    "permitted_identities": ["user"],
+                    "read_only": False,
+                    "allowed_filesystem_writes": ["workspace/*"],
+                }
+            },
+            "safety": {
+                "destructive_tests": True,
+                "require_lab_mode": False,
+            },
+        },
+    )
+    observer = FilesystemObserver(
+        "filesystem",
+        FilesystemObserverSpec(type="filesystem", roots=[root]),
+    )
+    guard.observers = [observer]
+    calls: list[str] = []
+
+    async def unexpected_mutation(
+        test_id,
+        identity_name,
+        identity,
+        tool,
+        arguments,
+    ):
+        del test_id, identity_name, identity, arguments
+        calls.append(tool)
+        return InvocationRecord(
+            test_id="AUTH-WRITE-USER",
+            tool=tool,
+            identity="user",
+            arguments={},
+            allowed=True,
+            duration_ms=0,
+        )
+
+    guard._invoke = unexpected_mutation  # type: ignore[method-assign]
+
+    try:
+        invocation, events, observation, errors = await guard._invoke_with_mutation_observation(
+            "AUTH-WRITE-USER",
+            "user",
+            guard.contract.identities["user"],
+            "write",
+            {},
+        )
+
+        assert calls == []
+        assert invocation.execution == ExecutionStatus.NOT_ATTEMPTED
+        assert events == []
+        assert observation == ObservationStatus.PARTIAL
+        assert errors == {}
+    finally:
+        store.close()
 
 
 @pytest.mark.asyncio

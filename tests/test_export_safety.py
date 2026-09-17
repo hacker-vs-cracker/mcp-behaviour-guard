@@ -20,7 +20,7 @@ async def test_exported_target_does_not_leak_http_credentials(
             "version": 1,
             "server": {
                 "name": "support-service",
-                "url": (f"https://user:{marker}@localhost/mcp?token={marker}&mode=test"),
+                "url": (f"https://user:{marker}@localhost/mcp/{marker}?token={marker}&mode=test"),
             },
             "identities": {"user": {}},
             "tools": {},

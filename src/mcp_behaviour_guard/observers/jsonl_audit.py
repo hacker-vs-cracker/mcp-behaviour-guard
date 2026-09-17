@@ -12,6 +12,7 @@ class JsonlAuditObserver:
         self.name = name
         self.spec = spec
         self.observes = set(spec.observes)
+        self.complete_observes = set(self.observes)
         self._offset = 0
         self._source_identity: tuple[int, int] | None = None
 

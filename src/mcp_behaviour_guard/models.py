@@ -102,7 +102,7 @@ class ServerSpec(ContractModel):
                 return self.name
             parsed = urlsplit(self.url)
             netloc = parsed.netloc.rsplit("@", 1)[-1]
-            sanitized = urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+            sanitized = urlunsplit((parsed.scheme, netloc, "", "", ""))
             return sanitized or self.name
 
         command = Path(self.command or "").name

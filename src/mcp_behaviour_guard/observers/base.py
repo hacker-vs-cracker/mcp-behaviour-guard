@@ -22,6 +22,7 @@ class ObserverCollectionError(ValueError):
 class Observer(Protocol):
     name: str
     observes: set[SideEffectKind]
+    complete_observes: set[SideEffectKind]
 
     async def begin(self) -> None:
         """Reset or snapshot the observer before a tool call."""

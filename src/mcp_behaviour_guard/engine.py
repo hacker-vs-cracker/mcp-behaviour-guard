@@ -1255,16 +1255,32 @@ class GuardEngine:
         if not healthy:
             return ObservationStatus.UNAVAILABLE
 
-        if required_kinds is None:
-            return ObservationStatus.PARTIAL if errors else ObservationStatus.COMPLETE
+        def complete_kinds(observer: Observer) -> set[SideEffectKind]:
+            declared = getattr(observer, "complete_observes", None)
+            if declared is None:
+                # Backward-compatible for internal test doubles; all production
+                # observers declare completeness explicitly.
+                return set(getattr(observer, "observes", set()))
+            return set(declared)
 
-        covered: set[SideEffectKind] = set()
+        if required_kinds is None:
+            has_partial_only_coverage = any(
+                set(getattr(observer, "observes", set())) - complete_kinds(observer)
+                for observer in healthy
+            )
+            return (
+                ObservationStatus.PARTIAL
+                if errors or has_partial_only_coverage
+                else ObservationStatus.COMPLETE
+            )
+
+        complete_covered: set[SideEffectKind] = set()
         for observer in healthy:
-            covered.update(getattr(observer, "observes", set()))
+            complete_covered.update(complete_kinds(observer))
 
         return (
             ObservationStatus.COMPLETE
-            if required_kinds.issubset(covered)
+            if required_kinds.issubset(complete_covered)
             else ObservationStatus.PARTIAL
         )
 

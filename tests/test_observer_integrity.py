@@ -178,3 +178,29 @@ async def test_http_audit_keeps_valid_event_when_later_record_is_malformed(
         assert details
     finally:
         store.close()
+
+
+def test_jsonl_event_observer_remains_complete_for_declared_effect(
+    tmp_path: Path,
+) -> None:
+    guard, store = _guard(tmp_path)
+    observer = JsonlAuditObserver(
+        "audit",
+        JsonlAuditObserverSpec(
+            type="jsonl_audit",
+            path=tmp_path / "events.jsonl",
+            observes=[SideEffectKind.FILESYSTEM_WRITE],
+        ),
+    )
+    guard.observers = [observer]
+
+    try:
+        assert (
+            guard._observer_coverage(
+                {},
+                {SideEffectKind.FILESYSTEM_WRITE},
+            )
+            == ObservationStatus.COMPLETE
+        )
+    finally:
+        store.close()

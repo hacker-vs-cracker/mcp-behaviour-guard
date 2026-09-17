@@ -13,6 +13,7 @@ class HttpAuditObserver:
         self.name = name
         self.spec = spec
         self.observes = set(spec.observes)
+        self.complete_observes = set(self.observes)
 
     async def begin(self) -> None:
         async with httpx.AsyncClient(timeout=self.spec.timeout_seconds) as client:

@@ -143,6 +143,16 @@ workspace:
   ignore: ["*.tmp"]
 ```
 
+The filesystem observer compares before/after snapshots. It can detect persistent
+creates, modifications, and deletions, but it cannot prove that no transient
+write occurred between snapshots. Its filesystem coverage is therefore reported
+as partial; use an event-backed JSONL or HTTP audit observer when complete
+filesystem-write assurance is required before a mutating probe can run.
+
+When multiple configured roots share the same basename, exported event paths use
+`<basename>#<n>/...` labels (for example `data#1/file.txt`) so evidence remains
+unambiguous without exporting absolute host paths.
+
 ### JSONL audit observer
 
 ```yaml
