@@ -5,7 +5,7 @@ from typing import Any
 import httpx
 
 from ..models import HttpAuditObserverSpec, SideEffectKind
-from .base import SideEffectEvent
+from .base import ObserverCollectionError, SideEffectEvent
 
 
 class HttpAuditObserver:
@@ -38,10 +38,16 @@ class HttpAuditObserver:
         events: list[SideEffectEvent] = []
         for raw in raw_events:
             if not isinstance(raw, dict) or "kind" not in raw:
-                raise ValueError(f"observer {self.name} returned an event without a kind")
+                raise ObserverCollectionError(
+                    f"observer {self.name} returned an event without a kind",
+                    events,
+                )
             try:
                 kind = SideEffectKind(raw["kind"])
             except ValueError as exc:
-                raise ValueError(f"observer {self.name} returned an unknown event kind") from exc
+                raise ObserverCollectionError(
+                    f"observer {self.name} returned an unknown event kind",
+                    events,
+                ) from exc
             events.append(SideEffectEvent(observer=self.name, kind=kind, details=raw))
         return events

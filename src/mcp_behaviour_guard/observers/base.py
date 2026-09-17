@@ -13,6 +13,12 @@ class SideEffectEvent:
     details: dict[str, Any]
 
 
+class ObserverCollectionError(ValueError):
+    def __init__(self, message: str, events: list[SideEffectEvent] | None = None) -> None:
+        super().__init__(message)
+        self.events = list(events or [])
+
+
 class Observer(Protocol):
     name: str
     observes: set[SideEffectKind]

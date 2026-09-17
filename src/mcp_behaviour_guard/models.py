@@ -3,6 +3,7 @@ from __future__ import annotations
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypeAlias
+from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import (
     BaseModel,
@@ -69,7 +70,11 @@ class SideEffectKind(StrEnum):
     CREDENTIAL_ACCESS = "credential_access"
 
 
-class ServerSpec(BaseModel):
+class ContractModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class ServerSpec(ContractModel):
     name: str
     transport: Literal["streamable-http", "stdio"] = "streamable-http"
     url: str | None = None
@@ -91,13 +96,20 @@ class ServerSpec(BaseModel):
 
     @property
     def target_label(self) -> str:
+        # Export/display identifier only; never expose connection credentials or args.
         if self.transport == "streamable-http":
-            return self.url or self.name
-        command = " ".join([self.command or "", *self.args]).strip()
-        return f"stdio:{command}"
+            if not self.url:
+                return self.name
+            parsed = urlsplit(self.url)
+            netloc = parsed.netloc.rsplit("@", 1)[-1]
+            sanitized = urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+            return sanitized or self.name
+
+        command = Path(self.command or "").name
+        return f"stdio:{command or self.name}"
 
 
-class IdentitySpec(BaseModel):
+class IdentitySpec(ContractModel):
     headers: dict[str, str] = Field(default_factory=dict)
     environment: dict[str, str] = Field(default_factory=dict)
     tenant: str | None = None
@@ -105,14 +117,14 @@ class IdentitySpec(BaseModel):
     description: str | None = None
 
 
-class TenantProbe(BaseModel):
+class TenantProbe(ContractModel):
     arguments: dict[str, Any]
     resource_tenant_path: str = "tenant"
     expected_tenant: str | None = None
     require_denial: bool = True
 
 
-class ReplayProbe(BaseModel):
+class ReplayProbe(ContractModel):
     arguments: dict[str, Any]
     attempts: int = Field(default=3, ge=2, le=20)
     event_kind: SideEffectKind = SideEffectKind.DATABASE_WRITE
@@ -127,22 +139,22 @@ class ReplayProbe(BaseModel):
         return self
 
 
-class DeniedCheck(BaseModel):
+class DeniedCheck(ContractModel):
     type: Literal["denied"]
 
 
-class PathWithinCheck(BaseModel):
+class PathWithinCheck(ContractModel):
     type: Literal["path_within"]
     response_path: str
     roots: list[Path]
 
 
-class ResponseNotContainsEnvCheck(BaseModel):
+class ResponseNotContainsEnvCheck(ContractModel):
     type: Literal["response_not_contains_env"]
     env_names: list[str]
 
 
-class ResponseNotContainsCheck(BaseModel):
+class ResponseNotContainsCheck(ContractModel):
     type: Literal["response_not_contains"]
     values: list[str]
 
@@ -153,7 +165,7 @@ PolicyCheck = Annotated[
 ]
 
 
-class PolicyProbe(BaseModel):
+class PolicyProbe(ContractModel):
     id: str
     identity: str
     arguments: dict[str, Any] = Field(default_factory=dict)
@@ -162,7 +174,7 @@ class PolicyProbe(BaseModel):
     description: str | None = None
 
 
-class ToolContract(BaseModel):
+class ToolContract(ContractModel):
     description: str | None = None
     permitted_identities: list[str]
     probe_arguments: dict[str, Any] = Field(default_factory=dict)
@@ -186,12 +198,12 @@ class ToolContract(BaseModel):
         return value
 
 
-class ToolCallSpec(BaseModel):
+class ToolCallSpec(ContractModel):
     tool: str
     arguments: dict[str, Any] = Field(default_factory=dict)
 
 
-class SessionIsolationTest(BaseModel):
+class SessionIsolationTest(ContractModel):
     id: str
     writer_identity: str
     reader_identity: str
@@ -201,7 +213,7 @@ class SessionIsolationTest(BaseModel):
     severity: Severity = Severity.HIGH
 
 
-class HttpAuditObserverSpec(BaseModel):
+class HttpAuditObserverSpec(ContractModel):
     type: Literal["http_audit"]
     events_url: str
     reset_url: str
@@ -209,9 +221,9 @@ class HttpAuditObserverSpec(BaseModel):
     observes: list[SideEffectKind] = Field(default_factory=list)
 
 
-class FilesystemObserverSpec(BaseModel):
+class FilesystemObserverSpec(ContractModel):
     type: Literal["filesystem"]
-    roots: list[Path]
+    roots: list[Path] = Field(min_length=1)
     ignore: list[str] = Field(default_factory=lambda: [".DS_Store", "*.tmp"])
     observes: list[SideEffectKind] = Field(
         default_factory=lambda: [SideEffectKind.FILESYSTEM_WRITE]
@@ -228,7 +240,7 @@ class FilesystemObserverSpec(BaseModel):
         return value
 
 
-class JsonlAuditObserverSpec(BaseModel):
+class JsonlAuditObserverSpec(ContractModel):
     type: Literal["jsonl_audit"]
     path: Path
     truncate_on_begin: bool = True
@@ -238,7 +250,7 @@ class JsonlAuditObserverSpec(BaseModel):
 ObserverSpec = HttpAuditObserverSpec | FilesystemObserverSpec | JsonlAuditObserverSpec
 
 
-class SafetySpec(BaseModel):
+class SafetySpec(ContractModel):
     destructive_tests: bool = False
     require_lab_mode: bool = True
     target_allowlist: list[str] = Field(default_factory=lambda: ["127.0.0.1", "localhost"])
@@ -254,11 +266,11 @@ def _default_report_formats() -> list[ReportFormat]:
     return ["json", "html", "junit", "sarif"]
 
 
-class ReportSpec(BaseModel):
+class ReportSpec(ContractModel):
     formats: list[ReportFormat] = Field(default_factory=_default_report_formats)
 
 
-class AlertSpec(BaseModel):
+class AlertSpec(ContractModel):
     enabled: bool = False
     minimum_severity: Severity = Severity.HIGH
     webhook_url: str | None = None
@@ -266,7 +278,7 @@ class AlertSpec(BaseModel):
     repeat_after_hours: float | None = Field(default=None, gt=0)
 
 
-class TemporalIntegritySpec(BaseModel):
+class TemporalIntegritySpec(ContractModel):
     enabled: bool = False
     identity: str | None = None
     driver_tool: str | None = None
@@ -284,15 +296,13 @@ class TemporalIntegritySpec(BaseModel):
     severity: Severity = Severity.HIGH
 
 
-class ContractMetadata(BaseModel):
+class ContractMetadata(ContractModel):
     generated_draft: bool = False
     generated_at: str | None = None
     notes: list[str] = Field(default_factory=list)
 
 
-class Contract(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class Contract(ContractModel):
     version: Literal[1]
     metadata: ContractMetadata = Field(default_factory=ContractMetadata)
     server: ServerSpec

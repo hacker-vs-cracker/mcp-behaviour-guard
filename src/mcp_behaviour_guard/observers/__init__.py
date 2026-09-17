@@ -6,7 +6,7 @@ from ..models import (
     JsonlAuditObserverSpec,
     ObserverSpec,
 )
-from .base import Observer, SideEffectEvent
+from .base import Observer, ObserverCollectionError, SideEffectEvent
 from .filesystem import FilesystemObserver
 from .http_audit import HttpAuditObserver
 from .jsonl_audit import JsonlAuditObserver
@@ -22,4 +22,4 @@ def build_observer(name: str, spec: ObserverSpec) -> Observer:
     raise TypeError(f"unsupported observer type: {type(spec).__name__}")
 
 
-__all__ = ["Observer", "SideEffectEvent", "build_observer"]
+__all__ = ["Observer", "ObserverCollectionError", "SideEffectEvent", "build_observer"]
