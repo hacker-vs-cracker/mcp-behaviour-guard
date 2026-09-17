@@ -4,6 +4,15 @@ on:
   release:
     types: [published]
 
+  # One-time recovery path for v0.4.1 because its validated tag
+  # predates this workflow. Future releases use the release trigger.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish"
+        required: true
+        type: string
+
 permissions:
   contents: read
 
@@ -16,10 +25,36 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Resolve release tag
+        id: release
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            tag="$INPUT_TAG"
+
+            if [[ "$tag" != "v0.4.1" ]]; then
+              echo "Manual publishing is permitted only for v0.4.1" >&2
+              exit 1
+            fi
+          else
+            tag="$RELEASE_TAG"
+          fi
+
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid stable release tag: $tag" >&2
+            exit 1
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
       - name: Check out release source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ steps.release.outputs.tag }}
           persist-credentials: false
 
       - name: Set up Python
@@ -29,7 +64,7 @@ jobs:
 
       - name: Verify release tag matches package version
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
         run: |
           python - <<'PY'
           import os
@@ -63,7 +98,7 @@ jobs:
           python -m twine check dist/*
 
       - name: Verify v0.4.1 tested artifacts
-        if: github.event.release.tag_name == 'v0.4.1'
+        if: steps.release.outputs.tag == 'v0.4.1'
         run: |
           echo "c0eb233de99b6b3489feb09155fc1ed6df2ebd298597ee52e6ff87cda32660b7  dist/mcp_behaviour_guard-0.4.1-py3-none-any.whl" | sha256sum --check
           echo "a4e3dadfb17d367fda9135b31a5ef453811916be34752135eb35fa8487a80510  dist/mcp_behaviour_guard-0.4.1.tar.gz" | sha256sum --check
