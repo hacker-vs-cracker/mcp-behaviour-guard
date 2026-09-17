@@ -13,6 +13,13 @@
 </p>
 
 <p align="center">
+  <a href="https://pypi.org/project/mcp-behaviour-guard/"><img alt="PyPI" src="https://img.shields.io/pypi/v/mcp-behaviour-guard"></a>
+  <a href="https://github.com/hacker-vs-cracker/mcp-behaviour-guard/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/hacker-vs-cracker/mcp-behaviour-guard/actions/workflows/ci.yml/badge.svg"></a>
+  <img alt="Python 3.11" src="https://img.shields.io/badge/python-3.11-blue">
+  <a href="https://github.com/hacker-vs-cracker/mcp-behaviour-guard/blob/main/LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
+</p>
+
+<p align="center">
   Discover an MCP server, define what it is allowed to do, test its actual runtime behaviour, and generate reproducible evidence when the observed behaviour violates the contract.
 </p>
 
@@ -23,6 +30,8 @@
   <a href="#reports-history-and-monitoring">Reports</a> •
   <a href="#safety-and-limitations">Limitations</a>
 </p>
+
+PyPI releases are published from the protected `pypi` GitHub environment using GitHub OIDC Trusted Publishing, with digital attestations for uploaded distributions. These attestations provide provenance for the published files; they are not a claim that the package or every tested MCP integration is vulnerability-free.
 
 ---
 
@@ -117,7 +126,22 @@ Findings are ordered by severity, with critical findings displayed first. Each r
 - Docker Desktop/Engine with Compose for the HTTP lab
 - No Docker requirement for the basic STDIO lab
 
-### Install
+### Install from PyPI
+
+For normal CLI use:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install mcp-behaviour-guard
+```
+
+Use your own reviewed contract with the installed `mcp-guard` CLI.
+
+### Source/development setup for the included labs
+
+The demo commands below expect a repository checkout because the demo contracts, Compose file and lab fixtures live in the source tree.
 
 ```bash
 pyenv install 3.11.14
@@ -159,7 +183,7 @@ The expected result is a **high** `TEMPORAL-METADATA-001` finding with the first
 
 Reports are written to `reports/<run-id>/index.html`.
 
-The local development patch is not published to PyPI. Its [evidence status guide](docs/evidence-status.md) explains why a denied result needs a positive control and why an observer outage is inconclusive. For direct Python use:
+The [evidence status guide](docs/evidence-status.md) explains why a denied result needs a positive control and why an observer outage is inconclusive. For direct Python use:
 
 ```python
 import asyncio
@@ -299,9 +323,11 @@ mcp-guard contract generate \
 
 The OpenClaw gateway and any required authentication must already be configured. Use `--server-env CHILD_ENV=SOURCE_ENV` when the child process requires environment variables without storing secret values in the contract.
 
-### Cursor, Windsurf, Gemini CLI, and other hosts
+### OpenAI Codex, Cursor, Windsurf, Gemini CLI, and other MCP-capable hosts
 
-The host application is not the scan target; its configured MCP server is. Find the server entry in the host's MCP settings and map it as follows:
+The host application is not the scan target; its configured MCP server is. This applies to OpenAI Codex and other MCP-capable AI assistants or co-workers: Behaviour Guard tests the configured MCP server boundary, not the assistant's reasoning or the host as a whole. Map the server's command, arguments, working directory and environment, or its remote endpoint and credential settings, into the same contract-generation flow. Native host-configuration imports and multi-agent or cross-server workflow assurance remain future work.
+
+Find the server entry in the host's MCP settings and map it as follows:
 
 | Host field | `mcp-guard contract generate` |
 |---|---|
@@ -490,9 +516,9 @@ Detailed source notes and the comparison date are maintained in [docs/comparison
 - Side-effect detection is limited to configured observers; it is not arbitrary OS-wide syscall monitoring.
 - Temporal integrity uses a finite number of calls and sessions; it can detect observed drift but cannot prove that no delayed or conditional activation exists.
 - Host-config provenance detects definition changes; it does not determine whether a newly added server or pull request is malicious.
-- The harness tests MCP servers directly. It does not claim to security-test all behaviour of VS Code, GitHub Copilot, Claude Code, OpenClaw, Cursor, Windsurf or Gemini CLI themselves.
+- The harness tests MCP servers directly. It does not claim to security-test all behaviour or reasoning of OpenAI Codex, VS Code, GitHub Copilot, Claude Code, OpenClaw, Cursor, Windsurf, Gemini CLI or other MCP-capable hosts themselves.
 - No comparative detection benchmark against the projects above has been performed.
-- This development patch remains pinned to `mcp==1.28.1`; MCP Python SDK 2.x / protocol 2026-07-28 has not been integration-tested. The `2026-07-28` protocol removes protocol-level HTTP sessions, so the temporal state model needs compatibility testing before migration.
+- This release line remains pinned to `mcp==1.28.1`; MCP Python SDK 2.x / protocol 2026-07-28 has not been integration-tested. The `2026-07-28` protocol removes protocol-level HTTP sessions, so the temporal state model needs compatibility testing before migration.
 
 ## Future work
 

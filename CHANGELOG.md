@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.2 - 2026-09-17
+- Document normal PyPI installation separately from source/development setup for the included labs.
+- Add OpenAI Codex and clarify that MCP-capable hosts are tested at the configured MCP server boundary, not as reasoning benchmarks.
+- Add PyPI, CI, Python and license badges plus bounded Trusted Publishing and attestation provenance wording.
+- Remove the completed v0.4.1 manual publishing recovery path and v0.4.1-specific artifact hash exception; normal release-event Trusted Publishing remains unchanged.
+
 ## 0.4.1 - 2026-09-17
 - Fix the duplicated Safety and limitations heading in the README.
 - Add package-index project links for the repository, issue tracker and changelog.

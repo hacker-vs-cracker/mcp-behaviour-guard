@@ -4,15 +4,6 @@ on:
   release:
     types: [published]
 
-  # One-time recovery path for v0.4.1 because its validated tag
-  # predates this workflow. Future releases use the release trigger.
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Release tag to publish"
-        required: true
-        type: string
-
 permissions:
   contents: read
 
@@ -29,20 +20,9 @@ jobs:
         id: release
         shell: bash
         env:
-          EVENT_NAME: ${{ github.event_name }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
-          INPUT_TAG: ${{ inputs.tag }}
         run: |
-          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
-            tag="$INPUT_TAG"
-
-            if [[ "$tag" != "v0.4.1" ]]; then
-              echo "Manual publishing is permitted only for v0.4.1" >&2
-              exit 1
-            fi
-          else
-            tag="$RELEASE_TAG"
-          fi
+          tag="$RELEASE_TAG"
 
           if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "Invalid stable release tag: $tag" >&2
@@ -96,12 +76,6 @@ jobs:
           python -m pip install build twine
           python -m build
           python -m twine check dist/*
-
-      - name: Verify v0.4.1 tested artifacts
-        if: steps.release.outputs.tag == 'v0.4.1'
-        run: |
-          echo "c0eb233de99b6b3489feb09155fc1ed6df2ebd298597ee52e6ff87cda32660b7  dist/mcp_behaviour_guard-0.4.1-py3-none-any.whl" | sha256sum --check
-          echo "a4e3dadfb17d367fda9135b31a5ef453811916be34752135eb35fa8487a80510  dist/mcp_behaviour_guard-0.4.1.tar.gz" | sha256sum --check
 
       - name: Upload distributions
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
