@@ -4,10 +4,10 @@ import asyncio
 import json
 import os
 import uuid
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from .client import McpClient
 from .evidence import contract_secrets, redact
@@ -470,13 +470,7 @@ class GuardEngine:
     async def _check_tool_side_effects(self) -> None:
         if not self.observers:
             for tool_name, tool in self.contract.tools.items():
-                if not (
-                    tool.read_only
-                    or tool.forbidden_side_effects
-                    or tool.allowed_network_destinations
-                    or tool.allowed_filesystem_writes
-                    or tool.allowed_process_commands
-                ):
+                if not _has_effect_claims(tool):
                     continue
                 self._add_finding(
                     Finding(
@@ -493,6 +487,8 @@ class GuardEngine:
             return
 
         for tool_name, tool in self.contract.tools.items():
+            if not _has_effect_claims(tool):
+                continue
             test_id = f"BEHAVIOUR-{tool_name}".upper().replace("_", "-")
             if not self._tool_invocation_enabled(tool):
                 self._add_finding(self._lab_skip(test_id, "runtime_behaviour", tool_name))
@@ -1366,27 +1362,85 @@ def _mcp_sdk_version() -> str | None:
         return None
 
 
-def _required_effect_kinds(contract: ToolContract) -> set[SideEffectKind]:
-    required = set(contract.forbidden_side_effects)
+@dataclass(frozen=True)
+class EffectClaim:
+    mode: Literal["deny_all", "allowlist"]
+    patterns: tuple[str, ...] = ()
+    sources: tuple[str, ...] = ()
+
+
+_ALLOWLIST_CLAIMS: dict[SideEffectKind, tuple[str, str, str]] = {
+    SideEffectKind.NETWORK_REQUEST: (
+        "allowed_network_destinations",
+        "destination",
+        "network destination is not allowlisted",
+    ),
+    SideEffectKind.FILESYSTEM_WRITE: (
+        "allowed_filesystem_writes",
+        "path",
+        "filesystem path is not allowlisted",
+    ),
+    SideEffectKind.PROCESS_EXECUTION: (
+        "allowed_process_commands",
+        "command",
+        "process command is not allowlisted",
+    ),
+}
+
+
+def _effect_claims(contract: ToolContract) -> dict[SideEffectKind, EffectClaim]:
+    claims: dict[SideEffectKind, EffectClaim] = {}
+
+    def add_deny(kind: SideEffectKind, source: str) -> None:
+        existing = claims.get(kind)
+        sources = existing.sources if existing is not None else ()
+        if source not in sources:
+            sources = (*sources, source)
+        claims[kind] = EffectClaim(mode="deny_all", sources=sources)
 
     if contract.read_only:
-        required.update(
-            {
-                SideEffectKind.FILESYSTEM_WRITE,
-                SideEffectKind.DATABASE_WRITE,
-                SideEffectKind.PROCESS_EXECUTION,
-                SideEffectKind.MESSAGE_DISPATCH,
-            }
-        )
+        for kind in (
+            SideEffectKind.FILESYSTEM_WRITE,
+            SideEffectKind.DATABASE_WRITE,
+            SideEffectKind.PROCESS_EXECUTION,
+            SideEffectKind.MESSAGE_DISPATCH,
+        ):
+            add_deny(kind, "read_only")
 
-    if contract.allowed_network_destinations:
-        required.add(SideEffectKind.NETWORK_REQUEST)
-    if contract.allowed_filesystem_writes:
-        required.add(SideEffectKind.FILESYSTEM_WRITE)
-    if contract.allowed_process_commands:
-        required.add(SideEffectKind.PROCESS_EXECUTION)
+    for kind in contract.forbidden_side_effects:
+        add_deny(kind, "forbidden_side_effects")
 
-    return required
+    for kind, (field_name, _detail_key, _reason) in _ALLOWLIST_CLAIMS.items():
+        values = getattr(contract, field_name)
+        if values is None:
+            continue
+        if not values:
+            add_deny(kind, field_name)
+            continue
+
+        existing = claims.get(kind)
+        if existing is None:
+            claims[kind] = EffectClaim(
+                mode="allowlist",
+                patterns=tuple(values),
+                sources=(field_name,),
+            )
+        elif field_name not in existing.sources:
+            claims[kind] = EffectClaim(
+                mode=existing.mode,
+                patterns=existing.patterns,
+                sources=(*existing.sources, field_name),
+            )
+
+    return claims
+
+
+def _required_effect_kinds(contract: ToolContract) -> set[SideEffectKind]:
+    return set(_effect_claims(contract))
+
+
+def _has_effect_claims(contract: ToolContract) -> bool:
+    return bool(_effect_claims(contract))
 
 
 def _side_effect_violations(
@@ -1394,34 +1448,35 @@ def _side_effect_violations(
     events: list[SideEffectEvent],
 ) -> list[dict[str, Any]]:
     violations: list[dict[str, Any]] = []
-    state_changing = {
-        SideEffectKind.FILESYSTEM_WRITE,
-        SideEffectKind.DATABASE_WRITE,
-        SideEffectKind.MESSAGE_DISPATCH,
-        SideEffectKind.PROCESS_EXECUTION,
-    }
+    claims = _effect_claims(contract)
 
     for event in events:
+        claim = claims.get(event.kind)
+        if claim is None:
+            continue
+
         reason: str | None = None
-        if event.kind in contract.forbidden_side_effects:
-            reason = "side-effect kind is explicitly forbidden"
-        elif contract.read_only and event.kind in state_changing:
-            reason = "read-only tool caused a state-changing side effect"
-        elif event.kind == SideEffectKind.NETWORK_REQUEST and contract.allowed_network_destinations:
-            destination = str(event.details.get("destination", ""))
-            if not matches_any(destination, contract.allowed_network_destinations):
-                reason = "network destination is not allowlisted"
-        elif event.kind == SideEffectKind.FILESYSTEM_WRITE and contract.allowed_filesystem_writes:
-            path = str(event.details.get("path", ""))
-            if not matches_any(path, contract.allowed_filesystem_writes):
-                reason = "filesystem path is not allowlisted"
-        elif event.kind == SideEffectKind.PROCESS_EXECUTION and contract.allowed_process_commands:
-            command = str(event.details.get("command", ""))
-            if not matches_any(command, contract.allowed_process_commands):
-                reason = "process command is not allowlisted"
+        if claim.mode == "deny_all":
+            if "forbidden_side_effects" in claim.sources:
+                reason = "side-effect kind is explicitly forbidden"
+            elif "read_only" in claim.sources:
+                reason = "read-only tool caused a state-changing side effect"
+            else:
+                rule = _ALLOWLIST_CLAIMS.get(event.kind)
+                reason = rule[2] if rule is not None else "side-effect kind is not allowed"
+        else:
+            rule = _ALLOWLIST_CLAIMS.get(event.kind)
+            if rule is None:
+                reason = "side-effect kind is not allowed"
+            else:
+                _field_name, detail_key, mismatch_reason = rule
+                observed_value = str(event.details.get(detail_key, ""))
+                if not matches_any(observed_value, list(claim.patterns)):
+                    reason = mismatch_reason
 
         if reason:
             violations.append({"reason": reason, "event": asdict(event)})
+
     return violations
 
 

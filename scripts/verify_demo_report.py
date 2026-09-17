@@ -44,15 +44,13 @@ EXPECTED: dict[str, dict[str, ExpectedFinding]] = {
         "TEMPORAL-METADATA-001": ExpectedFinding("failed", "high", "not_required"),
     },
     "http": {
-        "AUTH-CUSTOMER-UPDATE-READ-ONLY-USER": ExpectedFinding(
-            "failed", "critical", "not_required"
-        ),
-        "AUTH-CUSTOMER-UPDATE-TENANT-A-USER": ExpectedFinding("failed", "critical", "not_required"),
-        "AUTH-CUSTOMER-UPDATE-TENANT-B-USER": ExpectedFinding("failed", "critical", "not_required"),
+        "AUTH-CUSTOMER-UPDATE-READ-ONLY-USER": ExpectedFinding("failed", "critical", "complete"),
+        "AUTH-CUSTOMER-UPDATE-TENANT-A-USER": ExpectedFinding("failed", "critical", "complete"),
+        "AUTH-CUSTOMER-UPDATE-TENANT-B-USER": ExpectedFinding("failed", "critical", "complete"),
         "BEHAVIOUR-CUSTOMER-LOOKUP": ExpectedFinding("failed", "high", "partial"),
         "BEHAVIOUR-GET-SESSION-NOTE": ExpectedFinding("error", "medium", "partial"),
         "REPLAY-CUSTOMER-UPDATE": ExpectedFinding("failed", "high", "complete"),
-        "SESSION-ISOLATION-001": ExpectedFinding("failed", "high", "not_required"),
+        "SESSION-ISOLATION-001": ExpectedFinding("failed", "high", "complete"),
         "TENANT-CUSTOMER-LOOKUP-TENANT-A-USER": ExpectedFinding(
             "failed", "critical", "not_required"
         ),

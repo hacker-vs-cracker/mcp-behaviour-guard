@@ -48,6 +48,40 @@ def _temporal_findings() -> list[dict]:
     ]
 
 
+def _http_findings() -> list[dict]:
+    return [
+        _finding(
+            "AUTH-CUSTOMER-UPDATE-READ-ONLY-USER",
+            "failed",
+            "critical",
+            "complete",
+        ),
+        _finding(
+            "AUTH-CUSTOMER-UPDATE-TENANT-A-USER",
+            "failed",
+            "critical",
+            "complete",
+        ),
+        _finding(
+            "AUTH-CUSTOMER-UPDATE-TENANT-B-USER",
+            "failed",
+            "critical",
+            "complete",
+        ),
+        _finding("BEHAVIOUR-CUSTOMER-LOOKUP", "failed", "high", "partial"),
+        _finding("BEHAVIOUR-GET-SESSION-NOTE", "error", "medium", "partial"),
+        _finding("REPLAY-CUSTOMER-UPDATE", "failed", "high", "complete"),
+        _finding("SESSION-ISOLATION-001", "failed", "high", "complete"),
+        _finding(
+            "TENANT-CUSTOMER-LOOKUP-TENANT-A-USER",
+            "failed",
+            "critical",
+            "not_required",
+        ),
+        _finding("INVENTORY-001", "passed", "info", "not_required"),
+    ]
+
+
 def _write_report(root: Path, findings: list[dict]) -> Path:
     run_dir = root / "run-1"
     run_dir.mkdir(parents=True)
@@ -83,6 +117,15 @@ def test_verifier_accepts_characterized_temporal_profile(tmp_path: Path) -> None
 
     assert result.returncode == 0, result.stderr
     assert "REPORT_VERIFIED=temporal" in result.stdout
+
+
+def test_verifier_accepts_characterized_http_profile(tmp_path: Path) -> None:
+    root = _write_report(tmp_path / "reports", _http_findings())
+
+    result = _run("http", root)
+
+    assert result.returncode == 0, result.stderr
+    assert "REPORT_VERIFIED=http" in result.stdout
 
 
 def test_verifier_rejects_unexpected_non_pass_finding(tmp_path: Path) -> None:

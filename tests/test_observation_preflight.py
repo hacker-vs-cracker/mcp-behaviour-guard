@@ -157,7 +157,7 @@ async def test_access_matrix_does_not_mutate_when_required_observer_cannot_start
         store.close()
 
 
-def test_empty_network_allowlist_means_no_network_claim() -> None:
+def test_empty_network_allowlist_requires_network_coverage_and_flags_event() -> None:
     from mcp_behaviour_guard.engine import (
         _required_effect_kinds,
         _side_effect_violations,
@@ -167,7 +167,7 @@ def test_empty_network_allowlist_means_no_network_claim() -> None:
 
     tool = ToolContract(
         permitted_identities=["user"],
-        allowed_filesystem_writes=["data/*"],
+        allowed_network_destinations=[],
     )
     event = SideEffectEvent(
         observer="audit",
@@ -175,8 +175,10 @@ def test_empty_network_allowlist_means_no_network_claim() -> None:
         details={"destination": "https://example.invalid"},
     )
 
-    assert SideEffectKind.NETWORK_REQUEST not in _required_effect_kinds(tool)
-    assert _side_effect_violations(tool, [event]) == []
+    assert SideEffectKind.NETWORK_REQUEST in _required_effect_kinds(tool)
+    violations = _side_effect_violations(tool, [event])
+    assert len(violations) == 1
+    assert violations[0]["reason"] == "network destination is not allowlisted"
 
 
 def test_explicit_network_deny_requires_network_coverage_and_flags_event() -> None:

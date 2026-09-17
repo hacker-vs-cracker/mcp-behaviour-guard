@@ -12,6 +12,12 @@ from .client import McpClient
 from .models import IdentitySpec, ServerSpec
 from .util import utc_now
 
+_EXPLICIT_NULL_POLICY_KEYS = {
+    "allowed_network_destinations",
+    "allowed_filesystem_writes",
+    "allowed_process_commands",
+}
+
 
 async def generate_contract_draft(
     server: ServerSpec,
@@ -31,9 +37,9 @@ async def generate_contract_draft(
             "permitted_identities": ["review_identity"],
             "probe_arguments": _example_from_schema(input_schema),
             "read_only": _looks_read_only(name, description) if infer_read_only else False,
-            "allowed_network_destinations": [],
-            "allowed_filesystem_writes": [],
-            "allowed_process_commands": [],
+            "allowed_network_destinations": None,
+            "allowed_filesystem_writes": None,
+            "allowed_process_commands": None,
             "forbidden_side_effects": [],
         }
 
@@ -276,7 +282,11 @@ def _looks_read_only(name: str, description: str) -> bool:
 
 def _drop_none(value: Any) -> Any:
     if isinstance(value, dict):
-        return {key: _drop_none(item) for key, item in value.items() if item is not None}
+        return {
+            key: _drop_none(item)
+            for key, item in value.items()
+            if item is not None or key in _EXPLICIT_NULL_POLICY_KEYS
+        }
     if isinstance(value, list):
         return [_drop_none(item) for item in value]
     return value
