@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.3 - 2026-09-17
+- Harden exported target labels so normal evidence does not expose HTTP credentials, query/path data, or STDIO arguments.
+- Preserve confirmed observer events through later malformed telemetry, detect JSONL continuity loss, and keep confirmed violations dominant over observation uncertainty.
+- Bound snapshot filesystem observation to partial absence assurance and require complete matching observation before potentially mutating probes execute.
+- Tighten denied-call confidentiality and relevant positive-control handling without treating generic invocation failure as authorization denial.
+- Correct side-effect allowlists to tri-state semantics and centralize effect-claim handling for both observation requirements and violation assessment.
+- Reject nested contract typos and duplicate YAML keys with secret-safe validation errors while preserving intentionally flexible payload maps.
+- Strengthen CI with semantic demo-report verification, immutable action pins, explicit runner-image validation, UID/CLI smoke checks, and multi-architecture build validation.
+
 ## 0.4.2 - 2026-09-17
 - Document normal PyPI installation separately from source/development setup for the included labs.
 - Add OpenAI Codex and clarify that MCP-capable hosts are tested at the configured MCP server boundary, not as reasoning benchmarks.

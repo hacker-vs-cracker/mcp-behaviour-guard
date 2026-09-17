@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .runner import RunResult
 
-__version__ = "0.4.2"
+__version__ = "0.4.3"
 
 
 async def run_contract(
