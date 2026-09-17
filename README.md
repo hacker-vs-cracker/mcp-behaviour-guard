@@ -482,7 +482,6 @@ The tools below have overlapping but different published goals. This table is a 
 Detailed source notes and the comparison date are maintained in [docs/comparison-sources.md](docs/comparison-sources.md). This is a scope comparison, not a detection benchmark.
 
 ## Safety and limitations
-## Safety and limitations
 
 - Run only against MCP servers you own or are explicitly authorized to test.
 - State-changing and replay probes require contract permission and `--lab-mode`.

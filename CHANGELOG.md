@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.1 - 2026-09-17
+- Fix the duplicated Safety and limitations heading in the README.
+- Add package-index project links for the repository, issue tracker and changelog.
+- Modernize MIT license metadata to the SPDX/PEP 639 format.
+- Prepare package metadata for the initial PyPI publication.
+
 ## 0.4.0 - 2026-09-16
 - Distinguish confirmed denials from failed connections and generic tool errors.
 - Require a working positive control before a negative authorization check passes.

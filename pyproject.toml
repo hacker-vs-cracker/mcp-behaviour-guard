@@ -4,17 +4,17 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-behaviour-guard"
-version = "0.4.0"
+version = "0.4.1"
 description = "Deterministic security contract and behavioural regression testing for MCP servers"
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Arjun" }]
 keywords = ["mcp", "security", "appsec", "mcp-security", "testing"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",
-  "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3.11",
   "Topic :: Security",
   "Topic :: Software Development :: Testing",
@@ -43,6 +43,12 @@ dev = [
 
 [project.scripts]
 mcp-guard = "mcp_behaviour_guard.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/hacker-vs-cracker/mcp-behaviour-guard"
+Repository = "https://github.com/hacker-vs-cracker/mcp-behaviour-guard"
+Issues = "https://github.com/hacker-vs-cracker/mcp-behaviour-guard/issues"
+Changelog = "https://github.com/hacker-vs-cracker/mcp-behaviour-guard/blob/main/CHANGELOG.md"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mcp_behaviour_guard"]
