@@ -29,9 +29,9 @@ tools:
       text: behaviour-guard-demo
     side_effect_identity: reviewer
     read_only: true
-    allowed_network_destinations: []
-    allowed_filesystem_writes: []
-    allowed_process_commands: []
+    allowed_network_destinations: null
+    allowed_filesystem_writes: null
+    allowed_process_commands: null
 
 temporal_integrity:
   enabled: true

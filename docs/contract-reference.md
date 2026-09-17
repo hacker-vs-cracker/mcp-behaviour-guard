@@ -48,9 +48,19 @@ Values support `${NAME}` and `${NAME:-default}` expansion. Do not commit real to
 - `denial_error_markers`: optional case-insensitive phrases in a tool error that the contract identifies as a denial. An `isError` result alone is not a denial. Prefer a documented structured denial code when the server provides one. A phrase can also appear in a business or validation error, so review it against the target and run a permitted positive control.
 - `side_effect_identity`: permitted identity used for side-effect observation.
 - `read_only`: prohibits observed filesystem, database, process and messaging writes.
-- `allowed_network_destinations`: glob patterns matched against observer destinations.
-- `allowed_filesystem_writes`: glob patterns matched against observer paths.
-- `allowed_process_commands`: exact/glob patterns for observed process command strings.
+- `allowed_network_destinations`: network side-effect policy.
+- `allowed_filesystem_writes`: filesystem-write side-effect policy.
+- `allowed_process_commands`: process-execution side-effect policy.
+
+For these three allowlist fields:
+
+- omitted or `null`: no policy claim for that effect family;
+- `[]`: deny all effects of that family and require matching observer coverage;
+- a non-empty list: allow only matching effects and require matching observer coverage.
+
+v0.4.3 corrects empty-list semantics. Contracts that previously used `[]` only as
+a placeholder should use `null` instead. User-authored `[]` values are not
+automatically migrated because `[]` now means an intentional deny-all claim.
 - `forbidden_side_effects`: side-effect kinds that always fail.
 - `tenant_probes`: identity-specific cross-tenant inputs.
 - `policy_probes`: custom deterministic response/security checks.
@@ -132,6 +142,16 @@ workspace:
   roots: [demo_runtime]
   ignore: ["*.tmp"]
 ```
+
+The filesystem observer compares before/after snapshots. It can detect persistent
+creates, modifications, and deletions, but it cannot prove that no transient
+write occurred between snapshots. Its filesystem coverage is therefore reported
+as partial; use an event-backed JSONL or HTTP audit observer when complete
+filesystem-write assurance is required before a mutating probe can run.
+
+When multiple configured roots share the same basename, exported event paths use
+`<basename>#<n>/...` labels (for example `data#1/file.txt`) so evidence remains
+unambiguous without exporting absolute host paths.
 
 ### JSONL audit observer
 
