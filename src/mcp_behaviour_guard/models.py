@@ -213,12 +213,33 @@ class SessionIsolationTest(ContractModel):
     severity: Severity = Severity.HIGH
 
 
+def _validate_settling_window(
+    settle_timeout_seconds: float,
+    quiet_period_seconds: float,
+) -> None:
+    if settle_timeout_seconds == 0 and quiet_period_seconds == 0:
+        return
+    if settle_timeout_seconds <= 0 or quiet_period_seconds <= 0:
+        raise ValueError(
+            "settling requires both settle_timeout_seconds and quiet_period_seconds to be > 0"
+        )
+    if quiet_period_seconds > settle_timeout_seconds:
+        raise ValueError("quiet_period_seconds must not exceed settle_timeout_seconds")
+
+
 class HttpAuditObserverSpec(ContractModel):
     type: Literal["http_audit"]
     events_url: str
     reset_url: str
     timeout_seconds: float = Field(default=5, gt=0, le=60)
+    settle_timeout_seconds: float = Field(default=0, ge=0, le=60)
+    quiet_period_seconds: float = Field(default=0, ge=0, le=60)
     observes: list[SideEffectKind] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_settling_window(self) -> HttpAuditObserverSpec:
+        _validate_settling_window(self.settle_timeout_seconds, self.quiet_period_seconds)
+        return self
 
 
 class FilesystemObserverSpec(ContractModel):
@@ -244,7 +265,14 @@ class JsonlAuditObserverSpec(ContractModel):
     type: Literal["jsonl_audit"]
     path: Path
     truncate_on_begin: bool = True
+    settle_timeout_seconds: float = Field(default=0, ge=0, le=60)
+    quiet_period_seconds: float = Field(default=0, ge=0, le=60)
     observes: list[SideEffectKind] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_settling_window(self) -> JsonlAuditObserverSpec:
+        _validate_settling_window(self.settle_timeout_seconds, self.quiet_period_seconds)
+        return self
 
 
 ObserverSpec = HttpAuditObserverSpec | FilesystemObserverSpec | JsonlAuditObserverSpec
