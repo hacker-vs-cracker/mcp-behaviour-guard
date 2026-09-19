@@ -11,6 +11,13 @@ from pathlib import Path
 from typing import Any, Literal
 
 from .client import McpClient
+from .correlation import (
+    attribute_correlated_events,
+    build_correlation_meta,
+    correlated_observer_names,
+    correlation_enabled,
+    correlation_redaction_values,
+)
 from .evidence import contract_secrets, redact
 from .models import (
     AuthorizationStatus,
@@ -540,7 +547,9 @@ class GuardEngine:
                     tool.probe_arguments,
                 )
                 events, observation, observer_errors = await self._collect_observers(
-                    begin_errors, required_kinds
+                    begin_errors,
+                    required_kinds,
+                    scope,
                 )
             violations = _side_effect_violations(tool, events)
 
@@ -1057,7 +1066,9 @@ class GuardEngine:
                     ]
                 )
                 events, observation, observer_errors = await self._collect_observers(
-                    begin_errors, required_kinds
+                    begin_errors,
+                    required_kinds,
+                    scope,
                 )
             event_tool = probe.event_tool or tool_name
             matching = [
@@ -1194,6 +1205,7 @@ class GuardEngine:
             events, observation, observer_errors = await self._collect_observers(
                 begin_errors,
                 required_kinds,
+                scope,
             )
 
         violations = _side_effect_violations(tool_contract, events)
@@ -1278,16 +1290,46 @@ class GuardEngine:
         markers = (
             self.contract.tools[tool].denial_error_markers if tool in self.contract.tools else []
         )
-        invocation = await client.invoke(test_id, tool, arguments, denial_error_markers=markers)
+        operation_id = self._current_operation_id.get()
+        if operation_id is not None and correlation_enabled(self.observers):
+            invocation = await client.invoke(
+                test_id,
+                tool,
+                arguments,
+                denial_error_markers=markers,
+                meta=build_correlation_meta(self.run_id, operation_id),
+            )
+        else:
+            invocation = await client.invoke(
+                test_id,
+                tool,
+                arguments,
+                denial_error_markers=markers,
+            )
+        if operation_id is not None and correlation_enabled(self.observers):
+            invocation = invocation.model_copy(
+                update={
+                    "error": redact(
+                        invocation.error,
+                        set(self._secrets) | correlation_redaction_values(operation_id),
+                    )
+                }
+            )
+
         self._record_invocation(invocation)
         return invocation
 
     def _record_invocation(self, invocation: InvocationRecord) -> None:
+        export_secrets = set(self._secrets)
+        operation_id = self._current_operation_id.get()
+        if operation_id is not None and correlation_enabled(self.observers):
+            export_secrets.update(correlation_redaction_values(operation_id))
+
         exported = invocation.model_copy(
             update={
                 "arguments": {"names": sorted(invocation.arguments), "values": "[omitted]"},
                 "response": "[omitted from exported evidence]",
-                "error": redact(invocation.error, self._secrets),
+                "error": redact(invocation.error, export_secrets),
                 "session_id": None,
             }
         )
@@ -1351,6 +1393,7 @@ class GuardEngine:
         self,
         begin_errors: dict[str, str],
         required_kinds: set[SideEffectKind] | None = None,
+        scope: ObservationScope | None = None,
     ) -> tuple[list[SideEffectEvent], ObservationStatus, dict[str, str]]:
         healthy = [observer for observer in self.observers if observer.name not in begin_errors]
         outcomes = await asyncio.gather(
@@ -1379,6 +1422,35 @@ class GuardEngine:
                     partial_kinds.update(getattr(observer, "observes", set()))
             if required_kinds is None or bool(required_kinds & partial_kinds):
                 coverage = ObservationStatus.PARTIAL
+
+        if correlation_enabled(self.observers):
+            if scope is None:
+                names = correlated_observer_names(healthy)
+                correlation_errors = {
+                    name: "correlation: observation scope is required" for name in names
+                }
+                events = [event for event in events if event.observer not in names]
+            else:
+                events, correlation_errors = attribute_correlated_events(
+                    events,
+                    self.observers,
+                    scope,
+                )
+
+            if correlation_errors:
+                for observer_name, message in correlation_errors.items():
+                    existing = errors.get(observer_name)
+                    errors[observer_name] = f"{existing}; {message}" if existing else message
+
+                coverage = self._observer_coverage(errors, required_kinds)
+                if coverage == ObservationStatus.UNAVAILABLE:
+                    affected_partial_kinds: set[SideEffectKind] = set()
+                    partial_names = partial_observers | set(correlation_errors)
+                    for observer in self.observers:
+                        if observer.name in partial_names:
+                            affected_partial_kinds.update(getattr(observer, "observes", set()))
+                    if required_kinds is None or bool(required_kinds & affected_partial_kinds):
+                        coverage = ObservationStatus.PARTIAL
 
         return events, coverage, errors
 

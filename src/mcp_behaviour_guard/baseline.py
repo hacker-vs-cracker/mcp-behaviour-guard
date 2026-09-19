@@ -1,14 +1,22 @@
 from __future__ import annotations
 
 import json
+import uuid
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
 from .client import McpClient
+from .correlation import (
+    attribute_correlated_events,
+    build_correlation_meta,
+    correlation_enabled,
+    strip_internal_correlation,
+)
 from .evidence import contract_secrets, redact
 from .models import Contract
-from .observers import build_observer
+from .observers import ObserverCollectionError, build_observer
+from .observers.base import ObservationScope
 from .observers.ownership import observer_ownership, server_ownership_key
 from .util import response_shape, stable_hash, utc_now
 
@@ -18,6 +26,7 @@ async def capture_baseline(contract: Contract, lab_mode: bool = False) -> dict[s
     client = McpClient(contract.server, identity_name, identity)
     observers = [build_observer(name, spec) for name, spec in contract.observers.items()]
     target_key = server_ownership_key(contract.server)
+    baseline_run_id = uuid.uuid4().hex[:12]
 
     async with observer_ownership(observers, extra_keys=(target_key,)):
         tools = await client.list_tools()
@@ -33,24 +42,58 @@ async def capture_baseline(contract: Contract, lab_mode: bool = False) -> dict[s
                 tool_contract.side_effect_identity or tool_contract.permitted_identities[0]
             )
             probe_identity = contract.identities[probe_identity_name]
+            test_id = f"BASELINE-{tool_name}"
+            scope = ObservationScope(
+                run_id=baseline_run_id,
+                check_id=test_id,
+                window_id=uuid.uuid4().hex,
+                operation_ids=(uuid.uuid4().hex,),
+            )
             async with observer_ownership(observers):
                 for observer in observers:
                     await observer.begin()
-                invocation = await McpClient(
+
+                probe_client = McpClient(
                     contract.server,
                     probe_identity_name,
                     probe_identity,
-                ).invoke(
-                    f"BASELINE-{tool_name}",
-                    tool_name,
-                    tool_contract.probe_arguments,
                 )
+                if correlation_enabled(observers):
+                    invocation = await probe_client.invoke(
+                        test_id,
+                        tool_name,
+                        tool_contract.probe_arguments,
+                        meta=build_correlation_meta(
+                            scope.run_id,
+                            scope.operation_ids[0],
+                        ),
+                    )
+                else:
+                    invocation = await probe_client.invoke(
+                        test_id,
+                        tool_name,
+                        tool_contract.probe_arguments,
+                    )
+
                 event_batches = [await observer.collect() for observer in observers]
-            events = [asdict(event) for batch in event_batches for event in batch]
+
+            collected_events = [event for batch in event_batches for event in batch]
+            attributed_events, correlation_errors = attribute_correlated_events(
+                collected_events,
+                observers,
+                scope,
+            )
+            if correlation_errors:
+                raise ObserverCollectionError(
+                    "correlation: required MCP metadata is missing or malformed",
+                    attributed_events,
+                )
+
+            events = [asdict(event) for event in attributed_events]
             probes[tool_name] = {
                 "identity": probe_identity_name,
                 "allowed": invocation.allowed,
-                "response_shape": response_shape(invocation.response),
+                "response_shape": response_shape(strip_internal_correlation(invocation.response)),
                 "side_effects": _normalise_events(events),
             }
 

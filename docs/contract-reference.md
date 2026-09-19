@@ -164,6 +164,37 @@ stdio_audit:
 
 JSONL is useful for controlled local demos. It is not a substitute for independent OS observation against an untrusted native process.
 
+For a shared append-only JSONL stream, correlated attribution is explicit and opt-in: The default is `correlation: none`.
+
+```yaml
+stdio_audit:
+  type: jsonl_audit
+  path: demo_runtime/stdio/audit.jsonl
+  truncate_on_begin: false
+  correlation: mcp_meta
+```
+
+`correlation: mcp_meta` makes Guard attach a Guard-internal request metadata entry named
+`io.github.hacker-vs-cracker.mcp-behaviour-guard/correlation` to scoped tool calls.
+The value contains `version`, `run_id`, and `guard_operation_id`. A cooperating target
+must copy that entry unchanged into the event `_meta` object when it writes the JSONL
+audit event. Guard uses the entry only to attribute telemetry to the current operation.
+It does not create authorization truth.
+
+Correlated JSONL requires `truncate_on_begin: false`. Valid events correlated to another
+run or Guard operation are treated as foreign telemetry and ignored. Missing or malformed
+required correlation cannot become a confirmed violation: runtime observation is
+downgraded when the affected observer is needed for the current effect claim, while
+baseline capture fails closed. After successful attribution, Guard removes only its own
+correlation entry before exporting evidence; unrelated `_meta` fields remain intact.
+
+This is cooperative correlation, not authenticated provenance. A target that can write
+the audit stream can copy or spoof correlation metadata, and a target can omit telemetry
+entirely. The mechanism therefore does not prove that an unreported effect did not occur.
+It adds no cross-host or distributed coordination. HTTP audit correlation and filesystem
+correlation remain outside this mode.
+
+
 Observer sources must be independent within one contract. Validation rejects duplicate JSONL audit paths, HTTP audit resources reused across different observers (including event/reset cross-role reuse and default-port aliases), overlapping filesystem roots within one filesystem observer, and overlapping filesystem roots across filesystem observers. A single HTTP observer may use the same URL for GET events and POST reset when that endpoint supports both methods. These checks avoid counting or mutating the same uncorrelated evidence resource through multiple observer definitions.
 
 JSONL and HTTP audit observers optionally support bounded settling with `settle_timeout_seconds` and `quiet_period_seconds`. Both default to `0`, preserving the existing one-shot behavior. When enabled, both values must be positive, the quiet period cannot exceed the timeout, and each value is capped at 60 seconds. JSONL settling attributes complete records by source identity and byte position and can wait for a source that is created shortly after invocation. HTTP settling requires each later event list to preserve the complete earlier prefix and treats only appended positions as new events. During Guard runtime assessment, later source disappearance, observed shrink, replacement, rewrite of already-consumed JSONL bytes, HTTP prefix rewrite, transport failure, or malformed telemetry preserves already validated events while downgrading observation through a collection error. JSONL continuity checks cover the bytes consumed during the current settling window. Because this is bounded polling rather than filesystem event capture, a transient same-inode truncate-and-regrow can remain indistinguishable when it occurs entirely between polls, leaves the observed size at or beyond the current cursor, and does not alter bytes already verified in that window. Baseline capture remains fail-closed if collection itself fails. The settling deadline is a finite temporal boundary, not proof that an arbitrarily delayed effect cannot occur.

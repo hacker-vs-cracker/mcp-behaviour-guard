@@ -267,11 +267,14 @@ class JsonlAuditObserverSpec(ContractModel):
     truncate_on_begin: bool = True
     settle_timeout_seconds: float = Field(default=0, ge=0, le=60)
     quiet_period_seconds: float = Field(default=0, ge=0, le=60)
+    correlation: Literal["none", "mcp_meta"] = "none"
     observes: list[SideEffectKind] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_settling_window(self) -> JsonlAuditObserverSpec:
         _validate_settling_window(self.settle_timeout_seconds, self.quiet_period_seconds)
+        if self.correlation == "mcp_meta" and self.truncate_on_begin:
+            raise ValueError("correlated JSONL observation requires truncate_on_begin=false")
         return self
 
 

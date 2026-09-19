@@ -118,6 +118,8 @@ class McpClient:
         tool: str,
         arguments: dict[str, Any],
         denial_error_markers: list[str] | None = None,
+        *,
+        meta: dict[str, Any] | None = None,
     ) -> InvocationRecord:
         started = perf_counter()
         try:
@@ -129,6 +131,7 @@ class McpClient:
                     tool=tool,
                     arguments=arguments,
                     denial_error_markers=denial_error_markers,
+                    meta=meta,
                 )
         except Exception as exc:
             return InvocationRecord(
@@ -154,10 +157,19 @@ class McpClient:
         tool: str,
         arguments: dict[str, Any],
         denial_error_markers: list[str] | None = None,
+        *,
+        meta: dict[str, Any] | None = None,
     ) -> InvocationRecord:
         started = perf_counter()
         try:
-            tool_response = await session.call_tool(tool, arguments=arguments)
+            if meta is None:
+                tool_response = await session.call_tool(tool, arguments=arguments)
+            else:
+                tool_response = await session.call_tool(
+                    tool,
+                    arguments=arguments,
+                    meta=meta,
+                )
             response = _normalise_tool_result(tool_response)
             is_error = bool(getattr(tool_response, "isError", False))
             denied = is_error and _matches_denial_marker(response, denial_error_markers or [])
