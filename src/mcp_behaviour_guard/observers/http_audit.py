@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -14,6 +15,29 @@ class HttpAuditObserver:
         self.spec = spec
         self.observes = set(spec.observes)
         self.complete_observes = set(self.observes)
+
+    @staticmethod
+    def _resource_key(url: str) -> str:
+        parsed = urlsplit(url)
+        scheme = parsed.scheme.lower()
+        port = parsed.port
+        if port is None:
+            port = {"http": 80, "https": 443}.get(scheme)
+        material = (
+            scheme,
+            (parsed.hostname or "").lower(),
+            port,
+            parsed.path or "/",
+            parsed.query,
+        )
+        return f"http-audit-resource:{material!r}"
+
+    @property
+    def ownership_keys(self) -> tuple[str, ...]:
+        return (
+            self._resource_key(self.spec.events_url),
+            self._resource_key(self.spec.reset_url),
+        )
 
     async def begin(self) -> None:
         async with httpx.AsyncClient(timeout=self.spec.timeout_seconds) as client:

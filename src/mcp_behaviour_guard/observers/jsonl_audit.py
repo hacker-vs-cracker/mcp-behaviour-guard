@@ -16,6 +16,11 @@ class JsonlAuditObserver:
         self._offset = 0
         self._source_identity: tuple[int, int] | None = None
 
+    @property
+    def ownership_keys(self) -> tuple[str, ...]:
+        path = self.spec.path.expanduser().resolve(strict=False)
+        return (f"jsonl-audit:{path}",)
+
     async def begin(self) -> None:
         path = self.spec.path
         path.parent.mkdir(parents=True, exist_ok=True)

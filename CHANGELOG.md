@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+- Serialize overlapping same-host, same-user Guard runs and observer windows for matching configured ownership keys so uncorrelated JSONL, HTTP, filesystem, and baseline evidence is not cross-attributed.
+- Add internal per-operation observation identities for replay/check scoping without changing schema-v2 invocation evidence.
+- Reject duplicate or overlapping observer sources and canonicalize target/resource aliases used for ownership.
+- Harden POSIX same-host, same-user process leases with opaque lock names, stable `/tmp` namespace, ownership checks, restrictive permissions, deterministic lock ordering, and cancellation-safe release.
+
 ## 0.4.3 - 2026-09-17
 - Harden exported target labels so normal evidence does not expose HTTP credentials, query/path data, or STDIO arguments.
 - Preserve confirmed observer events through later malformed telemetry, detect JSONL continuity loss, and keep confirmed violations dominant over observation uncertainty.

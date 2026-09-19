@@ -164,6 +164,8 @@ stdio_audit:
 
 JSONL is useful for controlled local demos. It is not a substitute for independent OS observation against an untrusted native process.
 
+Observer sources must be independent within one contract. Validation rejects duplicate JSONL audit paths, HTTP audit resources reused across different observers (including event/reset cross-role reuse and default-port aliases), overlapping filesystem roots within one filesystem observer, and overlapping filesystem roots across filesystem observers. A single HTTP observer may use the same URL for GET events and POST reset when that endpoint supports both methods. These checks avoid counting or mutating the same uncorrelated evidence resource through multiple observer definitions.
+
 ## `alerts`
 
 ```yaml

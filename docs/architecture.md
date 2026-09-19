@@ -61,6 +61,8 @@ The MVP includes:
 
 An eBPF, OpenTelemetry, database-audit or proxy observer can implement the same protocol later.
 
+Current JSONL/HTTP observer streams are uncorrelated. On supported POSIX hosts, Behaviour Guard therefore uses same-user process leases plus in-process locks to serialize overlapping target/observer ownership windows for matching configured ownership keys. Filesystem snapshots use a conservative global ownership key and remain partial evidence. Ownership-key canonicalization covers the implemented URL/path cases but does not discover distinct aliases for the same backend. Lease acquisition is cancellation-safe but currently has no separate acquisition timeout, so a live stuck peer can delay another run that needs the same resources. Cross-host attribution and correlated shared streams are separate future work.
+
 ### Temporal integrity
 
 `temporal.py` canonicalizes MCP tool, prompt, selected prompt payload and resource metadata. The engine keeps a client session open, calls a human-selected safe driver tool, then re-discovers metadata at configured checkpoints. Drift is determined by hashes and structural diffs rather than suspicious-word matching. Server list-change notifications are recorded as supporting evidence, but the scan still re-fetches metadata itself.
