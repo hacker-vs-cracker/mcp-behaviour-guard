@@ -19,6 +19,13 @@ class FilesystemObserver:
         self.complete_observes: set[SideEffectKind] = set()
         self._before: dict[SnapshotKey, SnapshotValue] = {}
 
+    @property
+    def ownership_keys(self) -> tuple[str, ...]:
+        # Snapshot windows cannot safely attribute overlapping writes yet.
+        # Serialize all current filesystem snapshots until correlated evidence
+        # exists; this does not upgrade their partial completeness semantics.
+        return ("filesystem-snapshot:global",)
+
     async def begin(self) -> None:
         self._before = self._snapshot()
 

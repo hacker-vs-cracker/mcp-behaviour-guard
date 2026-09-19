@@ -213,12 +213,33 @@ class SessionIsolationTest(ContractModel):
     severity: Severity = Severity.HIGH
 
 
+def _validate_settling_window(
+    settle_timeout_seconds: float,
+    quiet_period_seconds: float,
+) -> None:
+    if settle_timeout_seconds == 0 and quiet_period_seconds == 0:
+        return
+    if settle_timeout_seconds <= 0 or quiet_period_seconds <= 0:
+        raise ValueError(
+            "settling requires both settle_timeout_seconds and quiet_period_seconds to be > 0"
+        )
+    if quiet_period_seconds > settle_timeout_seconds:
+        raise ValueError("quiet_period_seconds must not exceed settle_timeout_seconds")
+
+
 class HttpAuditObserverSpec(ContractModel):
     type: Literal["http_audit"]
     events_url: str
     reset_url: str
     timeout_seconds: float = Field(default=5, gt=0, le=60)
+    settle_timeout_seconds: float = Field(default=0, ge=0, le=60)
+    quiet_period_seconds: float = Field(default=0, ge=0, le=60)
     observes: list[SideEffectKind] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_settling_window(self) -> HttpAuditObserverSpec:
+        _validate_settling_window(self.settle_timeout_seconds, self.quiet_period_seconds)
+        return self
 
 
 class FilesystemObserverSpec(ContractModel):
@@ -244,7 +265,14 @@ class JsonlAuditObserverSpec(ContractModel):
     type: Literal["jsonl_audit"]
     path: Path
     truncate_on_begin: bool = True
+    settle_timeout_seconds: float = Field(default=0, ge=0, le=60)
+    quiet_period_seconds: float = Field(default=0, ge=0, le=60)
     observes: list[SideEffectKind] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_settling_window(self) -> JsonlAuditObserverSpec:
+        _validate_settling_window(self.settle_timeout_seconds, self.quiet_period_seconds)
+        return self
 
 
 ObserverSpec = HttpAuditObserverSpec | FilesystemObserverSpec | JsonlAuditObserverSpec
@@ -371,7 +399,103 @@ class Contract(ContractModel):
             ):
                 raise ValueError("temporal_integrity must monitor at least one metadata family")
 
+        self._validate_observer_source_independence()
         return self
+
+    def _validate_observer_source_independence(self) -> None:
+        jsonl_sources: dict[Path, str] = {}
+        http_event_sources: dict[tuple[str, str, int | None, str, str], str] = {}
+        http_reset_sources: dict[tuple[str, str, int | None, str, str], str] = {}
+        http_resources: dict[tuple[str, str, int | None, str, str], str] = {}
+        filesystem_roots: list[tuple[str, Path]] = []
+
+        def normalized_http_source(url: str) -> tuple[str, str, int | None, str, str]:
+            parsed = urlsplit(url)
+            scheme = parsed.scheme.lower()
+            port = parsed.port
+            if port is None:
+                port = {"http": 80, "https": 443}.get(scheme)
+            return (
+                scheme,
+                (parsed.hostname or "").lower(),
+                port,
+                parsed.path or "/",
+                parsed.query,
+            )
+
+        def normalized_path(value: Path) -> Path:
+            return value.expanduser().resolve(strict=False)
+
+        for observer_name, spec in self.observers.items():
+            if isinstance(spec, JsonlAuditObserverSpec):
+                source = normalized_path(spec.path)
+                previous = jsonl_sources.get(source)
+                if previous is not None:
+                    raise ValueError(
+                        f"observers {previous!r} and {observer_name!r} share one JSONL audit source"
+                    )
+                jsonl_sources[source] = observer_name
+                continue
+
+            if isinstance(spec, HttpAuditObserverSpec):
+                event_source = normalized_http_source(spec.events_url)
+                previous_event = http_event_sources.get(event_source)
+                if previous_event is not None:
+                    raise ValueError(
+                        f"observers {previous_event!r} and {observer_name!r} "
+                        "share one HTTP event stream"
+                    )
+                previous_resource = http_resources.get(event_source)
+                if previous_resource is not None and previous_resource != observer_name:
+                    raise ValueError(
+                        f"observers {previous_resource!r} and {observer_name!r} "
+                        "share one HTTP audit resource"
+                    )
+                http_event_sources[event_source] = observer_name
+                http_resources[event_source] = observer_name
+
+                reset_source = normalized_http_source(spec.reset_url)
+                previous_reset = http_reset_sources.get(reset_source)
+                if previous_reset is not None:
+                    raise ValueError(
+                        f"observers {previous_reset!r} and {observer_name!r} "
+                        "share one HTTP reset stream"
+                    )
+                previous_resource = http_resources.get(reset_source)
+                if previous_resource is not None and previous_resource != observer_name:
+                    raise ValueError(
+                        f"observers {previous_resource!r} and {observer_name!r} "
+                        "share one HTTP audit resource"
+                    )
+                http_reset_sources[reset_source] = observer_name
+                http_resources[reset_source] = observer_name
+                continue
+
+            if isinstance(spec, FilesystemObserverSpec):
+                current_roots = [normalized_path(root) for root in spec.roots]
+                for index, root in enumerate(current_roots):
+                    for other in current_roots[:index]:
+                        if (
+                            root == other
+                            or root.is_relative_to(other)
+                            or other.is_relative_to(root)
+                        ):
+                            raise ValueError(
+                                f"observer {observer_name!r} has overlapping filesystem roots"
+                            )
+
+                    for previous_name, previous_root in filesystem_roots:
+                        if (
+                            root == previous_root
+                            or root.is_relative_to(previous_root)
+                            or previous_root.is_relative_to(root)
+                        ):
+                            raise ValueError(
+                                f"observers {previous_name!r} and {observer_name!r} "
+                                "have overlapping filesystem roots"
+                            )
+
+                    filesystem_roots.append((observer_name, root))
 
 
 class InvocationRecord(BaseModel):

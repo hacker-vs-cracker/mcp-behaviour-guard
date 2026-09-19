@@ -160,14 +160,24 @@ def history(
     console.print(table)
 
 
+def _python_version_supported(version: tuple[int, int]) -> bool:
+    return (3, 11) <= version < (3, 15)
+
+
 @app.command()
 def doctor(
     contract_path: Path | None = typer.Argument(None, exists=True, readable=True),
 ) -> None:
     """Check the local runtime and configured target."""
     rows: list[tuple[str, str, str]] = []
-    py_ok = sys.version_info[:2] == (3, 11)
-    rows.append(("Python", platform.python_version(), "ok" if py_ok else "expected 3.11"))
+    py_ok = _python_version_supported(sys.version_info[:2])
+    rows.append(
+        (
+            "Python",
+            platform.python_version(),
+            "ok" if py_ok else "expected 3.11-3.14",
+        )
+    )
     rows.append(("Platform", platform.platform(), "ok"))
     rows.append(
         (

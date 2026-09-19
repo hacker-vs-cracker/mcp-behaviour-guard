@@ -37,9 +37,29 @@ def test_ci_verifies_each_demo_report_semantically() -> None:
 
 
 def test_ci_disables_checkout_credentials() -> None:
-    checkout_count = TEXT.count("actions/checkout@")
-    assert checkout_count == 3
-    assert TEXT.count("persist-credentials: false") >= checkout_count
+    lines = TEXT.splitlines()
+    checkout_indices = [
+        index for index, line in enumerate(lines) if "uses: actions/checkout@" in line
+    ]
+    assert checkout_indices, "expected at least one checkout step"
+
+    for index in checkout_indices:
+        indent = len(lines[index]) - len(lines[index].lstrip())
+        block = [lines[index]]
+        for line in lines[index + 1 :]:
+            stripped = line.lstrip()
+            line_indent = len(line) - len(stripped)
+            if line_indent == indent and stripped.startswith("- "):
+                break
+            block.append(line)
+
+        assert "persist-credentials: false" in "\n".join(block)
+
+
+def test_ci_covers_additional_supported_python_versions() -> None:
+    assert "python-compatibility:" in TEXT
+    assert "python-version: ['3.12', '3.13', '3.14']" in TEXT
+    assert 'pytest -m "not integration"' in TEXT
 
 
 def test_ci_builds_and_smoke_tests_runner_image() -> None:

@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import uuid
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -30,6 +31,8 @@ from .models import (
     ToolContract,
 )
 from .observers import Observer, ObserverCollectionError, SideEffectEvent, build_observer
+from .observers.base import ObservationScope
+from .observers.ownership import observer_ownership, server_ownership_key
 from .storage import RunStore
 from .temporal import compact_drift_summary, compare_metadata_snapshots, metadata_fingerprint
 from .util import get_path, matches_any, stable_hash, utc_now
@@ -61,8 +64,17 @@ class GuardEngine:
         self._positive_controls: dict[str, bool] = {}
         self._identity_positive_controls: dict[tuple[str, str], bool] = {}
         self._secrets = contract_secrets(contract)
+        self._current_operation_id: ContextVar[str | None] = ContextVar(
+            f"mcp_guard_operation_{id(self)}",
+            default=None,
+        )
 
     async def run(self) -> RunSummary:
+        target_key = server_ownership_key(self.contract.server)
+        async with observer_ownership(self.observers, extra_keys=(target_key,)):
+            return await self._run_with_ownership()
+
+    async def _run_with_ownership(self) -> RunSummary:
         started_at = utc_now()
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.trace_path.parent.mkdir(parents=True, exist_ok=True)
@@ -499,34 +511,37 @@ class GuardEngine:
             identity = self.contract.identities[identity_name]
 
             required_kinds = _required_effect_kinds(tool)
-            begin_errors = await self._begin_observers()
-            begin_observation = self._observer_coverage(begin_errors, required_kinds)
-            if begin_observation == ObservationStatus.UNAVAILABLE or (
-                not tool.read_only and begin_observation != ObservationStatus.COMPLETE
-            ):
-                self._add_finding(
-                    Finding(
-                        test_id=test_id,
-                        category="runtime_behaviour",
-                        title=f"Runtime side effects for {tool_name} could not be checked",
-                        status=FindingStatus.ERROR,
-                        severity=Severity.MEDIUM,
-                        expected="working effect observers before the probe runs",
-                        observed={"probe_executed": False, "observer_errors": begin_errors},
-                        observation=begin_observation,
+            scope = self._new_observation_scope(test_id)
+            async with observer_ownership(self.observers):
+                begin_errors = await self._begin_observers()
+                begin_observation = self._observer_coverage(begin_errors, required_kinds)
+                if begin_observation == ObservationStatus.UNAVAILABLE or (
+                    not tool.read_only and begin_observation != ObservationStatus.COMPLETE
+                ):
+                    self._add_finding(
+                        Finding(
+                            test_id=test_id,
+                            category="runtime_behaviour",
+                            title=f"Runtime side effects for {tool_name} could not be checked",
+                            status=FindingStatus.ERROR,
+                            severity=Severity.MEDIUM,
+                            expected="working effect observers before the probe runs",
+                            observed={"probe_executed": False, "observer_errors": begin_errors},
+                            observation=begin_observation,
+                        )
                     )
+                    continue
+                invocation = await self._invoke_for_operation(
+                    scope.operation_ids[0],
+                    test_id,
+                    identity_name,
+                    identity,
+                    tool_name,
+                    tool.probe_arguments,
                 )
-                continue
-            invocation = await self._invoke(
-                test_id,
-                identity_name,
-                identity,
-                tool_name,
-                tool.probe_arguments,
-            )
-            events, observation, observer_errors = await self._collect_observers(
-                begin_errors, required_kinds
-            )
+                events, observation, observer_errors = await self._collect_observers(
+                    begin_errors, required_kinds
+                )
             violations = _side_effect_violations(tool, events)
 
             if violations:
@@ -1008,31 +1023,42 @@ class GuardEngine:
                 continue
 
             required_kinds = {probe.event_kind}
-            begin_errors = await self._begin_observers()
-            begin_observation = self._observer_coverage(begin_errors, required_kinds)
-            if begin_observation != ObservationStatus.COMPLETE:
-                self._add_finding(
-                    Finding(
-                        test_id=test_id,
-                        category="replay",
-                        title=f"Duplicate execution protection for {tool_name} could not be checked",
-                        status=FindingStatus.ERROR,
-                        severity=Severity.MEDIUM,
-                        expected="working effect observers before replay begins",
-                        observed={"probe_executed": False, "observer_errors": begin_errors},
-                        observation=begin_observation,
+            scope = self._new_observation_scope(test_id, probe.attempts)
+            async with observer_ownership(self.observers):
+                begin_errors = await self._begin_observers()
+                begin_observation = self._observer_coverage(begin_errors, required_kinds)
+                if begin_observation != ObservationStatus.COMPLETE:
+                    self._add_finding(
+                        Finding(
+                            test_id=test_id,
+                            category="replay",
+                            title=(
+                                f"Duplicate execution protection for {tool_name} could not be checked"
+                            ),
+                            status=FindingStatus.ERROR,
+                            severity=Severity.MEDIUM,
+                            expected="working effect observers before replay begins",
+                            observed={"probe_executed": False, "observer_errors": begin_errors},
+                            observation=begin_observation,
+                        )
                     )
+                    continue
+                invocations = await asyncio.gather(
+                    *[
+                        self._invoke_for_operation(
+                            operation_id,
+                            test_id,
+                            identity_name,
+                            identity,
+                            tool_name,
+                            probe.arguments,
+                        )
+                        for operation_id in scope.operation_ids
+                    ]
                 )
-                continue
-            invocations = await asyncio.gather(
-                *[
-                    self._invoke(test_id, identity_name, identity, tool_name, probe.arguments)
-                    for _ in range(probe.attempts)
-                ]
-            )
-            events, observation, observer_errors = await self._collect_observers(
-                begin_errors, required_kinds
-            )
+                events, observation, observer_errors = await self._collect_observers(
+                    begin_errors, required_kinds
+                )
             event_tool = probe.event_tool or tool_name
             matching = [
                 event
@@ -1135,36 +1161,40 @@ class GuardEngine:
             )
             return invocation, [], ObservationStatus.NOT_REQUIRED, {}
 
-        begin_errors = await self._begin_observers()
-        begin_observation = self._observer_coverage(begin_errors, required_kinds)
-        if begin_observation != ObservationStatus.COMPLETE:
-            invocation = InvocationRecord(
-                test_id=test_id,
-                tool=tool,
-                identity=identity_name,
-                arguments=dict(arguments),
-                allowed=None,
-                authorization=AuthorizationStatus.NOT_APPLICABLE,
-                execution=ExecutionStatus.NOT_ATTEMPTED,
-                error=(
-                    f"not attempted: required side-effect observation was {begin_observation.value}"
-                ),
-                duration_ms=0,
-            )
-            self._record_invocation(invocation)
-            return invocation, [], begin_observation, begin_errors
+        scope = self._new_observation_scope(test_id)
+        async with observer_ownership(self.observers):
+            begin_errors = await self._begin_observers()
+            begin_observation = self._observer_coverage(begin_errors, required_kinds)
+            if begin_observation != ObservationStatus.COMPLETE:
+                invocation = InvocationRecord(
+                    test_id=test_id,
+                    tool=tool,
+                    identity=identity_name,
+                    arguments=dict(arguments),
+                    allowed=None,
+                    authorization=AuthorizationStatus.NOT_APPLICABLE,
+                    execution=ExecutionStatus.NOT_ATTEMPTED,
+                    error=(
+                        "not attempted: required side-effect observation was "
+                        f"{begin_observation.value}"
+                    ),
+                    duration_ms=0,
+                )
+                self._record_invocation(invocation)
+                return invocation, [], begin_observation, begin_errors
 
-        invocation = await self._invoke(
-            test_id,
-            identity_name,
-            identity,
-            tool,
-            arguments,
-        )
-        events, observation, observer_errors = await self._collect_observers(
-            begin_errors,
-            required_kinds,
-        )
+            invocation = await self._invoke_for_operation(
+                scope.operation_ids[0],
+                test_id,
+                identity_name,
+                identity,
+                tool,
+                arguments,
+            )
+            events, observation, observer_errors = await self._collect_observers(
+                begin_errors,
+                required_kinds,
+            )
 
         violations = _side_effect_violations(tool_contract, events)
         if violations or observation != ObservationStatus.COMPLETE:
@@ -1202,6 +1232,39 @@ class GuardEngine:
             )
 
         return invocation, events, observation, observer_errors
+
+    def _new_observation_scope(
+        self,
+        test_id: str,
+        operation_count: int = 1,
+    ) -> ObservationScope:
+        return ObservationScope(
+            run_id=self.run_id,
+            check_id=test_id,
+            window_id=uuid.uuid4().hex,
+            operation_ids=tuple(uuid.uuid4().hex for _ in range(operation_count)),
+        )
+
+    async def _invoke_for_operation(
+        self,
+        operation_id: str,
+        test_id: str,
+        identity_name: str,
+        identity: IdentitySpec,
+        tool: str,
+        arguments: dict[str, Any],
+    ) -> InvocationRecord:
+        token = self._current_operation_id.set(operation_id)
+        try:
+            return await self._invoke(
+                test_id,
+                identity_name,
+                identity,
+                tool,
+                arguments,
+            )
+        finally:
+            self._current_operation_id.reset(token)
 
     async def _invoke(
         self,

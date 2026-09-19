@@ -15,7 +15,7 @@
 <p align="center">
   <a href="https://pypi.org/project/mcp-behaviour-guard/"><img alt="PyPI" src="https://img.shields.io/pypi/v/mcp-behaviour-guard"></a>
   <a href="https://github.com/hacker-vs-cracker/mcp-behaviour-guard/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/hacker-vs-cracker/mcp-behaviour-guard/actions/workflows/ci.yml/badge.svg"></a>
-  <img alt="Python 3.11" src="https://img.shields.io/badge/python-3.11-blue">
+  <img alt="Python 3.11-3.14" src="https://img.shields.io/badge/python-3.11--3.14-blue">
   <a href="https://github.com/hacker-vs-cracker/mcp-behaviour-guard/blob/main/LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
 </p>
 
@@ -121,7 +121,7 @@ Findings are ordered by severity, with critical findings displayed first. Each r
 
 ### Requirements
 
-- Python **3.11**; Docker and CI are pinned to **3.11.14**
+- CPython **3.11-3.14**; Docker, primary/integration CI, and release builds remain pinned to **3.11.14**
 - macOS or Ubuntu
 - Docker Desktop/Engine with Compose for the HTTP lab
 - No Docker requirement for the basic STDIO lab
@@ -514,6 +514,7 @@ Detailed source notes and the comparison date are maintained in [docs/comparison
 - The project is an MVP, not a complete MCP security platform.
 - Contract generation cannot infer the organisation's true authorization policy.
 - Side-effect detection is limited to configured observers; it is not arbitrary OS-wide syscall monitoring.
+- On macOS and Ubuntu, concurrent Behaviour Guard processes running as the same OS user serialize access when they resolve to the same configured target or observer ownership key. This reduces cross-run attribution of uncorrelated evidence, but it does not coordinate other OS users, other hosts, isolated container `/tmp` namespaces, unrelated external writers, or distinct aliases for the same backend.
 - Temporal integrity uses a finite number of calls and sessions; it can detect observed drift but cannot prove that no delayed or conditional activation exists.
 - Host-config provenance detects definition changes; it does not determine whether a newly added server or pull request is malicious.
 - The harness tests MCP servers directly. It does not claim to security-test all behaviour or reasoning of OpenAI Codex, VS Code, GitHub Copilot, Claude Code, OpenClaw, Cursor, Windsurf, Gemini CLI or other MCP-capable hosts themselves.

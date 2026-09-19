@@ -6,6 +6,14 @@ from typing import Any, Protocol
 from ..models import SideEffectKind
 
 
+@dataclass(frozen=True, slots=True)
+class ObservationScope:
+    run_id: str
+    check_id: str
+    window_id: str
+    operation_ids: tuple[str, ...]
+
+
 @dataclass(slots=True)
 class SideEffectEvent:
     observer: str

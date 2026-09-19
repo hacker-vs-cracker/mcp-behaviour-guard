@@ -9,52 +9,62 @@ from .client import McpClient
 from .evidence import contract_secrets, redact
 from .models import Contract
 from .observers import build_observer
+from .observers.ownership import observer_ownership, server_ownership_key
 from .util import response_shape, stable_hash, utc_now
 
 
 async def capture_baseline(contract: Contract, lab_mode: bool = False) -> dict[str, Any]:
     identity_name, identity = _discovery_identity(contract)
     client = McpClient(contract.server, identity_name, identity)
-    tools = await client.list_tools()
     observers = [build_observer(name, spec) for name, spec in contract.observers.items()]
+    target_key = server_ownership_key(contract.server)
 
-    probes: dict[str, Any] = {}
-    for tool_name, tool_contract in contract.tools.items():
-        if not tool_contract.read_only and not (lab_mode and contract.safety.destructive_tests):
+    async with observer_ownership(observers, extra_keys=(target_key,)):
+        tools = await client.list_tools()
+        probes: dict[str, Any] = {}
+        for tool_name, tool_contract in contract.tools.items():
+            if not tool_contract.read_only and not (lab_mode and contract.safety.destructive_tests):
+                probes[tool_name] = {
+                    "skipped": True,
+                    "reason": "state-changing baseline probe requires lab mode",
+                }
+                continue
+            probe_identity_name = (
+                tool_contract.side_effect_identity or tool_contract.permitted_identities[0]
+            )
+            probe_identity = contract.identities[probe_identity_name]
+            async with observer_ownership(observers):
+                for observer in observers:
+                    await observer.begin()
+                invocation = await McpClient(
+                    contract.server,
+                    probe_identity_name,
+                    probe_identity,
+                ).invoke(
+                    f"BASELINE-{tool_name}",
+                    tool_name,
+                    tool_contract.probe_arguments,
+                )
+                event_batches = [await observer.collect() for observer in observers]
+            events = [asdict(event) for batch in event_batches for event in batch]
             probes[tool_name] = {
-                "skipped": True,
-                "reason": "state-changing baseline probe requires lab mode",
+                "identity": probe_identity_name,
+                "allowed": invocation.allowed,
+                "response_shape": response_shape(invocation.response),
+                "side_effects": _normalise_events(events),
             }
-            continue
-        probe_identity_name = (
-            tool_contract.side_effect_identity or tool_contract.permitted_identities[0]
-        )
-        probe_identity = contract.identities[probe_identity_name]
-        for observer in observers:
-            await observer.begin()
-        invocation = await McpClient(contract.server, probe_identity_name, probe_identity).invoke(
-            f"BASELINE-{tool_name}", tool_name, tool_contract.probe_arguments
-        )
-        event_batches = [await observer.collect() for observer in observers]
-        events = [asdict(event) for batch in event_batches for event in batch]
-        probes[tool_name] = {
-            "identity": probe_identity_name,
-            "allowed": invocation.allowed,
-            "response_shape": response_shape(invocation.response),
-            "side_effects": _normalise_events(events),
-        }
 
-    tool_map = {tool["name"]: tool for tool in tools}
-    payload = {
-        "format_version": 1,
-        "captured_at": utc_now(),
-        "target": contract.server.target_label,
-        "tools": tool_map,
-        "probes": probes,
-    }
-    payload = redact(payload, contract_secrets(contract))
-    payload["fingerprint"] = stable_hash(payload)
-    return payload
+        tool_map = {tool["name"]: tool for tool in tools}
+        payload = {
+            "format_version": 1,
+            "captured_at": utc_now(),
+            "target": contract.server.target_label,
+            "tools": tool_map,
+            "probes": probes,
+        }
+        payload = redact(payload, contract_secrets(contract))
+        payload["fingerprint"] = stable_hash(payload)
+        return payload
 
 
 def write_baseline(baseline: dict[str, Any], path: Path) -> None:
