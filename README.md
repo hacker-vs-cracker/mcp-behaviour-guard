@@ -15,7 +15,7 @@
 <p align="center">
   <a href="https://pypi.org/project/mcp-behaviour-guard/"><img alt="PyPI" src="https://img.shields.io/pypi/v/mcp-behaviour-guard"></a>
   <a href="https://github.com/hacker-vs-cracker/mcp-behaviour-guard/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/hacker-vs-cracker/mcp-behaviour-guard/actions/workflows/ci.yml/badge.svg"></a>
-  <img alt="Python 3.11" src="https://img.shields.io/badge/python-3.11-blue">
+  <img alt="Python 3.11-3.14" src="https://img.shields.io/badge/python-3.11--3.14-blue">
   <a href="https://github.com/hacker-vs-cracker/mcp-behaviour-guard/blob/main/LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
 </p>
 
@@ -121,7 +121,7 @@ Findings are ordered by severity, with critical findings displayed first. Each r
 
 ### Requirements
 
-- Python **3.11**; Docker and CI are pinned to **3.11.14**
+- CPython **3.11-3.14**; Docker, primary/integration CI, and release builds remain pinned to **3.11.14**
 - macOS or Ubuntu
 - Docker Desktop/Engine with Compose for the HTTP lab
 - No Docker requirement for the basic STDIO lab

@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Expand supported CPython versions from 3.11 to 3.11-3.14, align `mcp-guard doctor`, and add an Ubuntu CI compatibility matrix while keeping primary Docker/integration execution pinned to 3.11.14.
 - Serialize overlapping same-host, same-user Guard runs and observer windows for matching configured ownership keys so uncorrelated JSONL, HTTP, filesystem, and baseline evidence is not cross-attributed.
 - Add internal per-operation observation identities for replay/check scoping without changing schema-v2 invocation evidence.
 - Reject duplicate or overlapping observer sources and canonicalize target/resource aliases used for ownership.
