@@ -50,6 +50,11 @@ class HttpAuditObserver:
         self.spec = spec
         self.observes = set(spec.observes)
         self.complete_observes = set(self.observes)
+        self._baseline_raw_events: list[Any] | None = None
+
+    def _correlation_mode(self) -> str:
+        value = getattr(self.spec, "correlation", "none")
+        return value if isinstance(value, str) else "none"
 
     @staticmethod
     def _resource_key(url: str) -> str:
@@ -69,22 +74,51 @@ class HttpAuditObserver:
 
     @property
     def ownership_keys(self) -> tuple[str, ...]:
+        event_key = self._resource_key(self.spec.events_url)
+        if self._correlation_mode() == "mcp_meta":
+            return (event_key,)
+
+        reset_url = self.spec.reset_url
+        if reset_url is None:
+            return (event_key,)
         return (
-            self._resource_key(self.spec.events_url),
-            self._resource_key(self.spec.reset_url),
+            event_key,
+            self._resource_key(reset_url),
         )
 
     async def begin(self) -> None:
+        self._baseline_raw_events = None
         async with httpx.AsyncClient(timeout=self.spec.timeout_seconds) as client:
-            response = await client.post(self.spec.reset_url)
+            if self._correlation_mode() == "mcp_meta":
+                self._baseline_raw_events = await self._fetch_raw_events(client)
+                return
+
+            reset_url = self.spec.reset_url
+            if reset_url is None:
+                raise ValueError(f"observer {self.name} requires a reset URL")
+            response = await client.post(reset_url)
             response.raise_for_status()
 
     async def collect(self) -> list[SideEffectEvent]:
+        baseline = self._baseline_raw_events
+        if self._correlation_mode() == "mcp_meta" and baseline is None:
+            raise ObserverCollectionError(
+                f"observer {self.name} correlated collection requires a successful begin baseline"
+            )
+
         async with httpx.AsyncClient(timeout=self.spec.timeout_seconds) as client:
             if self.spec.settle_timeout_seconds == 0:
                 raw_events = await self._fetch_raw_events(client)
+                if self._correlation_mode() == "mcp_meta":
+                    assert baseline is not None
+                    new_raw = self._append_suffix(raw_events, baseline, [])
+                    return self._parse_events(new_raw, [])
                 return self._parse_events(raw_events, [])
-            return await self._collect_settled(client)
+
+            return await self._collect_settled(
+                client,
+                initial_raw=baseline if self._correlation_mode() == "mcp_meta" else None,
+            )
 
     async def _fetch_raw_events(self, client: httpx.AsyncClient) -> list[Any]:
         response = await client.get(self.spec.events_url)
@@ -101,6 +135,30 @@ class HttpAuditObserver:
         if not isinstance(raw_events, list):
             raise ValueError(f"observer {self.name} did not return an events list")
         return raw_events
+
+    def _append_suffix(
+        self,
+        raw_events: list[Any],
+        previous_raw: list[Any],
+        events: list[SideEffectEvent],
+    ) -> list[Any]:
+        if len(raw_events) < len(previous_raw):
+            raise ObserverCollectionError(
+                f"observer {self.name} event stream shrank during settling",
+                events,
+            )
+
+        prior_prefix = raw_events[: len(previous_raw)]
+        if not all(
+            _same_json_value(current, previous)
+            for current, previous in zip(prior_prefix, previous_raw, strict=True)
+        ):
+            raise ObserverCollectionError(
+                f"observer {self.name} event stream changed before its append position",
+                events,
+            )
+
+        return raw_events[len(previous_raw) :]
 
     def _parse_events(
         self,
@@ -126,13 +184,15 @@ class HttpAuditObserver:
     async def _collect_settled(
         self,
         client: httpx.AsyncClient,
+        *,
+        initial_raw: list[Any] | None = None,
     ) -> list[SideEffectEvent]:
         loop = asyncio.get_running_loop()
         started = loop.time()
         deadline = started + self.spec.settle_timeout_seconds
         quiet_since = started
 
-        previous_raw: list[Any] = []
+        previous_raw: list[Any] = list(initial_raw or [])
         events: list[SideEffectEvent] = []
         completed_snapshot = False
 
@@ -164,22 +224,7 @@ class HttpAuditObserver:
 
             first_snapshot = not completed_snapshot
             completed_snapshot = True
-            if len(raw_events) < len(previous_raw):
-                raise ObserverCollectionError(
-                    f"observer {self.name} event stream shrank during settling",
-                    events,
-                )
-            prior_prefix = raw_events[: len(previous_raw)]
-            if not all(
-                _same_json_value(current, previous)
-                for current, previous in zip(prior_prefix, previous_raw, strict=True)
-            ):
-                raise ObserverCollectionError(
-                    f"observer {self.name} event stream changed before its append position",
-                    events,
-                )
-
-            new_raw = raw_events[len(previous_raw) :]
+            new_raw = self._append_suffix(raw_events, previous_raw, events)
             if first_snapshot or new_raw:
                 quiet_since = loop.time()
             if new_raw:

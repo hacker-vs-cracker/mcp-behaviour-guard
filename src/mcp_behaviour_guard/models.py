@@ -230,15 +230,18 @@ def _validate_settling_window(
 class HttpAuditObserverSpec(ContractModel):
     type: Literal["http_audit"]
     events_url: str
-    reset_url: str
+    reset_url: str | None = None
     timeout_seconds: float = Field(default=5, gt=0, le=60)
     settle_timeout_seconds: float = Field(default=0, ge=0, le=60)
     quiet_period_seconds: float = Field(default=0, ge=0, le=60)
+    correlation: Literal["none", "mcp_meta"] = "none"
     observes: list[SideEffectKind] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_settling_window(self) -> HttpAuditObserverSpec:
         _validate_settling_window(self.settle_timeout_seconds, self.quiet_period_seconds)
+        if self.correlation == "none" and self.reset_url is None:
+            raise ValueError("uncorrelated HTTP observation requires reset_url")
         return self
 
 
@@ -457,21 +460,24 @@ class Contract(ContractModel):
                 http_event_sources[event_source] = observer_name
                 http_resources[event_source] = observer_name
 
-                reset_source = normalized_http_source(spec.reset_url)
-                previous_reset = http_reset_sources.get(reset_source)
-                if previous_reset is not None:
-                    raise ValueError(
-                        f"observers {previous_reset!r} and {observer_name!r} "
-                        "share one HTTP reset stream"
-                    )
-                previous_resource = http_resources.get(reset_source)
-                if previous_resource is not None and previous_resource != observer_name:
-                    raise ValueError(
-                        f"observers {previous_resource!r} and {observer_name!r} "
-                        "share one HTTP audit resource"
-                    )
-                http_reset_sources[reset_source] = observer_name
-                http_resources[reset_source] = observer_name
+                if spec.correlation == "none":
+                    if spec.reset_url is None:
+                        raise ValueError(f"observer {observer_name!r} requires an HTTP reset URL")
+                    reset_source = normalized_http_source(spec.reset_url)
+                    previous_reset = http_reset_sources.get(reset_source)
+                    if previous_reset is not None:
+                        raise ValueError(
+                            f"observers {previous_reset!r} and {observer_name!r} "
+                            "share one HTTP reset stream"
+                        )
+                    previous_resource = http_resources.get(reset_source)
+                    if previous_resource is not None and previous_resource != observer_name:
+                        raise ValueError(
+                            f"observers {previous_resource!r} and {observer_name!r} "
+                            "share one HTTP audit resource"
+                        )
+                    http_reset_sources[reset_source] = observer_name
+                    http_resources[reset_source] = observer_name
                 continue
 
             if isinstance(spec, FilesystemObserverSpec):
