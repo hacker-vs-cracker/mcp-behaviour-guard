@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Add opt-in MCP metadata correlation for shared JSONL audit streams, attribute events to the current Guard operation, fail closed on missing or malformed required correlation, preserve partial observer evidence, and keep Guard correlation data out of exported evidence.
 - Add opt-in bounded settling and position-based deduplication for JSONL and HTTP effect observers, preserving confirmed runtime events while downgrading inconsistent later telemetry.
 - Expand supported CPython versions from 3.11 to 3.11-3.14, align `mcp-guard doctor`, and add an Ubuntu CI compatibility matrix while keeping primary Docker/integration execution pinned to 3.11.14.
 - Serialize overlapping same-host, same-user Guard runs and observer windows for matching configured ownership keys so uncorrelated JSONL, HTTP, filesystem, and baseline evidence is not cross-attributed.
