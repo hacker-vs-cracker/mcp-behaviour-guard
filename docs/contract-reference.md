@@ -21,7 +21,50 @@ Streamable HTTP fields:
 
 - `url`: MCP endpoint.
 - `verify_tls`: disable only for authorized local labs.
-- `allowed_hosts`: hosts accepted by local target validation.
+- `allowed_hosts`: hosts accepted by legacy local target validation.
+- `http_destination`: optional restricted HTTP destination policy. Omitted contracts keep legacy
+  redirect and HTTPX environment behaviour and do not gain a synthetic policy object in
+  serialized contract data.
+
+### Restricted HTTP destination policy
+
+Restricted HTTP destination policy is explicit and opt-in:
+
+```yaml
+server:
+  name: reviewed-http-server
+  transport: streamable-http
+  url: https://mcp.example.test/mcp
+  http_destination:
+    allowed_origins:
+      - https://mcp.example.test
+    allow_redirects: false
+```
+
+With `http_destination` present:
+
+- `allowed_origins` is required and contains HTTP/HTTPS origins only. Scheme, normalized hostname,
+  and effective port form the destination identity. Default HTTP/HTTPS ports normalize to 80/443;
+  a non-default port remains distinct.
+- origin entries cannot contain URL userinfo, a non-root path, query, or fragment.
+- the configured `server.url` origin must be in `allowed_origins`.
+- `allow_redirects` defaults to `false`. When enabled, every actual HTTP request, including
+  redirect hops, is checked at the client request boundary before it is sent. A redirect to a
+  different scheme, hostname, or port therefore requires that resulting origin to be explicitly
+  approved.
+- restricted mode uses `trust_env=False`, so ambient HTTPX proxy and certificate environment
+  settings are not inherited. Configure TLS expectations deliberately instead of relying on
+  ambient process environment.
+- restricted destination approval is independent of legacy `server.allowed_hosts` and
+  `safety.target_allowlist`.
+
+Approving multiple origins can authorize identity headers to participate in requests to those
+destinations; review cross-origin redirect approvals accordingly.
+
+This policy is URL/destination hardening, not network containment. It does not provide DNS
+pinning or DNS-rebinding prevention, IP-level egress filtering, TLS certificate pinning,
+firewall/network-namespace isolation, or protection from a compromised approved endpoint.
+R10-B remains the separate stronger containment track.
 
 STDIO fields:
 

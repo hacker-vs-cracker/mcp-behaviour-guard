@@ -13,7 +13,11 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
 
-from .config import resolve_restricted_stdio_launch
+from .config import (
+    resolve_restricted_http_destination,
+    resolve_restricted_stdio_launch,
+    validate_restricted_http_request_url,
+)
 from .models import (
     AuthorizationStatus,
     ExecutionStatus,
@@ -53,13 +57,33 @@ class McpClient:
             raise ValueError("streamable-http target is missing server.url")
 
         timeout = httpx.Timeout(self.server.timeout_seconds)
-        async with (
-            httpx.AsyncClient(
+        if self.server.http_destination is not None:
+            allowed_origins, allow_redirects = resolve_restricted_http_destination(self.server)
+
+            async def enforce_destination(request: httpx.Request) -> None:
+                validate_restricted_http_request_url(
+                    str(request.url),
+                    allowed_origins,
+                )
+
+            http_client = httpx.AsyncClient(
+                headers=self.identity.headers,
+                timeout=timeout,
+                verify=self.server.verify_tls,
+                follow_redirects=allow_redirects,
+                trust_env=False,
+                event_hooks={"request": [enforce_destination]},
+            )
+        else:
+            http_client = httpx.AsyncClient(
                 headers=self.identity.headers,
                 timeout=timeout,
                 verify=self.server.verify_tls,
                 follow_redirects=True,
-            ) as http_client,
+            )
+
+        async with (
+            http_client,
             streamable_http_client(
                 self.server.url,
                 http_client=http_client,
