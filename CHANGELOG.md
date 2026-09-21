@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Add opt-in restricted Streamable HTTP destination policy with scheme/host/effective-port origin approval, redirect-hop enforcement, redirects disabled by default, and ambient HTTPX environment/proxy inheritance disabled in restricted mode; preserve omitted-policy legacy HTTP behaviour and document DNS/network-containment limits.
 - Add opt-in restricted STDIO launch policy with canonical executable/cwd approval, minimal parent-environment inheritance, authoritative Guard identity metadata, and launcher-path preservation for virtualenv/wrapper semantics; keep legacy STDIO behaviour unchanged and document that this is policy hardening rather than OS-level sandboxing.
 - Extend opt-in MCP metadata correlation to shared HTTP audit streams using non-destructive begin snapshots and append-only suffix attribution; keep legacy uncorrelated HTTP reset behavior unchanged.
 - Add opt-in MCP metadata correlation for shared JSONL audit streams, attribute events to the current Guard operation, fail closed on missing or malformed required correlation, preserve partial observer evidence, and keep Guard correlation data out of exported evidence.

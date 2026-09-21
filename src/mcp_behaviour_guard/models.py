@@ -74,6 +74,11 @@ class ContractModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class HttpDestinationSpec(ContractModel):
+    allowed_origins: list[str] = Field(default_factory=list)
+    allow_redirects: bool = False
+
+
 class StdioLaunchSpec(ContractModel):
     mode: Literal["legacy", "restricted"] = "legacy"
     allowed_executables: list[Path] = Field(default_factory=list)
@@ -100,6 +105,7 @@ class ServerSpec(ContractModel):
     timeout_seconds: float = Field(default=15, gt=0, le=300)
     verify_tls: bool = True
     allowed_hosts: list[str] = Field(default_factory=lambda: ["127.0.0.1", "localhost"])
+    http_destination: HttpDestinationSpec | None = None
     stdio_launch: StdioLaunchSpec | None = None
 
     @model_validator(mode="after")
@@ -110,11 +116,15 @@ class ServerSpec(ContractModel):
             raise ValueError("stdio servers require server.command")
         if self.transport != "stdio" and "stdio_launch" in self.model_fields_set:
             raise ValueError("server.stdio_launch is only valid for stdio transport")
+        if self.transport != "streamable-http" and "http_destination" in self.model_fields_set:
+            raise ValueError("server.http_destination is only valid for streamable-http transport")
         return self
 
     @model_serializer(mode="wrap")
-    def omit_absent_stdio_launch(self, handler: Any) -> dict[str, Any]:
+    def omit_absent_transport_policies(self, handler: Any) -> dict[str, Any]:
         result: dict[str, Any] = handler(self)
+        if self.http_destination is None:
+            result.pop("http_destination", None)
         if self.stdio_launch is None:
             result.pop("stdio_launch", None)
         return result

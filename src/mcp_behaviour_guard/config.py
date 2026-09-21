@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
 import shutil
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 
 import yaml
 from pydantic import ValidationError
@@ -240,10 +241,117 @@ def resolve_restricted_stdio_launch(server: ServerSpec) -> tuple[str, Path]:
     return str(launch_command), canonical_cwd
 
 
+_HttpOrigin = tuple[str, str, int]
+
+
+def _normalize_http_hostname(hostname: str, *, label: str) -> str:
+    candidate = hostname.rstrip(".")
+    if not candidate:
+        raise ContractError(f"{label} is missing a hostname")
+
+    try:
+        return ipaddress.ip_address(candidate).compressed.lower()
+    except ValueError:
+        try:
+            return candidate.encode("idna").decode("ascii").lower()
+        except UnicodeError as exc:
+            raise ContractError(f"{label} contains an invalid hostname") from exc
+
+
+def _parse_http_origin(
+    value: str,
+    *,
+    origin_only: bool,
+    label: str,
+) -> _HttpOrigin:
+    try:
+        parsed = urlsplit(value)
+    except ValueError as exc:
+        raise ContractError(f"{label} contains an invalid host or port") from exc
+
+    scheme = parsed.scheme.lower()
+    if scheme not in {"http", "https"}:
+        raise ContractError(f"{label} must use http or https")
+    if parsed.username is not None or parsed.password is not None:
+        raise ContractError(f"{label} must not contain URL userinfo")
+
+    try:
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError as exc:
+        raise ContractError(f"{label} contains an invalid host or port") from exc
+
+    if not hostname:
+        raise ContractError(f"{label} is missing a hostname")
+
+    if origin_only and (parsed.path not in {"", "/"} or parsed.query or parsed.fragment):
+        raise ContractError(f"{label} must be an origin without path, query, or fragment")
+
+    normalized_host = _normalize_http_hostname(hostname, label=label)
+    effective_port = port if port is not None else (443 if scheme == "https" else 80)
+    return scheme, normalized_host, effective_port
+
+
+def _render_http_origin(origin: _HttpOrigin) -> str:
+    scheme, hostname, port = origin
+    rendered_host = f"[{hostname}]" if ":" in hostname else hostname
+    return f"{scheme}://{rendered_host}:{port}"
+
+
+def resolve_restricted_http_destination(
+    server: ServerSpec,
+) -> tuple[frozenset[_HttpOrigin], bool]:
+    policy = server.http_destination
+    if server.transport != "streamable-http" or policy is None:
+        raise ContractError("restricted HTTP destination policy is not configured")
+    if not policy.allowed_origins:
+        raise ContractError("restricted HTTP destination policy requires allowed origins")
+    if not server.url:
+        raise ContractError("restricted HTTP destination policy requires server.url")
+
+    allowed = frozenset(
+        _parse_http_origin(
+            origin,
+            origin_only=True,
+            label="restricted HTTP allowed origin",
+        )
+        for origin in policy.allowed_origins
+    )
+    target = _parse_http_origin(
+        server.url,
+        origin_only=False,
+        label="restricted HTTP target URL",
+    )
+    if target not in allowed:
+        raise ContractError(
+            f"restricted HTTP target origin {_render_http_origin(target)!r} is not allowlisted"
+        )
+    return allowed, policy.allow_redirects
+
+
+def validate_restricted_http_request_url(
+    url: str,
+    allowed_origins: frozenset[_HttpOrigin],
+) -> None:
+    origin = _parse_http_origin(
+        url,
+        origin_only=False,
+        label="restricted HTTP request URL",
+    )
+    if origin not in allowed_origins:
+        raise ContractError(
+            f"restricted HTTP request origin {_render_http_origin(origin)!r} is not allowlisted"
+        )
+
+
 def validate_target(contract: Contract, lab_mode: bool) -> None:
     del lab_mode  # destructive gating is enforced by the engine
     server = contract.server
     if server.transport == "streamable-http":
+        if server.http_destination is not None:
+            resolve_restricted_http_destination(server)
+            return
+
         parsed = urlparse(server.url or "")
         host = parsed.hostname or ""
         allowed = set(contract.safety.target_allowlist) | set(server.allowed_hosts)
