@@ -125,6 +125,8 @@ A session test writes a unique marker using one identity/session and reads using
 
 ### HTTP audit observer
 
+Legacy HTTP observation remains reset-based and uncorrelated by default:
+
 ```yaml
 runtime:
   type: http_audit
@@ -132,7 +134,40 @@ runtime:
   reset_url: http://127.0.0.1:8000/audit/reset
 ```
 
-The event endpoint returns a list or `{ "events": [...] }`.
+The event endpoint returns a list or `{ "events": [...] }`. With the default
+`correlation: none`, `reset_url` is required and Guard clears the audit stream at
+the start of each observation window.
+
+For a shared append-only HTTP event stream, correlation is explicit and opt-in:
+
+```yaml
+runtime:
+  type: http_audit
+  events_url: http://127.0.0.1:8000/audit/events
+  correlation: mcp_meta
+```
+
+With `correlation: mcp_meta`, `reset_url` is optional and is not used for
+observation or ownership. Instead, `begin()` reads the current event list without
+mutating it and treats that complete list as the window baseline. Collection
+requires every later snapshot to preserve that baseline and any already observed
+append prefix; only newly appended positions are parsed as events. A shrink or
+prefix rewrite downgrades observation while preserving already validated appended
+events under the normal bounded-settling rules.
+
+A cooperating target must copy the Guard correlation metadata entry
+`io.github.hacker-vs-cracker.mcp-behaviour-guard/correlation` unchanged from the
+MCP request `_meta` into each corresponding HTTP audit event `_meta`. Guard then
+applies the same current-operation attribution, foreign-event exclusion,
+missing/malformed-correlation handling, and export stripping used for correlated
+JSONL telemetry.
+
+HTTP correlation is cooperative, not authenticated provenance. A target that can
+write the stream can spoof or copy metadata, and it can omit telemetry entirely.
+The HTTP observer still consumes complete list snapshots rather than a cursor or
+streaming API, so this mode is intended for bounded audit feeds whose retained
+history can be fetched as one event list. It does not add cross-host locking or
+distributed coordination.
 
 ### Filesystem observer
 
@@ -191,11 +226,11 @@ correlation entry before exporting evidence; unrelated `_meta` fields remain int
 This is cooperative correlation, not authenticated provenance. A target that can write
 the audit stream can copy or spoof correlation metadata, and a target can omit telemetry
 entirely. The mechanism therefore does not prove that an unreported effect did not occur.
-It adds no cross-host or distributed coordination. HTTP audit correlation and filesystem
-correlation remain outside this mode.
+It adds no cross-host or distributed coordination. Filesystem correlation remains outside
+this mode.
 
 
-Observer sources must be independent within one contract. Validation rejects duplicate JSONL audit paths, HTTP audit resources reused across different observers (including event/reset cross-role reuse and default-port aliases), overlapping filesystem roots within one filesystem observer, and overlapping filesystem roots across filesystem observers. A single HTTP observer may use the same URL for GET events and POST reset when that endpoint supports both methods. These checks avoid counting or mutating the same uncorrelated evidence resource through multiple observer definitions.
+Observer sources must be independent within one contract. Validation rejects duplicate JSONL audit paths, duplicate HTTP event streams, overlapping filesystem roots within one filesystem observer, and overlapping filesystem roots across filesystem observers. For uncorrelated HTTP observers, reset resources also participate in duplicate and event/reset cross-role checks (including default-port aliases); a single observer may use the same URL for GET events and POST reset when that endpoint supports both methods. Correlated HTTP observers reserve only `events_url` because any configured `reset_url` is unused. These checks avoid counting or mutating the same evidence resource through incompatible observer definitions.
 
 JSONL and HTTP audit observers optionally support bounded settling with `settle_timeout_seconds` and `quiet_period_seconds`. Both default to `0`, preserving the existing one-shot behavior. When enabled, both values must be positive, the quiet period cannot exceed the timeout, and each value is capped at 60 seconds. JSONL settling attributes complete records by source identity and byte position and can wait for a source that is created shortly after invocation. HTTP settling requires each later event list to preserve the complete earlier prefix and treats only appended positions as new events. During Guard runtime assessment, later source disappearance, observed shrink, replacement, rewrite of already-consumed JSONL bytes, HTTP prefix rewrite, transport failure, or malformed telemetry preserves already validated events while downgrading observation through a collection error. JSONL continuity checks cover the bytes consumed during the current settling window. Because this is bounded polling rather than filesystem event capture, a transient same-inode truncate-and-regrow can remain indistinguishable when it occurs entirely between polls, leaves the observed size at or beyond the current cursor, and does not alter bytes already verified in that window. Baseline capture remains fail-closed if collection itself fails. The settling deadline is a finite temporal boundary, not proof that an arbitrarily delayed effect cannot occur.
 

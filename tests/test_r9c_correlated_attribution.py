@@ -18,7 +18,6 @@ from mcp_behaviour_guard.models import (
     Contract,
     ExecutionStatus,
     FindingStatus,
-    HttpAuditObserverSpec,
     IdentitySpec,
     InvocationRecord,
     JsonlAuditObserverSpec,
@@ -234,17 +233,6 @@ def test_legacy_jsonl_remains_uncorrelated_by_default(tmp_path: Path) -> None:
         observes=[SideEffectKind.DATABASE_WRITE],
     )
     assert getattr(spec, "correlation", "none") == "none"
-
-
-def test_http_correlation_remains_out_of_scope_for_c1a() -> None:
-    with pytest.raises(ValueError):
-        HttpAuditObserverSpec(
-            type="http_audit",
-            events_url="http://127.0.0.1/events",
-            reset_url="http://127.0.0.1/reset",
-            correlation="mcp_meta",
-            observes=[SideEffectKind.DATABASE_WRITE],
-        )
 
 
 def test_public_evidence_models_do_not_gain_guard_operation_fields() -> None:
