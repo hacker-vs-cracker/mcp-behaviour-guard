@@ -74,6 +74,21 @@ class ContractModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class StdioLaunchSpec(ContractModel):
+    mode: Literal["legacy", "restricted"] = "legacy"
+    allowed_executables: list[Path] = Field(default_factory=list)
+    allowed_cwd_roots: list[Path] = Field(default_factory=list)
+    inherit_environment: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def legacy_mode_has_no_restricted_settings(self) -> StdioLaunchSpec:
+        if self.mode == "legacy" and (
+            self.allowed_executables or self.allowed_cwd_roots or self.inherit_environment
+        ):
+            raise ValueError("legacy stdio_launch cannot include restricted settings")
+        return self
+
+
 class ServerSpec(ContractModel):
     name: str
     transport: Literal["streamable-http", "stdio"] = "streamable-http"
@@ -85,6 +100,7 @@ class ServerSpec(ContractModel):
     timeout_seconds: float = Field(default=15, gt=0, le=300)
     verify_tls: bool = True
     allowed_hosts: list[str] = Field(default_factory=lambda: ["127.0.0.1", "localhost"])
+    stdio_launch: StdioLaunchSpec | None = None
 
     @model_validator(mode="after")
     def transport_fields_are_valid(self) -> ServerSpec:
@@ -92,7 +108,16 @@ class ServerSpec(ContractModel):
             raise ValueError("streamable-http servers require server.url")
         if self.transport == "stdio" and not self.command:
             raise ValueError("stdio servers require server.command")
+        if self.transport != "stdio" and "stdio_launch" in self.model_fields_set:
+            raise ValueError("server.stdio_launch is only valid for stdio transport")
         return self
+
+    @model_serializer(mode="wrap")
+    def omit_absent_stdio_launch(self, handler: Any) -> dict[str, Any]:
+        result: dict[str, Any] = handler(self)
+        if self.stdio_launch is None:
+            result.pop("stdio_launch", None)
+        return result
 
     @property
     def target_label(self) -> str:

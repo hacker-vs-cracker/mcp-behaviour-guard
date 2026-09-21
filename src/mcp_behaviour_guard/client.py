@@ -13,6 +13,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
 
+from .config import resolve_restricted_stdio_launch
 from .models import (
     AuthorizationStatus,
     ExecutionStatus,
@@ -81,20 +82,45 @@ class McpClient:
         if not self.server.command:
             raise ValueError("stdio target is missing server.command")
 
-        environment = dict(os.environ)
+        command = self.server.command or ""
+        cwd = self.server.cwd
+        launch = self.server.stdio_launch
+        if launch is not None and launch.mode == "restricted":
+            command, canonical_cwd = resolve_restricted_stdio_launch(self.server)
+            cwd = canonical_cwd
+            environment = {
+                name: os.environ[name] for name in launch.inherit_environment if name in os.environ
+            }
+            restricted = True
+        else:
+            environment = dict(os.environ)
+            restricted = False
+
         environment.update(self.server.environment)
         environment.update(self.identity.environment)
-        environment.setdefault("MCP_GUARD_IDENTITY", self.identity_name)
-        if self.identity.tenant is not None:
-            environment.setdefault("MCP_GUARD_TENANT", self.identity.tenant)
-        if self.identity.role is not None:
-            environment.setdefault("MCP_GUARD_ROLE", self.identity.role)
+
+        if restricted:
+            environment["MCP_GUARD_IDENTITY"] = self.identity_name
+            if self.identity.tenant is None:
+                environment.pop("MCP_GUARD_TENANT", None)
+            else:
+                environment["MCP_GUARD_TENANT"] = self.identity.tenant
+            if self.identity.role is None:
+                environment.pop("MCP_GUARD_ROLE", None)
+            else:
+                environment["MCP_GUARD_ROLE"] = self.identity.role
+        else:
+            environment.setdefault("MCP_GUARD_IDENTITY", self.identity_name)
+            if self.identity.tenant is not None:
+                environment.setdefault("MCP_GUARD_TENANT", self.identity.tenant)
+            if self.identity.role is not None:
+                environment.setdefault("MCP_GUARD_ROLE", self.identity.role)
 
         parameters = StdioServerParameters(
-            command=self.server.command,
+            command=command,
             args=self.server.args,
             env=environment,
-            cwd=self.server.cwd,
+            cwd=cwd,
         )
         async with (
             stdio_client(parameters) as (read_stream, write_stream),

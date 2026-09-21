@@ -15,7 +15,7 @@ Common fields:
 - `name`: human-readable target name.
 - `transport`: `streamable-http` or `stdio`.
 - `timeout_seconds`: per-client timeout.
-- `environment`: environment variables inherited by a STDIO server process.
+- `environment`: environment variables explicitly supplied to a STDIO server process. Legacy STDIO launch also inherits the Guard process environment; restricted launch does not unless names are listed in `stdio_launch.inherit_environment`.
 
 Streamable HTTP fields:
 
@@ -28,6 +28,65 @@ STDIO fields:
 - `command`: executable used to launch the server.
 - `args`: argument list passed without shell interpolation.
 - `cwd`: child-process working directory.
+- `stdio_launch`: optional launch policy. Omitted contracts keep legacy behaviour and do not gain
+  a synthetic `stdio_launch` object in serialized contract data.
+
+### Restricted STDIO launch
+
+Restricted STDIO launch is explicit and opt-in:
+
+```yaml
+server:
+  name: reviewed-local-server
+  transport: stdio
+  command: /reviewed/venv/bin/python
+  args: [-m, reviewed_server]
+  cwd: /reviewed/workspace
+  stdio_launch:
+    mode: restricted
+    allowed_executables:
+      - /canonical/interpreter/path/python3.11
+    allowed_cwd_roots:
+      - /reviewed/workspace
+    inherit_environment:
+      - PATH
+```
+
+`mode: legacy` is the default behaviour. It keeps the existing
+`safety.allowed_stdio_commands` basename check, existing STDIO environment inheritance, and
+existing cwd behaviour. Restricted-only settings are rejected when `mode: legacy`.
+
+With `mode: restricted`:
+
+- `allowed_executables` is required and contains absolute, already-canonical paths to existing
+  executable files. Restricted approval is independent of `safety.allowed_stdio_commands`.
+- `command` may be an absolute launcher path or an executable basename. Guard selects the
+  absolute launch path once (using the Guard process `PATH` for a basename), resolves its
+  canonical target for the allowlist comparison, then passes that already-selected absolute
+  launcher path to the MCP SDK. It does not perform a second `PATH` lookup. Keeping the selected
+  launcher path preserves wrapper/symlink semantics such as Python virtual environments while
+  canonical identity is still used for approval.
+- `server.cwd` is required, absolute, and must resolve to an existing directory inside one of
+  the absolute, already-canonical `allowed_cwd_roots`. Symlink escapes are rejected. Guard
+  launches with the validated canonical cwd.
+- the child starts with no ambient parent-process environment. Only names listed in
+  `inherit_environment` are copied from the Guard process when present, followed by explicit
+  `server.environment` and identity `environment` values.
+- Guard writes `MCP_GUARD_IDENTITY` and, when present, `MCP_GUARD_TENANT` and
+  `MCP_GUARD_ROLE` last. Contract environment entries cannot override those Guard metadata
+  values in restricted mode.
+- `--lab-mode` does not enable, disable, or bypass restricted-launch checks.
+
+The contract and operator are trusted inputs. Explicitly inherited or configured variables such
+as `PATH`, language-runtime injection variables, proxy settings, or cloud credentials can grant
+the child additional capability and should be reviewed accordingly.
+
+Restricted launch is policy hardening, not a process sandbox. It does not provide filesystem or
+network isolation, seccomp/AppArmor/SELinux enforcement, namespace/cgroup isolation, prevention
+of descendant process execution, or executable-content authentication. Guard validates the
+canonical executable target at the launch boundary and then asks the OS/MCP SDK to create the
+process; replacement of the selected path or symlink in that interval remains a residual TOCTOU
+risk. Stronger OS/container containment is a separate execution-boundary concern.
 
 ## `identities`
 
@@ -254,7 +313,7 @@ alerts:
 - `destructive_tests`: permits replay probes in this contract.
 - `require_lab_mode`: documents that explicit lab mode is expected.
 - `target_allowlist`: prevents execution against undeclared HTTP hosts.
-- `allowed_stdio_commands`: allows only named local executables.
+- `allowed_stdio_commands`: legacy STDIO basename allowlist. Restricted STDIO launch uses `server.stdio_launch.allowed_executables` instead.
 
 Replay tests run only when `destructive_tests` is true and the CLI receives `--lab-mode`.
 
