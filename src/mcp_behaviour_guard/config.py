@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 import yaml
 from pydantic import ValidationError
 
-from .models import Contract
+from .models import Contract, ServerSpec
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)(?::-(.*?))?\}")
 
@@ -135,6 +135,111 @@ def load_contract(path: Path) -> Contract:
         raise ContractError(_redact_resolved_values(str(exc), resolved_values)) from exc
 
 
+def resolve_restricted_stdio_launch(server: ServerSpec) -> tuple[str, Path]:
+    if server.transport != "stdio":
+        raise ContractError("restricted STDIO launch requires stdio transport")
+
+    launch = server.stdio_launch
+    if launch is None or launch.mode != "restricted":
+        raise ContractError("restricted STDIO launch policy is not enabled")
+
+    if not launch.allowed_executables:
+        raise ContractError("restricted STDIO launch requires allowed executables")
+
+    canonical_allowed: set[Path] = set()
+    for configured in launch.allowed_executables:
+        if not configured.is_absolute():
+            raise ContractError("restricted STDIO allowed executable paths must be absolute")
+        try:
+            resolved = configured.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise ContractError(
+                f"restricted STDIO allowed executable is unavailable: {configured}"
+            ) from exc
+        if resolved != configured:
+            raise ContractError(
+                "restricted STDIO allowed executable paths must already be canonical"
+            )
+        if not resolved.is_file() or not os.access(resolved, os.X_OK):
+            raise ContractError(
+                f"restricted STDIO allowed executable is not executable: {configured}"
+            )
+        canonical_allowed.add(resolved)
+
+    command = server.command or ""
+    command_path = Path(command)
+    if command_path.is_absolute():
+        candidate = command_path
+    else:
+        if command_path.name != command:
+            raise ContractError(
+                "restricted STDIO command must be an absolute path or executable basename"
+            )
+        located = shutil.which(command)
+        if located is None:
+            raise ContractError(f"restricted STDIO command {command!r} was not found")
+        candidate = Path(located)
+
+    launch_command = Path(os.path.abspath(candidate))
+
+    try:
+        canonical_command = launch_command.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ContractError(
+            f"restricted STDIO executable {command!r} could not be resolved"
+        ) from exc
+
+    if not canonical_command.is_file() or not os.access(canonical_command, os.X_OK):
+        raise ContractError(
+            f"restricted STDIO executable {str(canonical_command)!r} is not executable"
+        )
+    if canonical_command not in canonical_allowed:
+        raise ContractError(
+            f"restricted STDIO executable {str(canonical_command)!r} is not allowlisted"
+        )
+
+    if server.cwd is None:
+        raise ContractError("restricted STDIO launch requires an explicit cwd")
+    if not server.cwd.is_absolute():
+        raise ContractError("restricted STDIO cwd must be absolute")
+
+    if not launch.allowed_cwd_roots:
+        raise ContractError("restricted STDIO launch requires allowed cwd roots")
+
+    canonical_roots: list[Path] = []
+    for configured_root in launch.allowed_cwd_roots:
+        if not configured_root.is_absolute():
+            raise ContractError("restricted STDIO allowed cwd roots must be absolute")
+        try:
+            root = configured_root.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise ContractError(
+                f"restricted STDIO allowed cwd root is unavailable: {configured_root}"
+            ) from exc
+        if root != configured_root:
+            raise ContractError("restricted STDIO allowed cwd roots must already be canonical")
+        if not root.is_dir():
+            raise ContractError(
+                f"restricted STDIO allowed cwd root is not a directory: {configured_root}"
+            )
+        canonical_roots.append(root)
+
+    try:
+        canonical_cwd = server.cwd.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ContractError(f"restricted STDIO cwd is unavailable: {server.cwd}") from exc
+
+    if not canonical_cwd.is_dir():
+        raise ContractError("restricted STDIO cwd must resolve to a directory")
+
+    if not any(
+        canonical_cwd == root or canonical_cwd.is_relative_to(root) for root in canonical_roots
+    ):
+        raise ContractError("restricted STDIO cwd is outside allowed roots")
+
+    return str(launch_command), canonical_cwd
+
+
 def validate_target(contract: Contract, lab_mode: bool) -> None:
     del lab_mode  # destructive gating is enforced by the engine
     server = contract.server
@@ -146,6 +251,11 @@ def validate_target(contract: Contract, lab_mode: bool) -> None:
             raise ContractError(
                 f"target host {host!r} is not allowlisted; add it to safety.target_allowlist"
             )
+        return
+
+    launch = server.stdio_launch
+    if launch is not None and launch.mode == "restricted":
+        resolve_restricted_stdio_launch(server)
         return
 
     command = server.command or ""
