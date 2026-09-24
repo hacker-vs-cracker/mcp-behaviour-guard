@@ -7,11 +7,13 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from mcp import StdioServerParameters
 
 import mcp_behaviour_guard.client as client_module
 from mcp_behaviour_guard.client import McpClient
 from mcp_behaviour_guard.config import ContractError, validate_target
 from mcp_behaviour_guard.models import Contract, IdentitySpec, ServerSpec
+from mcp_behaviour_guard.stdio_transport import restricted_stdio_client
 
 
 def _make_executable(path: Path) -> Path:
@@ -273,7 +275,7 @@ async def test_restricted_stdio_launches_canonical_command_with_minimal_environm
         async def initialize(self) -> Any:
             return SimpleNamespace(protocolVersion="test")
 
-    monkeypatch.setattr(client_module, "stdio_client", fake_stdio_client)
+    monkeypatch.setattr(client_module, "restricted_stdio_client", fake_stdio_client)
     monkeypatch.setattr(client_module, "ClientSession", DummySession)
 
     identity = contract.identities["reviewer"]
@@ -570,3 +572,329 @@ async def test_restricted_stdio_real_mcp_launch_discovers_demo_tools(
         "diagnostics",
         "run_project_task",
     }
+
+
+@pytest.mark.asyncio
+async def test_restricted_stdio_real_subprocess_uses_exact_selected_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    default_names = (
+        [
+            "APPDATA",
+            "HOMEDRIVE",
+            "HOMEPATH",
+            "LOCALAPPDATA",
+            "PATH",
+            "PATHEXT",
+            "PROCESSOR_ARCHITECTURE",
+            "SYSTEMDRIVE",
+            "SYSTEMROOT",
+            "TEMP",
+            "USERNAME",
+            "USERPROFILE",
+        ]
+        if sys.platform == "win32"
+        else ["HOME", "LOGNAME", "PATH", "SHELL", "TERM", "USER"]
+    )
+    default_values = {
+        name: f"MCPBG_C1_DEFAULT_{name}_SHOULD_NOT_REACH_CHILD" for name in default_names
+    }
+    for name, value in default_values.items():
+        monkeypatch.setenv(name, value)
+
+    monkeypatch.setenv("MCPBG_C1_ALLOWED_PARENT", "allowed-parent-value")
+    monkeypatch.setenv("MCPBG_C1_BLOCKED_PARENT", "blocked-parent-value")
+
+    evidence_path = tmp_path / "child-environment.txt"
+    child_path = tmp_path / "c1_env_server.py"
+    child_path.write_text(
+        f"""
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+default_values = {default_values!r}
+evidence_path = Path(os.environ["MCPBG_C1_EVIDENCE_PATH"])
+
+lines = []
+for name, marker in default_values.items():
+    if os.environ.get(name) == marker:
+        lines.append(f"unexpected_default={{name}}")
+
+checks = {{
+    "allowed_parent": os.environ.get("MCPBG_C1_ALLOWED_PARENT") == "allowed-parent-value",
+    "blocked_parent_absent": "MCPBG_C1_BLOCKED_PARENT" not in os.environ,
+    "server_explicit": os.environ.get("MCPBG_C1_SERVER_EXPLICIT") == "server-value",
+    "identity_explicit": os.environ.get("MCPBG_C1_IDENTITY_EXPLICIT") == "identity-value",
+    "guard_identity": os.environ.get("MCP_GUARD_IDENTITY") == "reviewer",
+    "guard_tenant": os.environ.get("MCP_GUARD_TENANT") == "tenant-a",
+    "guard_role": os.environ.get("MCP_GUARD_ROLE") == "reviewer",
+}}
+for name, passed in checks.items():
+    lines.append(f"{{name}}={{int(passed)}}")
+
+evidence_path.write_text("\\n".join(sorted(lines)) + "\\n", encoding="utf-8")
+
+from mcp.server.fastmcp import FastMCP
+
+mcp = FastMCP("c1-exact-environment-test")
+
+@mcp.tool()
+def ping() -> str:
+    return "pong"
+
+if __name__ == "__main__":
+    mcp.run(transport="stdio")
+""",
+        encoding="utf-8",
+    )
+
+    launch_executable = Path(sys.executable).absolute()
+    approved_executable = launch_executable.resolve()
+
+    server = ServerSpec.model_validate(
+        {
+            "name": "restricted-real-environment",
+            "transport": "stdio",
+            "command": str(launch_executable),
+            "args": [str(child_path)],
+            "cwd": str(tmp_path),
+            "environment": {
+                "MCPBG_C1_EVIDENCE_PATH": str(evidence_path),
+                "MCPBG_C1_SERVER_EXPLICIT": "server-value",
+                "MCP_GUARD_IDENTITY": "spoofed-server",
+                "MCP_GUARD_TENANT": "spoofed-server",
+                "MCP_GUARD_ROLE": "spoofed-server",
+            },
+            "stdio_launch": {
+                "mode": "restricted",
+                "allowed_executables": [str(approved_executable)],
+                "allowed_cwd_roots": [str(tmp_path)],
+                "inherit_environment": ["MCPBG_C1_ALLOWED_PARENT"],
+            },
+        }
+    )
+    identity = IdentitySpec(
+        tenant="tenant-a",
+        role="reviewer",
+        environment={
+            "MCPBG_C1_IDENTITY_EXPLICIT": "identity-value",
+            "MCP_GUARD_IDENTITY": "spoofed-identity",
+            "MCP_GUARD_TENANT": "spoofed-identity",
+            "MCP_GUARD_ROLE": "spoofed-identity",
+        },
+    )
+
+    tools = await McpClient(server, "reviewer", identity).list_tools()
+    assert {item["name"] for item in tools} >= {"ping"}
+
+    evidence = set(evidence_path.read_text(encoding="utf-8").splitlines())
+    unexpected_defaults = sorted(
+        line.removeprefix("unexpected_default=")
+        for line in evidence
+        if line.startswith("unexpected_default=")
+    )
+
+    assert "allowed_parent=1" in evidence
+    assert "blocked_parent_absent=1" in evidence
+    assert "server_explicit=1" in evidence
+    assert "identity_explicit=1" in evidence
+    assert "guard_identity=1" in evidence
+    assert "guard_tenant=1" in evidence
+    assert "guard_role=1" in evidence
+    assert unexpected_defaults == [], (
+        "restricted STDIO inherited SDK default environment variables: "
+        + ", ".join(unexpected_defaults)
+    )
+
+
+@pytest.mark.asyncio
+async def test_restricted_stdio_failed_startup_propagates_oserror(
+    tmp_path: Path,
+) -> None:
+    parameters = StdioServerParameters(
+        command=str(tmp_path / "does-not-exist"),
+        env={},
+        cwd=tmp_path,
+    )
+
+    with pytest.raises(OSError):
+        async with restricted_stdio_client(parameters):
+            pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX pid liveness assertion")
+async def test_restricted_stdio_cancellation_terminates_child(
+    tmp_path: Path,
+) -> None:
+    import asyncio
+    import os
+
+    pid_path = tmp_path / "child.pid"
+    child_path = tmp_path / "wait_forever.py"
+    child_path.write_text(
+        f"""
+from __future__ import annotations
+
+import os
+import time
+from pathlib import Path
+
+Path({str(pid_path)!r}).write_text(str(os.getpid()), encoding="utf-8")
+
+while True:
+    time.sleep(1)
+""",
+        encoding="utf-8",
+    )
+
+    parameters = StdioServerParameters(
+        command=str(Path(sys.executable).absolute()),
+        args=[str(child_path)],
+        env={},
+        cwd=tmp_path,
+    )
+    entered = asyncio.Event()
+
+    async def hold_session() -> None:
+        async with restricted_stdio_client(parameters):
+            entered.set()
+            await asyncio.Event().wait()
+
+    task = asyncio.create_task(hold_session())
+
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    for _ in range(100):
+        if pid_path.exists():
+            break
+        await asyncio.sleep(0.01)
+    assert pid_path.exists()
+
+    pid = int(pid_path.read_text(encoding="utf-8"))
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    for _ in range(100):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        await asyncio.sleep(0.05)
+    else:
+        pytest.fail("restricted STDIO child remained alive after client cancellation")
+
+
+@pytest.mark.asyncio
+async def test_restricted_stdio_concurrent_clients_keep_environment_policies_isolated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    monkeypatch.setenv("MCPBG_C1_PARENT_A", "parent-a")
+    monkeypatch.setenv("MCPBG_C1_PARENT_B", "parent-b")
+    monkeypatch.setenv("HOME", "MCPBG_C1_HOME_SHOULD_NOT_REACH_CHILD")
+
+    child_path = tmp_path / "c1_concurrent_env_server.py"
+    child_path.write_text(
+        """
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+from mcp.server.fastmcp import FastMCP
+
+evidence_path = Path(os.environ["MCPBG_C1_CONCURRENT_EVIDENCE"])
+names = [
+    "MCPBG_C1_PARENT_A",
+    "MCPBG_C1_PARENT_B",
+    "MCPBG_C1_SERVER_MARKER",
+    "MCP_GUARD_IDENTITY",
+    "HOME",
+]
+evidence_path.write_text(
+    "\\n".join(f"{name}={os.environ.get(name, '<absent>')}" for name in names) + "\\n",
+    encoding="utf-8",
+)
+
+mcp = FastMCP("c1-concurrent-environment-test")
+
+@mcp.tool()
+def ping() -> str:
+    return "pong"
+
+if __name__ == "__main__":
+    mcp.run(transport="stdio")
+""",
+        encoding="utf-8",
+    )
+
+    launch_executable = Path(sys.executable).absolute()
+    approved_executable = launch_executable.resolve()
+
+    async def run_client(
+        *,
+        name: str,
+        inherited_name: str,
+        server_marker: str,
+        identity_name: str,
+    ) -> set[str]:
+        evidence_path = tmp_path / f"{name}.txt"
+        server = ServerSpec.model_validate(
+            {
+                "name": name,
+                "transport": "stdio",
+                "command": str(launch_executable),
+                "args": [str(child_path)],
+                "cwd": str(tmp_path),
+                "environment": {
+                    "MCPBG_C1_CONCURRENT_EVIDENCE": str(evidence_path),
+                    "MCPBG_C1_SERVER_MARKER": server_marker,
+                },
+                "stdio_launch": {
+                    "mode": "restricted",
+                    "allowed_executables": [str(approved_executable)],
+                    "allowed_cwd_roots": [str(tmp_path)],
+                    "inherit_environment": [inherited_name],
+                },
+            }
+        )
+        tools = await McpClient(
+            server,
+            identity_name,
+            IdentitySpec(role="reviewer"),
+        ).list_tools()
+        assert {item["name"] for item in tools} >= {"ping"}
+        return set(evidence_path.read_text(encoding="utf-8").splitlines())
+
+    evidence_a, evidence_b = await asyncio.gather(
+        run_client(
+            name="restricted-concurrent-a",
+            inherited_name="MCPBG_C1_PARENT_A",
+            server_marker="server-a",
+            identity_name="reviewer-a",
+        ),
+        run_client(
+            name="restricted-concurrent-b",
+            inherited_name="MCPBG_C1_PARENT_B",
+            server_marker="server-b",
+            identity_name="reviewer-b",
+        ),
+    )
+
+    assert "MCPBG_C1_PARENT_A=parent-a" in evidence_a
+    assert "MCPBG_C1_PARENT_B=<absent>" in evidence_a
+    assert "MCPBG_C1_SERVER_MARKER=server-a" in evidence_a
+    assert "MCP_GUARD_IDENTITY=reviewer-a" in evidence_a
+    assert "HOME=<absent>" in evidence_a
+
+    assert "MCPBG_C1_PARENT_A=<absent>" in evidence_b
+    assert "MCPBG_C1_PARENT_B=parent-b" in evidence_b
+    assert "MCPBG_C1_SERVER_MARKER=server-b" in evidence_b
+    assert "MCP_GUARD_IDENTITY=reviewer-b" in evidence_b
+    assert "HOME=<absent>" in evidence_b

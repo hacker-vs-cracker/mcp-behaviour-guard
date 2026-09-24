@@ -26,6 +26,7 @@ from .models import (
     ServerSpec,
     TemporalIntegritySpec,
 )
+from .stdio_transport import restricted_stdio_client
 
 
 class McpClient:
@@ -146,8 +147,9 @@ class McpClient:
             env=environment,
             cwd=cwd,
         )
+        transport_client = restricted_stdio_client if restricted else stdio_client
         async with (
-            stdio_client(parameters) as (read_stream, write_stream),
+            transport_client(parameters) as (read_stream, write_stream),
             ClientSession(
                 read_stream,
                 write_stream,
