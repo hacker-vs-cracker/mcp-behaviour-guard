@@ -286,3 +286,35 @@ absolute launcher path to the MCP SDK. A path or symlink changed in the interval
 between validation and OS process creation is a residual TOCTOU risk. Eliminating
 that portably requires a stronger execution/containment backend and is outside
 R10-A1.
+
+## Post-v0.5.0 C1 correction: exact restricted child environment
+
+The released v0.5.0 restricted-launch design constructed the intended allowlisted
+environment inside Behaviour Guard, but MCP Python SDK 1.28.1 widened that dictionary
+at its public `stdio_client()` subprocess boundary by merging the SDK's default inherited
+environment variables.
+
+C1 closes that boundary without changing legacy STDIO behavior:
+
+- restricted mode uses a Behaviour Guard-owned STDIO transport adapter;
+- the adapter passes the already-selected restricted environment to process creation unchanged;
+- legacy mode continues to use the MCP SDK public `stdio_client()` behavior;
+- the selected absolute launcher path remains the executed path, while its canonical target
+  remains only the approval identity, preserving virtualenv/wrapper semantics;
+- server and identity environment precedence remains unchanged, with Guard identity metadata
+  written authoritatively last;
+- failed startup, normal cleanup, cancellation cleanup, and concurrent clients with different
+  restricted environment policies are covered by focused regressions.
+
+The project remains pinned to MCP SDK 1.28.1. The restricted adapter intentionally reuses that
+pinned SDK version's private platform process-creation and process-tree termination helpers so
+POSIX process-group and Windows Job Object behavior remain aligned with the SDK while bypassing
+only the public client's default-environment merge. Those private imports are compatibility
+sensitive: any future MCP SDK migration must review this adapter and rerun the restricted STDIO
+boundary tests before changing the pin.
+
+Local C1 validation exercised real subprocess environment isolation, virtualenv launch behavior,
+failed startup, normal cleanup, cancellation cleanup, and concurrent policy isolation on macOS.
+The exact-environment and concurrent-policy tests are platform-neutral. The explicit PID-liveness
+assertion used by the cancellation regression is skipped on Windows; this correction therefore
+does not claim an independently observed Windows cancellation-liveness result from that test.
