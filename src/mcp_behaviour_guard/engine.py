@@ -836,9 +836,40 @@ class GuardEngine:
 
     async def _check_session_isolation(self) -> None:
         for test in self.contract.session_tests:
-            write_tool = self.contract.tools[test.write.tool]
-            if not self._tool_invocation_enabled(write_tool):
-                self._add_finding(self._lab_skip(test.id, "session_isolation", test.write.tool))
+            steps = (
+                ("writer", test.write.tool, self.contract.tools[test.write.tool]),
+                ("reader", test.read.tool, self.contract.tools[test.read.tool]),
+            )
+            blocked = False
+            for step_name, tool_name, tool_contract in steps:
+                allowed, coverage, required_kinds = self._tool_call_preflight(tool_contract)
+                if allowed:
+                    continue
+
+                if not self._tool_invocation_enabled(tool_contract):
+                    self._add_finding(self._lab_skip(test.id, "session_isolation", tool_name))
+                else:
+                    self._add_finding(
+                        Finding(
+                            test_id=test.id,
+                            category="session_isolation",
+                            title="Independent MCP clients do not share session state",
+                            status=FindingStatus.ERROR,
+                            severity=Severity.MEDIUM,
+                            expected="all session steps pass safety and evidence preflight",
+                            observed={
+                                "probe_executed": False,
+                                "blocked_step": step_name,
+                                "blocked_tool": tool_name,
+                                "required_effects": sorted(item.value for item in required_kinds),
+                            },
+                            observation=coverage,
+                        )
+                    )
+                blocked = True
+                break
+
+            if blocked:
                 continue
 
             marker = f"guard-{uuid.uuid4().hex}"
@@ -911,7 +942,10 @@ class GuardEngine:
                 read_observation,
             )
 
-            if (
+            leaked = marker in json.dumps(read_invocation.response, default=str)
+            errored = write_invocation.allowed is not True or read_invocation.allowed is not True
+
+            if not leaked and (
                 read_invocation.execution == ExecutionStatus.NOT_ATTEMPTED
                 or read_observation
                 not in {ObservationStatus.NOT_REQUIRED, ObservationStatus.COMPLETE}
@@ -925,6 +959,7 @@ class GuardEngine:
                         severity=Severity.MEDIUM,
                         expected={"reader_contains_writer_marker": False},
                         observed={
+                            "marker_leaked": False,
                             "writer_probe_executed": True,
                             "writer_execution": write_invocation.execution.value,
                             "writer_effects": _event_dicts(write_effects),
@@ -943,13 +978,11 @@ class GuardEngine:
                 )
                 continue
 
-            leaked = marker in json.dumps(read_invocation.response, default=str)
-            errored = write_invocation.allowed is not True or read_invocation.allowed is not True
             status = (
-                FindingStatus.ERROR
-                if errored
-                else FindingStatus.FAILED
+                FindingStatus.FAILED
                 if leaked
+                else FindingStatus.ERROR
+                if errored
                 else FindingStatus.PASSED
             )
 
@@ -959,10 +992,10 @@ class GuardEngine:
                     category="session_isolation",
                     title="Independent MCP clients do not share session state",
                     status=status,
-                    severity=Severity.MEDIUM
-                    if errored
-                    else test.severity
+                    severity=test.severity
                     if leaked
+                    else Severity.MEDIUM
+                    if errored
                     else Severity.INFO,
                     expected={"reader_contains_writer_marker": False},
                     observed={
@@ -971,6 +1004,8 @@ class GuardEngine:
                         "reader_allowed": read_invocation.allowed,
                         "writer_execution": write_invocation.execution.value,
                         "reader_execution": read_invocation.execution.value,
+                        "writer_error": write_invocation.error,
+                        "reader_error": read_invocation.error,
                         "reader_response": read_invocation.response,
                         "writer_effects": _event_dicts(write_effects),
                         "reader_effects": _event_dicts(read_effects),
@@ -1031,7 +1066,29 @@ class GuardEngine:
                 )
                 continue
 
-            required_kinds = {probe.event_kind}
+            required_kinds = _required_effect_kinds(tool) | {probe.event_kind}
+            preflight_allowed, configured_observation, required_kinds = self._tool_call_preflight(
+                tool,
+                required_kinds=required_kinds,
+            )
+            if not preflight_allowed:
+                self._add_finding(
+                    Finding(
+                        test_id=test_id,
+                        category="replay",
+                        title=f"Duplicate execution protection for {tool_name} could not be checked",
+                        status=FindingStatus.ERROR,
+                        severity=Severity.MEDIUM,
+                        expected="configured effect coverage for replay and tool claims",
+                        observed={
+                            "probe_executed": False,
+                            "required_effects": sorted(item.value for item in required_kinds),
+                        },
+                        observation=configured_observation,
+                    )
+                )
+                continue
+
             scope = self._new_observation_scope(test_id, probe.attempts)
             async with observer_ownership(self.observers):
                 begin_errors = await self._begin_observers()
@@ -1118,6 +1175,26 @@ class GuardEngine:
                     ),
                 )
             )
+
+    def _tool_call_preflight(
+        self,
+        tool: ToolContract,
+        *,
+        required_kinds: set[SideEffectKind] | None = None,
+    ) -> tuple[bool, ObservationStatus, set[SideEffectKind]]:
+        if not self._tool_invocation_enabled(tool):
+            return False, ObservationStatus.NOT_REQUIRED, set()
+
+        effective_required = (
+            (set() if tool.read_only else _required_effect_kinds(tool))
+            if required_kinds is None
+            else set(required_kinds)
+        )
+        if not effective_required:
+            return True, ObservationStatus.NOT_REQUIRED, effective_required
+
+        coverage = self._observer_coverage({}, effective_required)
+        return coverage == ObservationStatus.COMPLETE, coverage, effective_required
 
     def _tool_invocation_enabled(self, tool: ToolContract) -> bool:
         if tool.read_only:

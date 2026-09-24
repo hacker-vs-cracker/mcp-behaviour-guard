@@ -558,3 +558,272 @@ def test_filesystem_observer_cannot_overclaim_effect_coverage(tmp_path: Path) ->
             roots=[tmp_path],
             observes=[SideEffectKind.DATABASE_WRITE],
         )
+
+
+@pytest.mark.asyncio
+async def test_replay_preflights_all_tool_effect_claims_before_any_target_call(
+    tmp_path: Path,
+) -> None:
+    guard, store = _guard(
+        tmp_path,
+        {
+            "version": 1,
+            "server": {
+                "name": "local",
+                "url": "http://127.0.0.1:8000/mcp",
+            },
+            "identities": {"user": {}},
+            "tools": {
+                "write": {
+                    "permitted_identities": ["user"],
+                    "forbidden_side_effects": [
+                        "database_write",
+                        "network_request",
+                    ],
+                    "replay_probe": {
+                        "arguments": {},
+                        "attempts": 2,
+                        "event_kind": "database_write",
+                    },
+                }
+            },
+            "safety": {
+                "destructive_tests": True,
+                "require_lab_mode": False,
+            },
+        },
+    )
+
+    guard.observers = [
+        _Observer(
+            "database",
+            False,
+            [],
+            {SideEffectKind.DATABASE_WRITE},
+        )
+    ]
+    calls: list[str] = []
+
+    async def record_call(
+        test_id,
+        identity_name,
+        identity,
+        tool,
+        arguments,
+    ):
+        del identity, arguments
+        calls.append(tool)
+        return InvocationRecord(
+            test_id=test_id,
+            tool=tool,
+            identity=identity_name,
+            arguments={},
+            allowed=True,
+            duration_ms=0,
+        )
+
+    guard._invoke = record_call  # type: ignore[method-assign]
+
+    try:
+        await guard._check_replay_protection()
+        assert calls == [], "replay must not start without coverage for all required tool effects"
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_session_marker_disclosure_remains_failed_when_reader_errors(
+    tmp_path: Path,
+) -> None:
+    guard, store = _guard(
+        tmp_path,
+        {
+            "version": 1,
+            "server": {
+                "name": "local",
+                "url": "http://127.0.0.1:8000/mcp",
+            },
+            "identities": {
+                "writer": {},
+                "reader": {},
+            },
+            "tools": {
+                "write": {
+                    "permitted_identities": ["writer"],
+                    "read_only": True,
+                },
+                "read": {
+                    "permitted_identities": ["reader"],
+                    "read_only": True,
+                },
+            },
+            "session_tests": [
+                {
+                    "id": "SESSION-MARKER-ERROR",
+                    "writer_identity": "writer",
+                    "reader_identity": "reader",
+                    "write": {
+                        "tool": "write",
+                        "arguments": {"note": "placeholder"},
+                    },
+                    "read": {
+                        "tool": "read",
+                        "arguments": {},
+                    },
+                    "marker_argument": "note",
+                }
+            ],
+        },
+    )
+
+    marker: dict[str, str] = {}
+
+    async def invoke(
+        test_id,
+        identity_name,
+        identity,
+        tool,
+        arguments,
+    ):
+        del identity
+        if tool == "write":
+            marker["value"] = str(arguments["note"])
+            return InvocationRecord(
+                test_id=test_id,
+                tool=tool,
+                identity=identity_name,
+                arguments={},
+                allowed=True,
+                response={"stored": True},
+                duration_ms=0,
+            )
+
+        return InvocationRecord(
+            test_id=test_id,
+            tool=tool,
+            identity=identity_name,
+            arguments={},
+            allowed=None,
+            authorization=AuthorizationStatus.UNKNOWN,
+            execution=ExecutionStatus.REJECTED,
+            response={"message": f"denied but echoed {marker['value']}"},
+            error="reader rejected request",
+            duration_ms=0,
+        )
+
+    guard._invoke = invoke  # type: ignore[method-assign]
+
+    try:
+        await guard._check_session_isolation()
+        finding = next(item for item in guard.findings if item.test_id == "SESSION-MARKER-ERROR")
+        assert finding.observed["marker_leaked"] is True
+        assert finding.status == FindingStatus.FAILED
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_session_marker_disclosure_remains_failed_when_reader_observation_errors(
+    tmp_path: Path,
+) -> None:
+    guard, store = _guard(
+        tmp_path,
+        {
+            "version": 1,
+            "server": {
+                "name": "local",
+                "url": "http://127.0.0.1:8000/mcp",
+            },
+            "identities": {
+                "writer": {},
+                "reader": {},
+            },
+            "tools": {
+                "write": {
+                    "permitted_identities": ["writer"],
+                    "read_only": True,
+                },
+                "read": {
+                    "permitted_identities": ["reader"],
+                    "read_only": False,
+                    "forbidden_side_effects": ["database_write"],
+                },
+            },
+            "session_tests": [
+                {
+                    "id": "SESSION-MARKER-OBSERVATION-ERROR",
+                    "writer_identity": "writer",
+                    "reader_identity": "reader",
+                    "write": {
+                        "tool": "write",
+                        "arguments": {"note": "placeholder"},
+                    },
+                    "read": {
+                        "tool": "read",
+                        "arguments": {},
+                    },
+                    "marker_argument": "note",
+                }
+            ],
+            "safety": {
+                "destructive_tests": True,
+                "require_lab_mode": False,
+            },
+        },
+    )
+
+    class CollectFailObserver:
+        name = "database"
+        observes = {SideEffectKind.DATABASE_WRITE}
+
+        async def begin(self) -> None:
+            return None
+
+        async def collect(self):
+            raise RuntimeError("collection unavailable")
+
+    guard.observers = [CollectFailObserver()]
+    marker: dict[str, str] = {}
+
+    async def invoke(
+        test_id,
+        identity_name,
+        identity,
+        tool,
+        arguments,
+    ):
+        del identity
+        if tool == "write":
+            marker["value"] = str(arguments["note"])
+            return InvocationRecord(
+                test_id=test_id,
+                tool=tool,
+                identity=identity_name,
+                arguments={},
+                allowed=True,
+                response={"stored": True},
+                duration_ms=0,
+            )
+
+        return InvocationRecord(
+            test_id=test_id,
+            tool=tool,
+            identity=identity_name,
+            arguments={},
+            allowed=True,
+            response={"message": f"reader echoed {marker['value']}"},
+            duration_ms=0,
+        )
+
+    guard._invoke = invoke  # type: ignore[method-assign]
+
+    try:
+        await guard._check_session_isolation()
+        finding = next(
+            item for item in guard.findings if item.test_id == "SESSION-MARKER-OBSERVATION-ERROR"
+        )
+        assert finding.observed["marker_leaked"] is True
+        assert finding.observation == ObservationStatus.UNAVAILABLE
+        assert finding.status == FindingStatus.FAILED
+    finally:
+        store.close()
