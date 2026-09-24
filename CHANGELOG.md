@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+- Enforce the exact selected environment at the restricted STDIO subprocess boundary, while preserving launcher/virtualenv semantics and legacy STDIO behaviour.
+- Preflight session tool-call safety and configured evidence requirements before target execution, require replay coverage for the replay event plus relevant tool claims, and keep confirmed cross-session marker disclosure failed even when execution or observation also errors.
 
 ## 0.5.0 - 2026-09-21
 - Add opt-in restricted Streamable HTTP destination policy with scheme/host/effective-port origin approval, redirect-hop enforcement, redirects disabled by default, and ambient HTTPX environment/proxy inheritance disabled in restricted mode; preserve omitted-policy legacy HTTP behaviour and document DNS/network-containment limits.

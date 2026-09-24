@@ -15,6 +15,8 @@ The JSON report separates invocation, finding and run-level fields:
 
 Replay and state-changing behaviour probes require healthy observers that cover the effect kinds needed by that check. An unrelated observer outage does not by itself block execution, but missing required coverage makes the result partial or unavailable rather than clean evidence.
 
+Replay preflight includes the configured replay event kind and the tool's relevant side-effect claims. Session-isolation preflight checks both writer and reader steps before the first target call for known safety and configured evidence requirements. A confirmed cross-session marker disclosure is independent failure evidence: later invocation rejection, generic error, or incomplete observation does not downgrade that disclosure to merely inconclusive.
+
 Malformed audit events are an observer error. They must not be quietly dropped and mistaken for an empty, healthy audit stream.
 
 CLI exit codes: 0 for pass, 1 for a confirmed failed claim, 2 for an inconclusive or untested run. `--no-fail` overrides those codes for demonstrations.

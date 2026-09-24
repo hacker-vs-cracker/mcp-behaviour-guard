@@ -170,6 +170,8 @@ automatically migrated because `[]` now means an intentional deny-all claim.
 
 Replay probes require at least one observed effect (`minimum_events`, default 1) and enforce `maximum_events` (default 1). No observed effect is inconclusive, not proof of idempotency.
 
+Before replay target calls begin, Guard requires configured complete observer coverage for the replay event kind together with the tool's relevant declared side-effect claims. Observer startup is then checked at the replay observation window; if required coverage is unavailable, replay target calls are not made.
+
 Supported side-effect kinds:
 
 - `network_request`
@@ -222,6 +224,8 @@ A tenant probe supplies arguments expected to target a forbidden object. `resour
 ## `session_tests`
 
 A session test writes a unique marker using one identity/session and reads using another. For STDIO, each identity can launch an independent child process. The check fails when the second response contains the marker.
+
+Before the first session-test target call, Guard preflights both writer and reader steps for destructive-test authorization and configured evidence requirements. A step blocked by those known preconditions prevents earlier target calls in that session test. Runtime observer startup/collection is still checked at the actual observation boundary. If the unique writer marker is nevertheless present in the reader response, that confirmed disclosure remains a failed finding even when the reader invocation or observation also reports an error.
 
 ## `observers`
 

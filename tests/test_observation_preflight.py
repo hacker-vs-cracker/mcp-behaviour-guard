@@ -688,3 +688,161 @@ async def test_mutating_access_matrix_runs_with_complete_required_observation(
         assert finding.observation.value == "complete"
     finally:
         store.close()
+
+
+@pytest.mark.asyncio
+async def test_session_isolation_preflights_mutating_reader_before_any_target_call(
+    tmp_path: Path,
+) -> None:
+    guard, store = _guard(
+        tmp_path,
+        {
+            "version": 1,
+            "server": {
+                "name": "offline",
+                "url": "http://127.0.0.1:8000/mcp",
+            },
+            "identities": {
+                "writer": {},
+                "reader": {},
+            },
+            "tools": {
+                "seed": {
+                    "permitted_identities": ["writer"],
+                    "read_only": True,
+                },
+                "read": {
+                    "permitted_identities": ["reader"],
+                    "read_only": False,
+                },
+            },
+            "session_tests": [
+                {
+                    "id": "SESSION-READER-GATE",
+                    "writer_identity": "writer",
+                    "reader_identity": "reader",
+                    "write": {
+                        "tool": "seed",
+                        "arguments": {"note": "placeholder"},
+                    },
+                    "read": {
+                        "tool": "read",
+                        "arguments": {},
+                    },
+                    "marker_argument": "note",
+                }
+            ],
+            "safety": {
+                "destructive_tests": False,
+                "require_lab_mode": True,
+            },
+        },
+    )
+    calls: list[str] = []
+
+    async def record_call(
+        test_id,
+        identity_name,
+        identity,
+        tool,
+        arguments,
+    ):
+        del identity, arguments
+        calls.append(tool)
+        return InvocationRecord(
+            test_id=test_id,
+            tool=tool,
+            identity=identity_name,
+            arguments={},
+            allowed=True,
+            response={},
+            duration_ms=0,
+        )
+
+    guard._invoke = record_call  # type: ignore[method-assign]
+
+    try:
+        await guard._check_session_isolation()
+        assert calls == [], "blocked session test must make zero target calls"
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_session_isolation_preflights_reader_required_coverage_before_writer_call(
+    tmp_path: Path,
+) -> None:
+    guard, store = _guard(
+        tmp_path,
+        {
+            "version": 1,
+            "server": {
+                "name": "offline",
+                "url": "http://127.0.0.1:8000/mcp",
+            },
+            "identities": {
+                "writer": {},
+                "reader": {},
+            },
+            "tools": {
+                "seed": {
+                    "permitted_identities": ["writer"],
+                    "read_only": True,
+                },
+                "read": {
+                    "permitted_identities": ["reader"],
+                    "read_only": False,
+                    "forbidden_side_effects": ["database_write"],
+                },
+            },
+            "session_tests": [
+                {
+                    "id": "SESSION-READER-COVERAGE",
+                    "writer_identity": "writer",
+                    "reader_identity": "reader",
+                    "write": {
+                        "tool": "seed",
+                        "arguments": {"note": "placeholder"},
+                    },
+                    "read": {
+                        "tool": "read",
+                        "arguments": {},
+                    },
+                    "marker_argument": "note",
+                }
+            ],
+            "safety": {
+                "destructive_tests": True,
+                "require_lab_mode": False,
+            },
+        },
+    )
+    guard.observers = []
+    calls: list[str] = []
+
+    async def record_call(
+        test_id,
+        identity_name,
+        identity,
+        tool,
+        arguments,
+    ):
+        del identity, arguments
+        calls.append(tool)
+        return InvocationRecord(
+            test_id=test_id,
+            tool=tool,
+            identity=identity_name,
+            arguments={},
+            allowed=True,
+            response={},
+            duration_ms=0,
+        )
+
+    guard._invoke = record_call  # type: ignore[method-assign]
+
+    try:
+        await guard._check_session_isolation()
+        assert calls == [], "missing reader evidence coverage must block before writer executes"
+    finally:
+        store.close()
