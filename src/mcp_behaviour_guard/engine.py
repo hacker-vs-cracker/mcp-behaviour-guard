@@ -1180,6 +1180,49 @@ class GuardEngine:
                     required_kinds,
                     scope,
                 )
+            policy_required_kinds = _required_effect_kinds(tool)
+            policy_observation = (
+                self._observer_coverage(observer_errors, policy_required_kinds)
+                if policy_required_kinds
+                else ObservationStatus.NOT_REQUIRED
+            )
+            violations = _side_effect_violations(tool, events)
+            if violations or (
+                policy_required_kinds and policy_observation != ObservationStatus.COMPLETE
+            ):
+                self._add_finding(
+                    Finding(
+                        test_id=f"{test_id}-EFFECTS",
+                        category="runtime_behaviour",
+                        title=f"Mutation effects for {tool_name} during {test_id}",
+                        status=(FindingStatus.FAILED if violations else FindingStatus.ERROR),
+                        severity=(Severity.HIGH if violations else Severity.MEDIUM),
+                        expected={
+                            "required_effects": sorted(
+                                item.value for item in policy_required_kinds
+                            ),
+                            "forbidden_side_effects": [
+                                item.value for item in tool.forbidden_side_effects
+                            ],
+                            "allowed_network_destinations": tool.allowed_network_destinations,
+                            "allowed_filesystem_writes": tool.allowed_filesystem_writes,
+                            "allowed_process_commands": tool.allowed_process_commands,
+                        },
+                        observed={
+                            "events": _event_dicts(events),
+                            "violations": violations,
+                            "observer_errors": observer_errors,
+                        },
+                        evidence={"trace": self._trace_reference()},
+                        observation=observation,
+                        remediation=(
+                            "Remove undeclared effects or tighten the approved mutation boundary."
+                            if violations
+                            else None
+                        ),
+                    )
+                )
+
             event_tool = probe.event_tool or tool_name
             matching = [
                 event
