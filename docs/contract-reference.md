@@ -219,7 +219,30 @@ The normalized response must not contain the declared literal values.
 
 ## `tenant_probes`
 
-A tenant probe supplies arguments expected to target a forbidden object. `resource_tenant_path` is a dotted path into the normalized response. `require_denial: true` is strongest: any successful call fails even if the response lacks tenant metadata.
+A tenant probe supplies identity-specific cross-tenant arguments. Its checks are separate:
+
+- `require_denial: true` asserts authorization denial. A successful forbidden call fails even if tenant metadata is absent.
+- With `require_denial: false`, `resource_tenant_path` selects the real resource-owner field and compares it with `expected_tenant` or the identity tenant. A foreign selected owner fails ownership. A missing owner on an otherwise successful response is inconclusive.
+- Optional `confidentiality.values` asserts protected-data confidentiality against the same response.
+
+Example:
+
+```yaml
+tenant_probes:
+  user:
+    arguments:
+      requested_tenant: tenant-b
+    resource_tenant_path: resource.tenant
+    expected_tenant: tenant-a
+    require_denial: false
+    confidentiality:
+      values:
+        - SYNTHETIC_PROTECTED_CANARY
+```
+
+Confidentiality values are explicit, case-sensitive literals matched only against response string leaves. The first implementation does not perform fuzzy, regular-expression, base64, hex, or other encoding expansion. Values must be non-empty, must not repeat, and must not already appear in the probe request arguments because caller-supplied data echoed by the target is not independent disclosure evidence.
+
+A confirmed protected-value match remains a failed tenant finding even when authorization, execution, positive-control, or observer evidence is inconclusive. Without `confidentiality`, confidentiality is unasserted and legacy denial or ownership behavior is preserved. The field is additive under contract version 1.
 
 ## `session_tests`
 
