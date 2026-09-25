@@ -32,9 +32,7 @@ def _probe(
     resource_tenant_path: str = "resource.tenant",
 ) -> dict[str, Any]:
     value: dict[str, Any] = {
-        "arguments": arguments
-        if arguments is not None
-        else {"requested_tenant": "tenant-b"},
+        "arguments": arguments if arguments is not None else {"requested_tenant": "tenant-b"},
         "resource_tenant_path": resource_tenant_path,
         "expected_tenant": "tenant-a",
         "require_denial": require_denial,
@@ -646,9 +644,7 @@ async def test_protected_literal_is_omitted_from_all_report_formats(
 
     try:
         await guard._check_tenant_isolation()
-        finding = next(
-            item for item in guard.findings if item.test_id == "TENANT-LOOKUP-USER"
-        )
+        finding = next(item for item in guard.findings if item.test_id == "TENANT-LOOKUP-USER")
         assert MARKER not in str(finding.model_dump(mode="json"))
 
         summary = RunSummary(

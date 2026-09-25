@@ -183,9 +183,7 @@ class TenantConfidentialityPredicate(ContractModel):
     def match_count(self, response: Any) -> int:
         leaves = _string_leaves(response)
         return sum(
-            1
-            for protected_value in self.values
-            if any(protected_value in leaf for leaf in leaves)
+            1 for protected_value in self.values if any(protected_value in leaf for leaf in leaves)
         )
 
 
@@ -207,9 +205,7 @@ class TenantProbe(ContractModel):
             for protected_value in self.confidentiality.values
             for leaf in argument_leaves
         ):
-            raise ValueError(
-                "tenant confidentiality values must not appear in request arguments"
-            )
+            raise ValueError("tenant confidentiality values must not appear in request arguments")
         return self
 
 

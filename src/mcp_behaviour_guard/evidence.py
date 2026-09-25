@@ -34,9 +34,7 @@ def contract_secrets(contract: Contract) -> set[str]:
             if probe.confidentiality is not None:
                 protected_values.update(probe.confidentiality.values)
 
-    return {
-        value for value in credential_values if len(value) >= 6
-    } | protected_values
+    return {value for value in credential_values if len(value) >= 6} | protected_values
 
 
 def redact(value: Any, secrets: set[str] | None = None) -> Any:

@@ -638,8 +638,7 @@ class GuardEngine:
                     (tool_name, identity_name), False
                 )
                 successful_result = (
-                    invocation.allowed is True
-                    and invocation.execution == ExecutionStatus.SUCCEEDED
+                    invocation.allowed is True and invocation.execution == ExecutionStatus.SUCCEEDED
                 )
 
                 authorization_assertion = "not_asserted"
@@ -679,9 +678,8 @@ class GuardEngine:
                 )
                 if "failed" in assertion_outcomes:
                     status = FindingStatus.FAILED
-                elif (
-                    "error" in assertion_outcomes
-                    or (not probe.require_denial and not successful_result)
+                elif "error" in assertion_outcomes or (
+                    not probe.require_denial and not successful_result
                 ):
                     status = FindingStatus.ERROR
                 else:
