@@ -57,28 +57,28 @@ class JsonlAuditObserver:
             raise ObserverCollectionError(f"audit file shrank during observation: {path}")
 
         events: list[SideEffectEvent] = []
-        with path.open("r", encoding="utf-8") as handle:
+        with path.open("rb") as handle:
+            info = os.fstat(handle.fileno())
+            opened_identity = (info.st_dev, info.st_ino)
+            if self._source_identity is not None and opened_identity != self._source_identity:
+                raise ObserverCollectionError(
+                    f"audit file was replaced during observation: {path}",
+                    events,
+                )
+            if info.st_size < self._offset:
+                raise ObserverCollectionError(
+                    f"audit file shrank during observation: {path}",
+                    events,
+                )
             handle.seek(self._offset)
-            for line_number, line in enumerate(handle, start=1):
-                if not line.strip():
-                    continue
-                try:
-                    payload: Any = json.loads(line)
-                    if not isinstance(payload, dict):
-                        raise ValueError("event must be a JSON object")
-                    raw_kind = payload.pop("kind")
-                    events.append(
-                        SideEffectEvent(
-                            observer=self.name,
-                            kind=SideEffectKind(str(raw_kind)),
-                            details=payload,
-                        )
-                    )
-                except (KeyError, ValueError, json.JSONDecodeError) as exc:
-                    raise ObserverCollectionError(
-                        f"invalid audit event at line {line_number}: {exc}",
-                        events,
-                    ) from exc
+            payload = handle.read()
+
+        position = self._offset
+        for raw_line in payload.splitlines(keepends=True):
+            line_position = position
+            position += len(raw_line)
+            self._append_raw_event(raw_line, line_position, events)
+
         return events
 
     async def _collect_settled(self) -> list[SideEffectEvent]:
@@ -265,32 +265,40 @@ class JsonlAuditObserver:
         for raw_line in complete.splitlines(keepends=True):
             line_position = position
             position += len(raw_line)
-            if not raw_line.strip():
-                continue
-
-            try:
-                line = raw_line.decode("utf-8")
-                raw_payload: Any = json.loads(line)
-                if not isinstance(raw_payload, dict):
-                    raise ValueError("event must be a JSON object")
-                raw_kind = raw_payload.pop("kind")
-                events.append(
-                    SideEffectEvent(
-                        observer=self.name,
-                        kind=SideEffectKind(str(raw_kind)),
-                        details=raw_payload,
-                    )
-                )
-            except (KeyError, UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
-                raise ObserverCollectionError(
-                    f"invalid audit event at byte {line_position}: {exc}",
-                    events,
-                ) from exc
+            self._append_raw_event(raw_line, line_position, events)
 
         if consumed_prefix is not None:
             consumed_prefix.extend(complete)
 
         return cursor + complete_end
+
+    def _append_raw_event(
+        self,
+        raw_line: bytes,
+        line_position: int,
+        events: list[SideEffectEvent],
+    ) -> None:
+        if not raw_line.strip():
+            return
+
+        try:
+            line = raw_line.decode("utf-8")
+            raw_payload: Any = json.loads(line)
+            if not isinstance(raw_payload, dict):
+                raise ValueError("event must be a JSON object")
+            raw_kind = raw_payload.pop("kind")
+            events.append(
+                SideEffectEvent(
+                    observer=self.name,
+                    kind=SideEffectKind(str(raw_kind)),
+                    details=raw_payload,
+                )
+            )
+        except (KeyError, UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
+            raise ObserverCollectionError(
+                f"invalid audit event at byte {line_position}: {exc}",
+                events,
+            ) from exc
 
     def _verify_consumed_prefix(
         self,
