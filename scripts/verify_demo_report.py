@@ -57,6 +57,68 @@ EXPECTED: dict[str, dict[str, ExpectedFinding]] = {
     },
 }
 
+PASS_NOT_REQUIRED = ExpectedFinding("passed", "info", "not_required")
+PASS_COMPLETE = ExpectedFinding("passed", "info", "complete")
+
+REQUIRED_PASSES: dict[str, dict[str, ExpectedFinding]] = {
+    "stdio": {
+        "AUTH-DIAGNOSTICS-LOCAL-DEVELOPER": PASS_NOT_REQUIRED,
+        "AUTH-DIAGNOSTICS-RESTRICTED-AGENT": PASS_NOT_REQUIRED,
+        "AUTH-GET-WORKSPACE-NOTE-LOCAL-DEVELOPER": PASS_NOT_REQUIRED,
+        "AUTH-GET-WORKSPACE-NOTE-RESTRICTED-AGENT": PASS_NOT_REQUIRED,
+        "AUTH-RUN-PROJECT-TASK-LOCAL-DEVELOPER": PASS_COMPLETE,
+        "AUTH-SET-WORKSPACE-NOTE-LOCAL-DEVELOPER": PASS_COMPLETE,
+        "AUTH-SET-WORKSPACE-NOTE-RESTRICTED-AGENT": PASS_COMPLETE,
+        "AUTH-WORKSPACE-READ-LOCAL-DEVELOPER": PASS_NOT_REQUIRED,
+        "AUTH-WORKSPACE-READ-RESTRICTED-AGENT": PASS_NOT_REQUIRED,
+        "BEHAVIOUR-SET-WORKSPACE-NOTE": PASS_COMPLETE,
+        "INVENTORY-001": PASS_NOT_REQUIRED,
+    },
+    "temporal": {
+        "AUTH-FORMAT-TEXT-REVIEWER": PASS_NOT_REQUIRED,
+        "INVENTORY-001": PASS_NOT_REQUIRED,
+    },
+    "http": {
+        "AUTH-CUSTOMER-LOOKUP-ADMINISTRATOR": PASS_NOT_REQUIRED,
+        "AUTH-CUSTOMER-LOOKUP-ANONYMOUS": PASS_NOT_REQUIRED,
+        "AUTH-CUSTOMER-LOOKUP-INVALID-TOKEN": PASS_NOT_REQUIRED,
+        "AUTH-CUSTOMER-LOOKUP-READ-ONLY-USER": PASS_NOT_REQUIRED,
+        "AUTH-CUSTOMER-LOOKUP-TENANT-A-USER": PASS_NOT_REQUIRED,
+        "AUTH-CUSTOMER-LOOKUP-TENANT-B-USER": PASS_NOT_REQUIRED,
+        "AUTH-CUSTOMER-UPDATE-ADMINISTRATOR": PASS_COMPLETE,
+        "AUTH-CUSTOMER-UPDATE-ANONYMOUS": PASS_COMPLETE,
+        "AUTH-CUSTOMER-UPDATE-INVALID-TOKEN": PASS_COMPLETE,
+        "AUTH-GET-SESSION-NOTE-ADMINISTRATOR": PASS_NOT_REQUIRED,
+        "AUTH-GET-SESSION-NOTE-ANONYMOUS": PASS_NOT_REQUIRED,
+        "AUTH-GET-SESSION-NOTE-INVALID-TOKEN": PASS_NOT_REQUIRED,
+        "AUTH-GET-SESSION-NOTE-READ-ONLY-USER": PASS_NOT_REQUIRED,
+        "AUTH-GET-SESSION-NOTE-TENANT-A-USER": PASS_NOT_REQUIRED,
+        "AUTH-GET-SESSION-NOTE-TENANT-B-USER": PASS_NOT_REQUIRED,
+        "AUTH-SET-SESSION-NOTE-ADMINISTRATOR": PASS_COMPLETE,
+        "AUTH-SET-SESSION-NOTE-ANONYMOUS": PASS_COMPLETE,
+        "AUTH-SET-SESSION-NOTE-INVALID-TOKEN": PASS_COMPLETE,
+        "AUTH-SET-SESSION-NOTE-READ-ONLY-USER": PASS_COMPLETE,
+        "AUTH-SET-SESSION-NOTE-TENANT-A-USER": PASS_COMPLETE,
+        "AUTH-SET-SESSION-NOTE-TENANT-B-USER": PASS_COMPLETE,
+        "BEHAVIOUR-CUSTOMER-UPDATE": PASS_COMPLETE,
+        "BEHAVIOUR-SET-SESSION-NOTE": PASS_COMPLETE,
+        "INVENTORY-001": PASS_NOT_REQUIRED,
+    },
+}
+
+OPTIONAL_FINDINGS: dict[str, dict[str, frozenset[str]]] = {
+    "stdio": {},
+    "temporal": {},
+    "http": {},
+}
+
+APPROVED_SKIPS: dict[str, dict[str, str]] = {
+    "stdio": {},
+    "temporal": {},
+    "http": {},
+}
+
+
 REQUIRED_REPORT_FILES = {
     "report.json",
     "index.html",
@@ -129,14 +191,10 @@ def verify(profile: str, root: Path) -> Path:
         )
 
     findings = _index_findings(payload)
-    inventory = findings.get("INVENTORY-001")
-    if inventory is None:
-        raise VerificationError("missing required finding: INVENTORY-001")
-    if inventory.get("status") != "passed":
-        raise VerificationError(f"INVENTORY-001 must pass, got {inventory.get('status')!r}")
+    required = dict(EXPECTED[profile])
+    required.update(REQUIRED_PASSES[profile])
 
-    expected = EXPECTED[profile]
-    for test_id, requirement in expected.items():
+    for test_id, requirement in required.items():
         finding = findings.get(test_id)
         if finding is None:
             raise VerificationError(f"missing expected finding: {test_id}")
@@ -156,13 +214,36 @@ def verify(profile: str, root: Path) -> Path:
                 f"{test_id}: expected status/severity/observation={wanted}, got {actual}"
             )
 
+    optional = OPTIONAL_FINDINGS[profile]
+    approved_skips = APPROVED_SKIPS[profile]
     for test_id, finding in findings.items():
+        if test_id in required:
+            continue
+
         status = finding.get("status")
-        if status not in {"passed", "skipped"} and test_id not in expected:
-            raise VerificationError(
-                f"unexpected non-pass finding: {test_id} "
-                f"status={status!r} severity={finding.get('severity')!r}"
-            )
+        if test_id in optional:
+            allowed_states = optional[test_id]
+            if status not in allowed_states:
+                raise VerificationError(
+                    f"optional finding {test_id}: allowed states={sorted(allowed_states)}, "
+                    f"got {status!r}"
+                )
+            continue
+
+        if test_id in approved_skips:
+            if status != "skipped":
+                raise VerificationError(f"approved skip {test_id} must be skipped, got {status!r}")
+            continue
+
+        if status == "passed":
+            raise VerificationError(f"unexpected passed finding: {test_id}")
+        if status == "skipped":
+            raise VerificationError(f"unexpected skipped finding: {test_id}")
+
+        raise VerificationError(
+            f"unexpected non-pass finding: {test_id} "
+            f"status={status!r} severity={finding.get('severity')!r}"
+        )
 
     if profile == "temporal":
         temporal = findings["TEMPORAL-METADATA-001"]

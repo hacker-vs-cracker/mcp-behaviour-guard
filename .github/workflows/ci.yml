@@ -118,6 +118,28 @@ jobs:
       - name: Verify runner CLI starts
         run: docker run --rm mcp-guard-runner:ci --help
 
+      - name: Run installed runner contract and verify reports
+        env:
+          DEMO_AGENT_TOKEN: ci-fake-secret
+        run: |
+          rm -rf runner-smoke-output
+          mkdir -p runner-smoke-output/runtime
+          chmod 0777 runner-smoke-output runner-smoke-output/runtime
+          docker run --rm \
+            --env DEMO_AGENT_TOKEN \
+            --mount type=bind,src="$PWD/contracts/stdio-demo.yaml",dst=/input/stdio-demo.yaml,readonly \
+            --mount type=bind,src="$PWD/demo",dst=/work/demo,readonly \
+            --mount type=bind,src="$PWD/runner-smoke-output",dst=/out \
+            --mount type=bind,src="$PWD/runner-smoke-output/runtime",dst=/work/demo_runtime \
+            mcp-guard-runner:ci \
+            run /input/stdio-demo.yaml \
+            --lab-mode \
+            --no-fail \
+            --output /out/reports \
+            --database /out/guard.db
+          test "$(stat -c '%u' runner-smoke-output/guard.db)" = "10001"
+          python3 scripts/verify_demo_report.py stdio runner-smoke-output/reports
+
       - name: Validate multi-architecture runner build
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
