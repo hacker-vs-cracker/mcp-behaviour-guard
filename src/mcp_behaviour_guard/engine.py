@@ -634,23 +634,56 @@ class GuardEngine:
 
                 observed_tenant = get_path(invocation.response, probe.resource_tenant_path)
                 expected_tenant = probe.expected_tenant or identity.tenant
-
-                violation = invocation.allowed is True and (
-                    probe.require_denial
-                    or (expected_tenant is not None and observed_tenant != expected_tenant)
+                positive_control = self._identity_positive_controls.get(
+                    (tool_name, identity_name), False
                 )
-                if violation:
+                successful_result = (
+                    invocation.allowed is True and invocation.execution == ExecutionStatus.SUCCEEDED
+                )
+
+                authorization_assertion = "not_asserted"
+                ownership_assertion = "not_asserted"
+
+                if probe.require_denial:
+                    authorization_assertion = _authorization_assessment(
+                        invocation,
+                        expected_allowed=False,
+                        positive_control=positive_control,
+                    ).value
+                elif expected_tenant is not None:
+                    if not successful_result or observed_tenant is None:
+                        ownership_assertion = "error"
+                    elif observed_tenant != expected_tenant:
+                        ownership_assertion = "failed"
+                    else:
+                        ownership_assertion = "passed"
+
+                confidentiality_assertion = "not_asserted"
+                confidentiality_match_count = 0
+                if probe.confidentiality is not None:
+                    confidentiality_match_count = probe.confidentiality.match_count(
+                        invocation.response
+                    )
+                    if confidentiality_match_count:
+                        confidentiality_assertion = "failed"
+                    elif invocation.response is None:
+                        confidentiality_assertion = "error"
+                    else:
+                        confidentiality_assertion = "passed"
+
+                assertion_outcomes = (
+                    authorization_assertion,
+                    ownership_assertion,
+                    confidentiality_assertion,
+                )
+                if "failed" in assertion_outcomes:
                     status = FindingStatus.FAILED
-                elif probe.require_denial:
-                    confirmed_denial = (
-                        invocation.authorization == AuthorizationStatus.DENY
-                        and self._identity_positive_controls.get((tool_name, identity_name), False)
-                    )
-                    status = FindingStatus.PASSED if confirmed_denial else FindingStatus.ERROR
+                elif "error" in assertion_outcomes or (
+                    not probe.require_denial and not successful_result
+                ):
+                    status = FindingStatus.ERROR
                 else:
-                    status = (
-                        FindingStatus.PASSED if invocation.allowed is True else FindingStatus.ERROR
-                    )
+                    status = FindingStatus.PASSED
 
                 if (
                     observation not in {ObservationStatus.NOT_REQUIRED, ObservationStatus.COMPLETE}
@@ -658,6 +691,15 @@ class GuardEngine:
                 ):
                     status = FindingStatus.ERROR
 
+                failed_assertions = [
+                    name
+                    for name, outcome in (
+                        ("authorization", authorization_assertion),
+                        ("ownership", ownership_assertion),
+                        ("confidentiality", confidentiality_assertion),
+                    )
+                    if outcome == "failed"
+                ]
                 inconclusive = status == FindingStatus.ERROR
                 self._add_finding(
                     Finding(
@@ -666,13 +708,21 @@ class GuardEngine:
                         title=f"{tool_name} enforces the {identity_name} tenant boundary",
                         status=status,
                         severity=Severity.CRITICAL
-                        if violation
+                        if status == FindingStatus.FAILED
                         else Severity.MEDIUM
                         if inconclusive
                         else Severity.INFO,
                         expected={
                             "denied": probe.require_denial,
                             "resource_tenant": expected_tenant,
+                            "confidentiality": {
+                                "configured": probe.confidentiality is not None,
+                                "matching": (
+                                    "case_sensitive_literal_string_leaves"
+                                    if probe.confidentiality is not None
+                                    else None
+                                ),
+                            },
                         },
                         observed={
                             "probe_executed": (
@@ -681,10 +731,13 @@ class GuardEngine:
                             "allowed": invocation.allowed,
                             "authorization": invocation.authorization.value,
                             "execution": invocation.execution.value,
-                            "positive_control": self._identity_positive_controls.get(
-                                (tool_name, identity_name), False
-                            ),
+                            "positive_control": positive_control,
                             "resource_tenant": observed_tenant,
+                            "authorization_assertion": authorization_assertion,
+                            "ownership_assertion": ownership_assertion,
+                            "confidentiality_assertion": confidentiality_assertion,
+                            "confidentiality_match_count": confidentiality_match_count,
+                            "failed_assertions": failed_assertions,
                             "response": invocation.response,
                             "error": invocation.error,
                             "effects": _event_dicts(effect_events),
@@ -693,9 +746,9 @@ class GuardEngine:
                         evidence={"trace": self._trace_reference()},
                         observation=observation,
                         remediation=(
-                            "Resolve the resource first, then authorize against its owning "
-                            "tenant rather than trusting caller-supplied identifiers."
-                            if violation
+                            "Enforce tenant authorization before returning resources or "
+                            "protected data across tenant boundaries."
+                            if status == FindingStatus.FAILED
                             else None
                         ),
                     )

@@ -152,11 +152,61 @@ class IdentitySpec(ContractModel):
     description: str | None = None
 
 
+def _string_leaves(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        leaves: list[str] = []
+        for item in value.values():
+            leaves.extend(_string_leaves(item))
+        return leaves
+    if isinstance(value, (list, tuple)):
+        leaves = []
+        for item in value:
+            leaves.extend(_string_leaves(item))
+        return leaves
+    return []
+
+
+class TenantConfidentialityPredicate(ContractModel):
+    values: list[str] = Field(min_length=1)
+
+    @field_validator("values")
+    @classmethod
+    def values_are_explicit_literals(cls, value: list[str]) -> list[str]:
+        if any(not item.strip() for item in value):
+            raise ValueError("tenant confidentiality values must be non-empty")
+        if len(value) != len(set(value)):
+            raise ValueError("tenant confidentiality values contain duplicates")
+        return value
+
+    def match_count(self, response: Any) -> int:
+        leaves = _string_leaves(response)
+        return sum(
+            1 for protected_value in self.values if any(protected_value in leaf for leaf in leaves)
+        )
+
+
 class TenantProbe(ContractModel):
     arguments: dict[str, Any]
     resource_tenant_path: str = "tenant"
     expected_tenant: str | None = None
     require_denial: bool = True
+    confidentiality: TenantConfidentialityPredicate | None = None
+
+    @model_validator(mode="after")
+    def confidentiality_values_are_independent(self) -> TenantProbe:
+        if self.confidentiality is None:
+            return self
+
+        argument_leaves = _string_leaves(self.arguments)
+        if any(
+            protected_value in leaf
+            for protected_value in self.confidentiality.values
+            for leaf in argument_leaves
+        ):
+            raise ValueError("tenant confidentiality values must not appear in request arguments")
+        return self
 
 
 class ReplayProbe(ContractModel):

@@ -17,17 +17,24 @@ _MAX_TEXT = 2048
 
 
 def contract_secrets(contract: Contract) -> set[str]:
-    values: set[str] = set()
+    credential_values: set[str] = set()
     for identity in contract.identities.values():
         for name, value in {**identity.headers, **identity.environment}.items():
             if _SENSITIVE_KEY.search(name) and value:
-                values.add(value)
+                credential_values.add(value)
                 if value.lower().startswith("bearer "):
-                    values.add(value[7:])
+                    credential_values.add(value[7:])
     for name, value in contract.server.environment.items():
         if _SENSITIVE_KEY.search(name) and value:
-            values.add(value)
-    return {value for value in values if len(value) >= 6}
+            credential_values.add(value)
+
+    protected_values: set[str] = set()
+    for tool in contract.tools.values():
+        for probe in tool.tenant_probes.values():
+            if probe.confidentiality is not None:
+                protected_values.update(probe.confidentiality.values)
+
+    return {value for value in credential_values if len(value) >= 6} | protected_values
 
 
 def redact(value: Any, secrets: set[str] | None = None) -> Any:
@@ -43,6 +50,22 @@ def redact(value: Any, secrets: set[str] | None = None) -> Any:
                 "forbidden_values_present",
             }:
                 cleaned[label] = "[omitted from exported evidence]"
+            elif label in {
+                "authorization_assertion",
+                "ownership_assertion",
+                "confidentiality_assertion",
+            }:
+                allowed_assertion_outcomes = {
+                    "passed",
+                    "failed",
+                    "error",
+                    "not_asserted",
+                }
+                cleaned[label] = (
+                    item
+                    if isinstance(item, str) and item in allowed_assertion_outcomes
+                    else "[redacted]"
+                )
             elif label == "authorization":
                 allowed = {status.value for status in AuthorizationStatus}
                 cleaned[label] = item if isinstance(item, str) and item in allowed else "[redacted]"
