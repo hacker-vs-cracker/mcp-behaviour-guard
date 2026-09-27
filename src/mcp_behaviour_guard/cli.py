@@ -16,7 +16,14 @@ from rich.console import Console
 from rich.table import Table
 
 from .alerts import send_alerts
-from .baseline import capture_baseline, compare_baselines, load_baseline, write_baseline
+from .baseline import (
+    SavedRunComparisonError,
+    capture_baseline,
+    compare_baselines,
+    compare_saved_runs,
+    load_baseline,
+    write_baseline,
+)
 from .client import McpClient
 from .config import ContractError, load_contract, validate_target
 from .contract_tools import (
@@ -381,6 +388,36 @@ def baseline_compare(
     output.write_text(json.dumps(result, indent=2, sort_keys=True), encoding="utf-8")
     console.print_json(data=result)
     if result["drift_detected"]:
+        raise typer.Exit(1)
+
+
+@baseline_app.command("compare-saved")
+def baseline_compare_saved(
+    reference_dir: Path = typer.Argument(..., exists=True, file_okay=False, readable=True),
+    candidate_dir: Path = typer.Argument(..., exists=True, file_okay=False, readable=True),
+    output: Path = typer.Option(Path("saved-run-diff.json"), "--output", "-o"),
+) -> None:
+    """Compare two saved run artifact directories without contacting a target."""
+    try:
+        result = compare_saved_runs(reference_dir, candidate_dir)
+    except SavedRunComparisonError as exc:
+        console.print(f"[red]Saved-run comparison failed:[/red] {exc}")
+        raise typer.Exit(2) from exc
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(result, indent=2, sort_keys=True), encoding="utf-8")
+    console.print_json(data=result)
+
+    comparison_state = result["comparability"]["state"]
+    if comparison_state == "unsupported":
+        raise typer.Exit(2)
+    if (
+        comparison_state == "changed_context"
+        or result["conformance"]["candidate"] != "pass"
+        or result["regression"]["has_new_regression"]
+        or result["coverage"]["regression"]
+        or result["capabilities"]["review_required"]
+    ):
         raise typer.Exit(1)
 
 
