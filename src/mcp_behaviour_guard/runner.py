@@ -6,6 +6,7 @@ from pathlib import Path
 from .config import load_contract, validate_target
 from .engine import GuardEngine
 from .models import RunSummary
+from .receipts import write_run_receipt
 from .reporting import write_reports
 from .storage import RunStore
 
@@ -34,6 +35,13 @@ async def run_contract(
         engine = GuardEngine(contract, path, store, Path(output), lab_mode)
         summary = await engine.run()
         reports = write_reports(summary, engine.run_dir, contract.reports.formats)
+        write_run_receipt(
+            summary=summary,
+            run_dir=engine.run_dir,
+            contract=contract,
+            contract_path=path,
+            lab_mode=lab_mode,
+        )
         return RunResult(summary=summary, run_dir=engine.run_dir, reports=reports)
     finally:
         store.close()
