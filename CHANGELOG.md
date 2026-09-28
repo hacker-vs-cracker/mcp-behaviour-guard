@@ -1,6 +1,9 @@
 # Changelog
 
 ## Unreleased
+- Add receipt-backed offline `baseline compare-saved` so teams can compare saved run conformance, regression, coverage, capabilities and context without contacting the MCP target.
+- Harden saved-run comparability and observation-requirement transitions, and introduce normalization v2 so typed semantic inputs remain meaningful while ambiguous sensitive strings fail closed instead of being silently treated as equivalent.
+- Add a user-facing saved-run/migration guide, Stage 0 call-path disposition ledger, and practical AI-agent/coding-assistant use cases for the README/PyPI long description.
 - Enforce the exact selected environment at the restricted STDIO subprocess boundary, while preserving launcher/virtualenv semantics and legacy STDIO behaviour.
 - Preflight session tool-call safety and configured evidence requirements before target execution, require replay coverage for the replay event plus relevant tool claims, and keep confirmed cross-session marker disclosure failed even when execution or observation also errors.
 

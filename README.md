@@ -9,7 +9,7 @@
 <h1 align="center">mcp-behaviour-guard</h1>
 
 <p align="center">
-  <strong>Contract-driven security and behavioural regression testing for MCP servers.</strong>
+  <strong>Deterministic security contracts and regression evidence for MCP servers used by AI agents and coding assistants.</strong>
 </p>
 
 <p align="center">
@@ -25,9 +25,9 @@
 
 <p align="center">
   <a href="#quick-start">Quick start</a> •
+  <a href="#where-teams-use-it">Use cases</a> •
   <a href="#what-it-tests">Security checks</a> •
-  <a href="#generate-a-draft-contract">Generate a contract</a> •
-  <a href="#reports-history-and-monitoring">Reports</a> •
+  <a href="docs/saved-run-comparison.md">Saved-run comparison</a> •
   <a href="#safety-and-limitations">Limitations</a>
 </p>
 
@@ -50,6 +50,25 @@ Tool descriptions and input schemas explain what a tool claims to do, but they d
 `mcp-behaviour-guard` tests these properties against an explicit YAML security contract.
 
 > Define the permitted behaviour, execute controlled tests, observe the result, and report deviations with reproducible evidence.
+
+## Where teams use it
+
+- **Internal AI agent or support assistant:** an agent can reach customer-data, ticketing, file, or
+  automation MCP tools. A development/security team can define which identities may call which tools,
+  test configured tenant boundaries, and require evidence for declared side effects before rollout.
+- **Claude Code, OpenAI Codex, VS Code/GitHub Copilot, and other MCP-capable coding hosts:** map the
+  configured MCP server command or endpoint into a draft contract, review it, then test the MCP server
+  boundary. Behaviour Guard does not claim to evaluate the assistant's reasoning or the host product as
+  a whole.
+- **MCP server release or CI review:** retain a reviewed reference run and a candidate run, then use
+  [`mcp-guard baseline compare-saved`](docs/saved-run-comparison.md) to compare conformance, regression,
+  coverage, capability inventory, and comparison context without contacting the target again.
+- **Scheduled assurance:** rerun an approved contract at a controlled interval to surface authorization,
+  side-effect, capability, or temporal metadata drift after deployment.
+
+For the offline artifact contract and exit semantics, see
+[Saved-run comparison](docs/saved-run-comparison.md). For the audited execution/evidence disposition of
+the major Stage 0 paths, see the [Stage 0 call-path ledger](docs/stage0-call-path-ledger.md).
 
 ## Workflow
 
@@ -388,9 +407,9 @@ The reviewed campaign combined two useful security lessons:
 
 Pillar reported 23 campaign-related pull requests: 17 introduced a remote MCP configuration, four referenced a hidden local Python artifact, and two were directory or listing submissions. The `productivity-suite` MCP server initially exposed ordinary formatting and summarization behaviour. After three normal tool calls, subsequent `tools/list` and `prompts/get` responses changed and began presenting credential-seeking instructions to the attached agent.
 
-MCP Behaviour Guard v0.3 addresses the observable security boundaries in that pattern:
+MCP Behaviour Guard addresses the observable security boundaries in that pattern:
 
-| Deadbugz behaviour | Behaviour Guard v0.3 |
+| Deadbugz behaviour | MCP Behaviour Guard |
 |---|---|
 | PR adds or changes an MCP server definition | Approved host-configuration snapshots can flag added, removed or structurally changed MCP servers |
 | Server initially exposes benign metadata | Initial tool, prompt and resource metadata is fingerprinted |
