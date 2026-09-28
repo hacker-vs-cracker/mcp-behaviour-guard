@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "mcp-behaviour-guard"
 version = "0.5.0"
-description = "Deterministic security contract and behavioural regression testing for MCP servers"
+description = "Deterministic security contracts and regression evidence for MCP servers used by AI agents"
 readme = "README.md"
 requires-python = ">=3.11,<3.15"
 license = "MIT"
