@@ -27,7 +27,7 @@
   <a href="#quick-start">Quick start</a> •
   <a href="#where-teams-use-it">Use cases</a> •
   <a href="#what-it-tests">Security checks</a> •
-  <a href="docs/saved-run-comparison.md">Saved-run comparison</a> •
+  <a href="https://github.com/hacker-vs-cracker/mcp-behaviour-guard/blob/main/docs/saved-run-comparison.md">Saved-run comparison</a> •
   <a href="#safety-and-limitations">Limitations</a>
 </p>
 
@@ -61,14 +61,14 @@ Tool descriptions and input schemas explain what a tool claims to do, but they d
   boundary. Behaviour Guard does not claim to evaluate the assistant's reasoning or the host product as
   a whole.
 - **MCP server release or CI review:** retain a reviewed reference run and a candidate run, then use
-  [`mcp-guard baseline compare-saved`](docs/saved-run-comparison.md) to compare conformance, regression,
+  [`mcp-guard baseline compare-saved`](https://github.com/hacker-vs-cracker/mcp-behaviour-guard/blob/main/docs/saved-run-comparison.md) to compare conformance, regression,
   coverage, capability inventory, and comparison context without contacting the target again.
 - **Scheduled assurance:** rerun an approved contract at a controlled interval to surface authorization,
   side-effect, capability, or temporal metadata drift after deployment.
 
 For the offline artifact contract and exit semantics, see
-[Saved-run comparison](docs/saved-run-comparison.md). For the audited execution/evidence disposition of
-the major Stage 0 paths, see the [Stage 0 call-path ledger](docs/stage0-call-path-ledger.md).
+[Saved-run comparison](https://github.com/hacker-vs-cracker/mcp-behaviour-guard/blob/main/docs/saved-run-comparison.md). For the audited execution/evidence disposition of
+the major Stage 0 paths, see the [Stage 0 call-path ledger](https://github.com/hacker-vs-cracker/mcp-behaviour-guard/blob/main/docs/stage0-call-path-ledger.md).
 
 ## Workflow
 
