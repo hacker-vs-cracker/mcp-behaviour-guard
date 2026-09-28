@@ -1574,3 +1574,571 @@ async def test_sensitive_named_tenant_probe_preserves_check_semantics(
         != receipt_b["context"]["effective_policy_sha256"]
     )
     assert receipt_a["checks"]["definition_sha256"] != receipt_b["checks"]["definition_sha256"]
+
+
+# ---- Phase 1B.1 B1/B3 acceptance freeze ----
+
+
+def _phase1b1_load(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _phase1b1_write(path: Path, payload: dict[str, Any]) -> None:
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _phase1b1_set_runner_and_report(
+    run_dir: Path,
+    *,
+    receipt_field: str,
+    report_field: str,
+    receipt_value: Any,
+    report_value: Any,
+) -> None:
+    report_path = run_dir / "report.json"
+    receipt_path = run_dir / "receipt.json"
+    report = _phase1b1_load(report_path)
+    receipt = _phase1b1_load(receipt_path)
+    report[report_field] = report_value
+    _phase1b1_write(report_path, report)
+    receipt["runner"][receipt_field] = receipt_value
+    receipt["artifacts"]["report_json_sha256"] = _sha256(report_path)
+    _phase1b1_write(receipt_path, receipt)
+
+
+def _phase1b1_set_receipt_value(
+    run_dir: Path,
+    section: str,
+    field: str,
+    value: Any,
+) -> None:
+    receipt_path = run_dir / "receipt.json"
+    receipt = _phase1b1_load(receipt_path)
+    receipt[section][field] = value
+    _phase1b1_write(receipt_path, receipt)
+
+
+@pytest.mark.parametrize(
+    ("receipt_field", "report_field", "receipt_value", "report_value"),
+    [
+        pytest.param("mcp_sdk_version", "sdk_version", None, "1.28.1", id="sdk-null-known"),
+        pytest.param("mcp_sdk_version", "sdk_version", "1.28.1", None, id="sdk-known-null"),
+        pytest.param("mcp_sdk_version", "sdk_version", "1.28.1", "9.9.9", id="sdk-different"),
+        pytest.param("transport", "transport", None, "stdio", id="transport-null-known"),
+        pytest.param("transport", "transport", "stdio", None, id="transport-known-null"),
+        pytest.param(
+            "transport",
+            "transport",
+            "stdio",
+            "streamable-http",
+            id="transport-different",
+        ),
+        pytest.param(
+            "state_strategy",
+            "state_strategy",
+            None,
+            "stdio_process",
+            id="state-null-known",
+        ),
+        pytest.param(
+            "state_strategy",
+            "state_strategy",
+            "stdio_process",
+            None,
+            id="state-known-null",
+        ),
+        pytest.param(
+            "state_strategy",
+            "state_strategy",
+            "stdio_process",
+            "legacy_session",
+            id="state-different",
+        ),
+    ],
+)
+def test_phase1b1_receipt_report_runner_mismatch_is_invalid(
+    tmp_path: Path,
+    receipt_field: str,
+    report_field: str,
+    receipt_value: Any,
+    report_value: Any,
+) -> None:
+    reference = _write_saved_run(tmp_path / "reference", [_finding("AUTH-X", "passed")])
+    candidate = _write_saved_run(tmp_path / "candidate", [_finding("AUTH-X", "passed")])
+    _phase1b1_set_runner_and_report(
+        candidate,
+        receipt_field=receipt_field,
+        report_field=report_field,
+        receipt_value=receipt_value,
+        report_value=report_value,
+    )
+
+    error_type = _comparison_error_type()
+    with pytest.raises(error_type, match=receipt_field):
+        _compare_saved_runs(reference, candidate)
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "report_field"),
+    [
+        pytest.param("context", "deployment_identity", None, id="deployment"),
+        pytest.param("context", "credential_principal", None, id="principal"),
+        pytest.param("runner", "mcp_sdk_version", "sdk_version", id="sdk"),
+        pytest.param("runner", "transport", "transport", id="transport"),
+        pytest.param("runner", "state_strategy", "state_strategy", id="state"),
+    ],
+)
+@pytest.mark.parametrize("value", ["", "   "], ids=["empty", "whitespace"])
+def test_phase1b1_nullable_known_strings_reject_blank_values(
+    tmp_path: Path,
+    section: str,
+    field: str,
+    report_field: str | None,
+    value: str,
+) -> None:
+    reference = _write_saved_run(tmp_path / "reference", [_finding("AUTH-X", "passed")])
+    candidate = _write_saved_run(tmp_path / "candidate", [_finding("AUTH-X", "passed")])
+
+    if report_field is None:
+        _phase1b1_set_receipt_value(candidate, section, field, value)
+    else:
+        _phase1b1_set_runner_and_report(
+            candidate,
+            receipt_field=field,
+            report_field=report_field,
+            receipt_value=value,
+            report_value=value,
+        )
+
+    error_type = _comparison_error_type()
+    with pytest.raises(error_type, match=field):
+        _compare_saved_runs(reference, candidate)
+
+
+@pytest.mark.parametrize(
+    "protocol_versions",
+    [
+        pytest.param([], id="empty-list"),
+        pytest.param([""], id="blank-entry"),
+        pytest.param(["   "], id="whitespace-entry"),
+        pytest.param(["2025-03-26", "2025-03-26"], id="duplicate"),
+        pytest.param(["2025-03-26", "2024-11-05"], id="noncanonical-order"),
+        pytest.param(["2025-03-26", 7], id="non-string-entry"),
+    ],
+)
+def test_phase1b1_protocol_versions_require_null_or_canonical_nonempty_list(
+    tmp_path: Path,
+    protocol_versions: list[Any],
+) -> None:
+    reference = _write_saved_run(tmp_path / "reference", [_finding("AUTH-X", "passed")])
+    candidate = _write_saved_run(tmp_path / "candidate", [_finding("AUTH-X", "passed")])
+    _phase1b1_set_receipt_value(
+        candidate,
+        "runner",
+        "protocol_versions",
+        protocol_versions,
+    )
+
+    error_type = _comparison_error_type()
+    with pytest.raises(error_type, match="protocol_versions"):
+        _compare_saved_runs(reference, candidate)
+
+
+def test_phase1b1_protocol_versions_accept_canonical_known_list(tmp_path: Path) -> None:
+    reference = _write_saved_run(tmp_path / "reference", [_finding("AUTH-X", "passed")])
+    candidate = _write_saved_run(tmp_path / "candidate", [_finding("AUTH-X", "passed")])
+    canonical = ["2024-11-05", "2025-03-26"]
+    _phase1b1_set_receipt_value(reference, "runner", "protocol_versions", canonical)
+    _phase1b1_set_receipt_value(candidate, "runner", "protocol_versions", canonical)
+
+    result = _compare_saved_runs(reference, candidate)
+
+    assert result["comparability"]["state"] == "comparable"
+    assert "runner.protocol_versions" not in result["comparability"]["unknown_fields"]
+
+
+@pytest.mark.parametrize(
+    ("field", "known_value"),
+    [
+        pytest.param("deployment_identity", "deployment-a", id="deployment"),
+        pytest.param("credential_principal", "principal-a", id="principal"),
+    ],
+)
+@pytest.mark.parametrize(
+    "known_on_reference",
+    [True, False],
+    ids=["known-to-null", "null-to-known"],
+)
+def test_phase1b1_asymmetric_unknown_identity_is_unsupported(
+    tmp_path: Path,
+    field: str,
+    known_value: str,
+    known_on_reference: bool,
+) -> None:
+    reference_kwargs = {field: known_value} if known_on_reference else {}
+    candidate_kwargs = {} if known_on_reference else {field: known_value}
+    reference = _write_saved_run(
+        tmp_path / "reference",
+        [_finding("AUTH-X", "passed")],
+        **reference_kwargs,
+    )
+    candidate = _write_saved_run(
+        tmp_path / "candidate",
+        [_finding("AUTH-X", "passed")],
+        **candidate_kwargs,
+    )
+
+    result = _compare_saved_runs(reference, candidate)
+
+    dotted = f"context.{field}"
+    assert result["comparability"]["state"] == "unsupported"
+    assert dotted in result["comparability"]["reasons"]
+    assert dotted in result["comparability"]["unknown_fields"]
+
+
+@pytest.mark.parametrize(
+    ("receipt_field", "report_field", "known_value"),
+    [
+        pytest.param("mcp_sdk_version", "sdk_version", "1.28.1", id="sdk"),
+        pytest.param("transport", "transport", "stdio", id="transport"),
+        pytest.param("state_strategy", "state_strategy", "stdio_process", id="state"),
+    ],
+)
+@pytest.mark.parametrize(
+    "known_on_reference",
+    [True, False],
+    ids=["known-to-null", "null-to-known"],
+)
+def test_phase1b1_asymmetric_unknown_runner_context_is_unsupported(
+    tmp_path: Path,
+    receipt_field: str,
+    report_field: str,
+    known_value: str,
+    known_on_reference: bool,
+) -> None:
+    reference = _write_saved_run(tmp_path / "reference", [_finding("AUTH-X", "passed")])
+    candidate = _write_saved_run(tmp_path / "candidate", [_finding("AUTH-X", "passed")])
+    unknown_dir = candidate if known_on_reference else reference
+    _phase1b1_set_runner_and_report(
+        unknown_dir,
+        receipt_field=receipt_field,
+        report_field=report_field,
+        receipt_value=None,
+        report_value=None,
+    )
+
+    result = _compare_saved_runs(reference, candidate)
+
+    dotted = f"runner.{receipt_field}"
+    assert result["comparability"]["state"] == "unsupported"
+    assert dotted in result["comparability"]["reasons"]
+    assert dotted in result["comparability"]["unknown_fields"]
+
+
+@pytest.mark.parametrize(
+    "known_on_reference",
+    [True, False],
+    ids=["known-to-null", "null-to-known"],
+)
+def test_phase1b1_asymmetric_unknown_protocol_versions_is_unsupported(
+    tmp_path: Path,
+    known_on_reference: bool,
+) -> None:
+    reference = _write_saved_run(tmp_path / "reference", [_finding("AUTH-X", "passed")])
+    candidate = _write_saved_run(tmp_path / "candidate", [_finding("AUTH-X", "passed")])
+    known_dir = reference if known_on_reference else candidate
+    _phase1b1_set_receipt_value(
+        known_dir,
+        "runner",
+        "protocol_versions",
+        ["2025-03-26"],
+    )
+
+    result = _compare_saved_runs(reference, candidate)
+
+    assert result["comparability"]["state"] == "unsupported"
+    assert "runner.protocol_versions" in result["comparability"]["reasons"]
+    assert "runner.protocol_versions" in result["comparability"]["unknown_fields"]
+
+
+@pytest.mark.parametrize(
+    ("receipt_field", "report_field"),
+    [
+        pytest.param("mcp_sdk_version", "sdk_version", id="sdk"),
+        pytest.param("transport", "transport", id="transport"),
+        pytest.param("state_strategy", "state_strategy", id="state"),
+    ],
+)
+def test_phase1b1_both_unknown_runner_context_remains_explicit(
+    tmp_path: Path,
+    receipt_field: str,
+    report_field: str,
+) -> None:
+    reference = _write_saved_run(tmp_path / "reference", [_finding("AUTH-X", "passed")])
+    candidate = _write_saved_run(tmp_path / "candidate", [_finding("AUTH-X", "passed")])
+    for run_dir in (reference, candidate):
+        _phase1b1_set_runner_and_report(
+            run_dir,
+            receipt_field=receipt_field,
+            report_field=report_field,
+            receipt_value=None,
+            report_value=None,
+        )
+
+    result = _compare_saved_runs(reference, candidate)
+
+    dotted = f"runner.{receipt_field}"
+    assert result["comparability"]["state"] == "comparable"
+    assert dotted in result["comparability"]["unknown_fields"]
+
+
+@pytest.mark.parametrize(
+    ("receipt_field", "report_field", "candidate_value"),
+    [
+        pytest.param("mcp_sdk_version", "sdk_version", "1.29.0", id="sdk"),
+        pytest.param("transport", "transport", "streamable-http", id="transport"),
+        pytest.param("state_strategy", "state_strategy", "legacy_session", id="state"),
+    ],
+)
+def test_phase1b1_known_runner_change_is_changed_context(
+    tmp_path: Path,
+    receipt_field: str,
+    report_field: str,
+    candidate_value: str,
+) -> None:
+    reference = _write_saved_run(tmp_path / "reference", [_finding("AUTH-X", "passed")])
+    candidate = _write_saved_run(tmp_path / "candidate", [_finding("AUTH-X", "passed")])
+    _phase1b1_set_runner_and_report(
+        candidate,
+        receipt_field=receipt_field,
+        report_field=report_field,
+        receipt_value=candidate_value,
+        report_value=candidate_value,
+    )
+
+    result = _compare_saved_runs(reference, candidate)
+
+    assert result["comparability"]["state"] == "changed_context"
+    assert f"runner.{receipt_field}" in result["comparability"]["reasons"]
+
+
+def test_phase1b1_known_protocol_change_is_changed_context(tmp_path: Path) -> None:
+    reference = _write_saved_run(tmp_path / "reference", [_finding("AUTH-X", "passed")])
+    candidate = _write_saved_run(tmp_path / "candidate", [_finding("AUTH-X", "passed")])
+    _phase1b1_set_receipt_value(
+        reference,
+        "runner",
+        "protocol_versions",
+        ["2024-11-05"],
+    )
+    _phase1b1_set_receipt_value(
+        candidate,
+        "runner",
+        "protocol_versions",
+        ["2025-03-26"],
+    )
+
+    result = _compare_saved_runs(reference, candidate)
+
+    assert result["comparability"]["state"] == "changed_context"
+    assert "runner.protocol_versions" in result["comparability"]["reasons"]
+
+
+def test_phase1b1_asymmetric_unknown_suppresses_established_regression(
+    tmp_path: Path,
+) -> None:
+    reference = _write_saved_run(
+        tmp_path / "reference",
+        [_finding("AUTH-X", "passed")],
+        credential_principal="principal-a",
+    )
+    candidate = _write_saved_run(
+        tmp_path / "candidate",
+        [_finding("AUTH-X", "failed")],
+    )
+
+    result = _compare_saved_runs(reference, candidate)
+
+    assert result["comparability"]["state"] == "unsupported"
+    assert result["conformance"]["candidate"] == "fail"
+    assert result["regression"]["new_failures"] == []
+    assert result["regression"]["has_new_regression"] is False
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "expected_regression"),
+    [
+        pytest.param("complete", "partial", True, id="complete-partial"),
+        pytest.param("complete", "unavailable", True, id="complete-unavailable"),
+        pytest.param("complete", "not_required", True, id="complete-not-required"),
+        pytest.param("partial", "unavailable", True, id="partial-unavailable"),
+        pytest.param("partial", "not_required", True, id="partial-not-required"),
+        pytest.param("unavailable", "not_required", True, id="unavailable-not-required"),
+        pytest.param("not_required", "not_required", False, id="not-required-same"),
+        pytest.param("not_required", "complete", False, id="not-required-complete"),
+        pytest.param("not_required", "partial", True, id="not-required-partial"),
+        pytest.param("not_required", "unavailable", True, id="not-required-unavailable"),
+    ],
+)
+def test_phase1b1_observation_requirement_transition_matrix(
+    tmp_path: Path,
+    before: str,
+    after: str,
+    expected_regression: bool,
+) -> None:
+    reference = _write_saved_run(
+        tmp_path / "reference",
+        [_finding("AUTH-X", "passed", observation=before)],
+    )
+    candidate = _write_saved_run(
+        tmp_path / "candidate",
+        [_finding("AUTH-X", "passed", observation=after)],
+    )
+
+    result = _compare_saved_runs(reference, candidate)
+
+    assert result["comparability"]["state"] == "comparable"
+    assert result["coverage"]["regression"] is expected_regression
+    if before == after:
+        assert result["coverage"]["observation_changes"] == []
+    else:
+        assert result["coverage"]["observation_changes"] == [
+            {"test_id": "AUTH-X", "before": before, "after": after}
+        ]
+    if expected_regression:
+        assert result["coverage"]["observation_regressions"] == [
+            {"test_id": "AUTH-X", "before": before, "after": after}
+        ]
+    else:
+        assert result["coverage"]["observation_regressions"] == []
+
+
+def test_phase1b1_cli_invalid_receipt_report_pair_returns_two(tmp_path: Path) -> None:
+    reference = _write_saved_run(tmp_path / "reference", [_finding("AUTH-X", "passed")])
+    candidate = _write_saved_run(tmp_path / "candidate", [_finding("AUTH-X", "passed")])
+    _phase1b1_set_runner_and_report(
+        candidate,
+        receipt_field="mcp_sdk_version",
+        report_field="sdk_version",
+        receipt_value=None,
+        report_value="1.28.1",
+    )
+    output = tmp_path / "invalid-pair.json"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "baseline",
+            "compare-saved",
+            str(reference),
+            str(candidate),
+            "--output",
+            str(output),
+        ],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert not output.exists()
+
+
+def test_phase1b1_cli_asymmetric_unknown_returns_two(tmp_path: Path) -> None:
+    reference = _write_saved_run(
+        tmp_path / "reference",
+        [_finding("AUTH-X", "passed")],
+        credential_principal="principal-a",
+    )
+    candidate = _write_saved_run(tmp_path / "candidate", [_finding("AUTH-X", "passed")])
+    output = tmp_path / "unsupported-asymmetric.json"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "baseline",
+            "compare-saved",
+            str(reference),
+            str(candidate),
+            "--output",
+            str(output),
+        ],
+    )
+
+    assert result.exit_code == 2, result.output
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["comparability"]["state"] == "unsupported"
+    assert "context.credential_principal" in payload["comparability"]["reasons"]
+
+
+def test_phase1b1_cli_observation_requirement_loss_returns_one(tmp_path: Path) -> None:
+    reference = _write_saved_run(
+        tmp_path / "reference",
+        [_finding("AUTH-X", "passed", observation="complete")],
+    )
+    candidate = _write_saved_run(
+        tmp_path / "candidate",
+        [_finding("AUTH-X", "passed", observation="not_required")],
+    )
+    output = tmp_path / "observation-requirement-loss.json"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "baseline",
+            "compare-saved",
+            str(reference),
+            str(candidate),
+            "--output",
+            str(output),
+        ],
+    )
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["coverage"]["regression"] is True
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        pytest.param("deployment_identity", "deployment-a", id="deployment"),
+        pytest.param("credential_principal", "principal-a", id="principal"),
+    ],
+)
+def test_phase1b1_known_identity_equal_remains_comparable(
+    tmp_path: Path,
+    field: str,
+    value: str,
+) -> None:
+    kwargs = {field: value}
+    reference = _write_saved_run(
+        tmp_path / "reference",
+        [_finding("AUTH-X", "passed")],
+        **kwargs,
+    )
+    candidate = _write_saved_run(
+        tmp_path / "candidate",
+        [_finding("AUTH-X", "passed")],
+        **kwargs,
+    )
+
+    result = _compare_saved_runs(reference, candidate)
+
+    assert result["comparability"]["state"] == "comparable"
+    assert f"context.{field}" not in result["comparability"]["unknown_fields"]
+
+
+def test_phase1b1_known_deployment_change_is_unsupported(tmp_path: Path) -> None:
+    reference = _write_saved_run(
+        tmp_path / "reference",
+        [_finding("AUTH-X", "passed")],
+        deployment_identity="deployment-a",
+    )
+    candidate = _write_saved_run(
+        tmp_path / "candidate",
+        [_finding("AUTH-X", "passed")],
+        deployment_identity="deployment-b",
+    )
+
+    result = _compare_saved_runs(reference, candidate)
+
+    assert result["comparability"]["state"] == "unsupported"
+    assert "context.deployment_identity" in result["comparability"]["reasons"]

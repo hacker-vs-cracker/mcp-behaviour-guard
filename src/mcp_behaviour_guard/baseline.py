@@ -414,7 +414,7 @@ def _load_saved_run(root: Path, label: str) -> dict[str, Any]:
     ):
         receipt_value = runner.get(receipt_key)
         report_value = report.get(report_key)
-        if receipt_value is not None and receipt_value != report_value:
+        if receipt_value != report_value:
             raise SavedRunComparisonError(f"{label} receipt {receipt_key} does not match report")
 
     computed_assessment = _conformance(findings)
@@ -523,9 +523,9 @@ def _validate_receipt_v1(receipt: dict[str, Any], label: str) -> None:
         )
     for field in ("deployment_identity", "credential_principal"):
         value = context[field]
-        if value is not None and not isinstance(value, str):
+        if value is not None and (not isinstance(value, str) or not value.strip()):
             raise SavedRunComparisonError(
-                f"{label} receipt field context.{field} must be string or null"
+                f"{label} receipt field context.{field} must be a non-empty string or null"
             )
     if not isinstance(context["fixture_profile"], dict):
         raise SavedRunComparisonError(
@@ -538,18 +538,25 @@ def _validate_receipt_v1(receipt: dict[str, Any], label: str) -> None:
         )
     for field in ("mcp_sdk_version", "transport", "state_strategy"):
         value = runner[field]
-        if value is not None and not isinstance(value, str):
+        if value is not None and (not isinstance(value, str) or not value.strip()):
             raise SavedRunComparisonError(
-                f"{label} receipt field runner.{field} must be string or null"
+                f"{label} receipt field runner.{field} must be a non-empty string or null"
             )
     protocol_versions = runner["protocol_versions"]
-    if protocol_versions is not None and (
-        not isinstance(protocol_versions, list)
-        or not all(isinstance(item, str) for item in protocol_versions)
-    ):
-        raise SavedRunComparisonError(
-            f"{label} receipt field runner.protocol_versions must be string list or null"
-        )
+    if protocol_versions is not None:
+        if (
+            not isinstance(protocol_versions, list)
+            or not protocol_versions
+            or not all(isinstance(item, str) and bool(item.strip()) for item in protocol_versions)
+        ):
+            raise SavedRunComparisonError(
+                f"{label} receipt field runner.protocol_versions must be "
+                "a non-empty string list or null"
+            )
+        if protocol_versions != sorted(set(protocol_versions)):
+            raise SavedRunComparisonError(
+                f"{label} receipt field runner.protocol_versions must be sorted and duplicate-free"
+            )
 
     if not isinstance(checks["definition_sha256"], str) or not checks["definition_sha256"]:
         raise SavedRunComparisonError(
@@ -661,12 +668,16 @@ def _saved_run_comparability(
     unknown_capable_fields = (
         "context.deployment_identity",
         "context.credential_principal",
+        "runner.mcp_sdk_version",
+        "runner.transport",
+        "runner.state_strategy",
         "runner.protocol_versions",
     )
 
     reasons: list[str] = []
     input_changes: list[str] = []
     unknown_fields: list[str] = []
+    asymmetric_unknown_fields: list[str] = []
 
     for field in unsupported_fields:
         before = _dotted(reference, field)
@@ -674,6 +685,10 @@ def _saved_run_comparability(
         if before is None or after is None:
             if field in unknown_capable_fields:
                 unknown_fields.append(field)
+                if (before is None) != (after is None):
+                    reasons.append(field)
+                    input_changes.append(field)
+                    asymmetric_unknown_fields.append(field)
             continue
         if before != after:
             reasons.append(field)
@@ -685,6 +700,10 @@ def _saved_run_comparability(
         if before is None or after is None:
             if field in unknown_capable_fields and field not in unknown_fields:
                 unknown_fields.append(field)
+            if field in unknown_capable_fields and (before is None) != (after is None):
+                reasons.append(field)
+                input_changes.append(field)
+                asymmetric_unknown_fields.append(field)
             continue
         if before != after:
             reasons.append(field)
@@ -696,7 +715,7 @@ def _saved_run_comparability(
         if before is not None and after is not None and before != after:
             input_changes.append(field)
 
-    if any(field in unsupported_fields for field in reasons):
+    if asymmetric_unknown_fields or any(field in unsupported_fields for field in reasons):
         state = "unsupported"
     elif reasons:
         state = "changed_context"
@@ -782,7 +801,15 @@ def _severity_rank(value: str) -> int:
 
 
 def _observation_regressed(change: dict[str, str]) -> bool:
+    before = change["before"]
+    after = change["after"]
+
+    if before == "not_required":
+        return after in {"partial", "unavailable"}
+    if after == "not_required":
+        return before in {"complete", "partial", "unavailable"}
+
     rank = {"unavailable": 0, "partial": 1, "complete": 2}
-    before = rank.get(change["before"])
-    after = rank.get(change["after"])
-    return before is not None and after is not None and after < before
+    before_rank = rank.get(before)
+    after_rank = rank.get(after)
+    return before_rank is not None and after_rank is not None and after_rank < before_rank
