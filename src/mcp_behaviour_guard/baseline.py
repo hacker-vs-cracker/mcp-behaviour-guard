@@ -301,7 +301,7 @@ def compare_saved_runs(reference_dir: Path, candidate_dir: Path) -> dict[str, An
 
     return {
         "schema_version": 1,
-        "normalization_version": 1,
+        "normalization_version": reference["receipt"]["normalization_version"],
         "inputs": {
             "reference": {
                 "receipt_sha256": reference["receipt_sha256"],
@@ -353,11 +353,32 @@ def _load_saved_run(root: Path, label: str) -> dict[str, Any]:
         raise SavedRunComparisonError(
             f"{label} receipt schema is unsupported: {receipt.get('schema_version')!r}"
         )
-    if receipt.get("normalization_version") != 1:
+    if receipt.get("normalization_version") != 2:
         raise SavedRunComparisonError(
             f"{label} normalization version is unsupported: "
             f"{receipt.get('normalization_version')!r}"
         )
+
+    normalization = receipt.get("normalization")
+    if not isinstance(normalization, dict):
+        raise SavedRunComparisonError(f"{label} receipt has no normalization mapping")
+    unverified_sensitive_fields = normalization.get("unverified_sensitive_fields")
+    if (
+        not isinstance(unverified_sensitive_fields, list)
+        or not all(
+            isinstance(item, str) and bool(item.strip()) for item in unverified_sensitive_fields
+        )
+        or unverified_sensitive_fields != sorted(set(unverified_sensitive_fields))
+    ):
+        raise SavedRunComparisonError(
+            f"{label} receipt normalization.unverified_sensitive_fields is invalid"
+        )
+    if unverified_sensitive_fields:
+        raise SavedRunComparisonError(
+            f"{label} normalization is unsupported because sensitive semantic fields "
+            f"are unverified: {', '.join(unverified_sensitive_fields)}"
+        )
+
     if receipt.get("report_schema_version") != 2:
         raise SavedRunComparisonError(
             f"{label} report schema is unsupported: {receipt.get('report_schema_version')!r}"

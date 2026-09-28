@@ -78,7 +78,7 @@ def _write_saved_run(
     runner_version: str = "0.5.0",
     sdk_version: str = "1.28.1",
     state_strategy: str = "stdio_process",
-    normalization_version: int = 1,
+    normalization_version: int = 2,
     tools: list[dict[str, Any]] | None = None,
 ) -> Path:
     root.mkdir(parents=True, exist_ok=True)
@@ -107,6 +107,7 @@ def _write_saved_run(
     receipt = {
         "schema_version": 1,
         "normalization_version": normalization_version,
+        "normalization": {"unverified_sensitive_fields": []},
         "report_schema_version": 2,
         "run": {
             "run_id": root.name,
@@ -342,7 +343,7 @@ async def test_run_contract_emits_external_receipt_without_changing_report_v2(
 
     assert report["schema_version"] == 2
     assert receipt["schema_version"] == 1
-    assert receipt["normalization_version"] == 1
+    assert receipt["normalization_version"] == 2
     assert receipt["report_schema_version"] == 2
     assert receipt["run"]["run_id"] == "run-1"
     assert receipt["run"]["completion"] == "completed"
@@ -469,7 +470,7 @@ def test_offline_compare_is_deterministic_and_preserves_unknown_context(
 
     assert first == second
     assert first["schema_version"] == 1
-    assert first["normalization_version"] == 1
+    assert first["normalization_version"] == 2
     assert first["inputs"]["reference"]["receipt_sha256"] == _sha256(reference / "receipt.json")
     assert first["inputs"]["candidate"]["receipt_sha256"] == _sha256(candidate / "receipt.json")
     assert first["comparability"]["state"] == "comparable"
