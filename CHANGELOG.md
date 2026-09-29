@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+
+## 0.6.0 - 2026-09-28
 - Add receipt-backed offline `baseline compare-saved` so teams can compare saved run conformance, regression, coverage, capabilities and context without contacting the MCP target.
 - Harden saved-run comparability and observation-requirement transitions, and introduce normalization v2 so typed semantic inputs remain meaningful while ambiguous sensitive strings fail closed instead of being silently treated as equivalent.
 - Add a user-facing saved-run/migration guide, Stage 0 call-path disposition ledger, and practical AI-agent/coding-assistant use cases for the README/PyPI long description.
