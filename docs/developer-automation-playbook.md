@@ -310,6 +310,7 @@ import asyncio
 
 from mcp_behaviour_guard import run_contract
 
+
 async def verify_mcp_server() -> None:
     result = await run_contract(
         "contracts/server.yaml",
@@ -320,10 +321,8 @@ async def verify_mcp_server() -> None:
     print("run_dir:", result.run_dir)
 
     if result.summary.assessment.value != "pass":
-        raise RuntimeError(
-            f"MCP security contract did not pass: "
-            f"{result.summary.assessment.value}"
-        )
+        raise RuntimeError(f"MCP security contract did not pass: {result.summary.assessment.value}")
+
 
 asyncio.run(verify_mcp_server())
 ```
