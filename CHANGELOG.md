@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+## 0.6.1 - 2026-09-29
+- Split the GitHub and PyPI landing pages so PyPI is developer-first, add organization-oriented automation scenarios and commented contract starters, and add a developer automation playbook covering tenant isolation, local coding assistants, temporal metadata drift, replay/idempotency, remote MCP boundaries and saved-run CI usage.
+
 ## 0.6.0 - 2026-09-29
 - Add receipt-backed offline `baseline compare-saved` so teams can compare saved run conformance, regression, coverage, capabilities and context without contacting the MCP target.
 - Harden saved-run comparability and observation-requirement transitions, and introduce normalization v2 so typed semantic inputs remain meaningful while ambiguous sensitive strings fail closed instead of being silently treated as equivalent.
