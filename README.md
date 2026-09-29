@@ -70,6 +70,34 @@ For the offline artifact contract and exit semantics, see
 [Saved-run comparison](https://github.com/hacker-vs-cracker/mcp-behaviour-guard/blob/main/docs/saved-run-comparison.md). For the audited execution/evidence disposition of
 the major Stage 0 paths, see the [Stage 0 call-path ledger](https://github.com/hacker-vs-cracker/mcp-behaviour-guard/blob/main/docs/stage0-call-path-ledger.md).
 
+## CI and developer automation
+
+A typical development team uses Guard in two stages:
+
+1. run a reviewed contract against a synthetic dev/staging MCP target and retain the whole run directory;
+2. compare a candidate saved run with a separately protected approved reference before promotion.
+
+```bash
+mcp-guard run contracts/server.yaml \
+  --output reports/candidate \
+  --database .guard/candidate.db
+
+mcp-guard baseline compare-saved \
+  reports/approved-reference \
+  reports/candidate \
+  --output saved-run-diff.json
+```
+
+Guard also emits JUnit and SARIF for ordinary CI/security tooling.
+
+The offline comparator validates supported artifacts and comparison semantics; it does **not** make an
+unprotected reference independently trustworthy. Reference authority, protected policy, candidate/build
+identity, credentials/fixtures and the final CI gate are separate trust bindings.
+
+For organization-oriented examples including support/CRM agents, finance-tool poisoning, local coding
+assistants, retry/idempotency checks, restricted HTTP/STDIO boundaries and commented YAML starters, see
+the [developer automation playbook](docs/developer-automation-playbook.md).
+
 ## Workflow
 
 1. Connect to an HTTP or STDIO MCP server.
