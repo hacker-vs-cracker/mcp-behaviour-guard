@@ -15,6 +15,7 @@
 <p align="center">
   <a href="https://pypi.org/project/mcp-behaviour-guard/"><img alt="PyPI" src="https://img.shields.io/pypi/v/mcp-behaviour-guard"></a>
   <a href="https://github.com/hacker-vs-cracker/mcp-behaviour-guard/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/hacker-vs-cracker/mcp-behaviour-guard/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/hacker-vs-cracker/mcp-behaviour-guard/actions/workflows/security.yml"><img alt="Security workflow" src="https://github.com/hacker-vs-cracker/mcp-behaviour-guard/actions/workflows/security.yml/badge.svg?branch=main"></a>
   <img alt="Python 3.11-3.14" src="https://img.shields.io/badge/python-3.11--3.14-blue">
   <a href="https://github.com/hacker-vs-cracker/mcp-behaviour-guard/blob/main/LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
 </p>
@@ -31,7 +32,7 @@
   <a href="#safety-and-limitations">Limitations</a>
 </p>
 
-PyPI releases are published from the protected `pypi` GitHub environment using GitHub OIDC Trusted Publishing, with digital attestations for uploaded distributions. These attestations provide provenance for the published files; they are not a claim that the package or every tested MCP integration is vulnerability-free.
+`main` is protected by pull-request and required-CI rules. The repository security workflow runs SHA-pinned CodeQL, pinned `pip-audit`, and GitHub Dependency Review. PyPI releases are published from the protected `pypi` GitHub environment using GitHub OIDC Trusted Publishing, with digital attestations for uploaded distributions. These controls provide provenance, policy enforcement, static analysis, dependency review, and known-vulnerability checks; they are not a claim that the package or every tested MCP integration is vulnerability-free.
 
 ---
 

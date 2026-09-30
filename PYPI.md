@@ -6,6 +6,10 @@
 
 It does not judge whether an LLM "reasoned correctly." It tests observable properties of the MCP server and its reviewed contract: authorization, tenant/session isolation, side effects, replay behaviour, metadata drift, host-configuration drift, and saved-run regressions.
 
+## Supply-chain trust
+
+The default branch is protected by pull-request and required-CI rules. The repository security workflow runs SHA-pinned CodeQL, pinned `pip-audit`, and GitHub Dependency Review. Releases use GitHub OIDC Trusted Publishing to PyPI with digital attestations for uploaded distributions. These controls provide provenance and known-vulnerability/static-analysis signals; they are not proof that the package is vulnerability-free or incapable of malicious behaviour.
+
 ## Where development teams use it
 
 | Automation scenario | What the team wants to prevent | Useful Behaviour Guard functions |
