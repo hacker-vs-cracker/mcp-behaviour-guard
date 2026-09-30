@@ -16,7 +16,12 @@ from mcp_behaviour_guard.models import (
     RunSummary,
     Severity,
 )
-from mcp_behaviour_guard.receipts import write_run_receipt
+from mcp_behaviour_guard.receipts import (
+    _is_credential_map_path,
+    _is_semantic_argument_path,
+    _normalize_contract,
+    write_run_receipt,
+)
 from mcp_behaviour_guard.reporting import write_reports
 
 
@@ -166,7 +171,7 @@ def _assert_semantic_hashes_change(before: Path, after: Path) -> None:
     assert left["checks"]["definition_sha256"] != right["checks"]["definition_sha256"]
 
 
-def test_phase1b2_writer_emits_normalization_v2_and_preserves_report_v2(
+def test_phase1b2_writer_emits_normalization_v3_and_preserves_report_v2(
     tmp_path: Path,
 ) -> None:
     run_dir = _write_actual_run(tmp_path / "run", _contract())
@@ -174,7 +179,7 @@ def test_phase1b2_writer_emits_normalization_v2_and_preserves_report_v2(
     report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
 
     assert receipt["schema_version"] == 1
-    assert receipt["normalization_version"] == 2
+    assert receipt["normalization_version"] == 3
     assert receipt["report_schema_version"] == 2
     assert report["schema_version"] == 2
 
@@ -338,7 +343,7 @@ def test_phase1b2_actual_writer_to_comparator_sees_semantic_argument_change(
 
     result = compare_saved_runs(before, after)
 
-    assert result["normalization_version"] == 2
+    assert result["normalization_version"] == 3
     assert result["comparability"]["state"] == "changed_context"
     assert "checks.definition_sha256" in result["comparability"]["reasons"]
 
@@ -358,27 +363,27 @@ def test_phase1b2_legacy_normalization_v1_is_rejected_for_assurance(
         compare_saved_runs(reference, candidate)
 
 
-def test_phase1b2_normalization_v2_pair_is_comparable(
+def test_phase1b2_normalization_v3_pair_is_comparable(
+    tmp_path: Path,
+) -> None:
+    reference = _write_actual_run(tmp_path / "reference", _contract())
+    candidate = _write_actual_run(tmp_path / "candidate", _contract())
+    _force_normalization(reference, 3)
+    _force_normalization(candidate, 3)
+
+    result = compare_saved_runs(reference, candidate)
+
+    assert result["normalization_version"] == 3
+    assert result["comparability"]["state"] == "comparable"
+
+
+def test_phase1b2_mixed_v2_v3_normalization_is_rejected(
     tmp_path: Path,
 ) -> None:
     reference = _write_actual_run(tmp_path / "reference", _contract())
     candidate = _write_actual_run(tmp_path / "candidate", _contract())
     _force_normalization(reference, 2)
-    _force_normalization(candidate, 2)
-
-    result = compare_saved_runs(reference, candidate)
-
-    assert result["normalization_version"] == 2
-    assert result["comparability"]["state"] == "comparable"
-
-
-def test_phase1b2_mixed_v1_v2_normalization_is_rejected(
-    tmp_path: Path,
-) -> None:
-    reference = _write_actual_run(tmp_path / "reference", _contract())
-    candidate = _write_actual_run(tmp_path / "candidate", _contract())
-    _force_normalization(reference, 1)
-    _force_normalization(candidate, 2)
+    _force_normalization(candidate, 3)
 
     with pytest.raises(SavedRunComparisonError, match="normalization"):
         compare_saved_runs(reference, candidate)
@@ -389,7 +394,7 @@ def test_phase1b2_unknown_normalization_version_is_rejected(
 ) -> None:
     reference = _write_actual_run(tmp_path / "reference", _contract())
     candidate = _write_actual_run(tmp_path / "candidate", _contract())
-    _force_normalization(candidate, 3)
+    _force_normalization(candidate, 4)
 
     with pytest.raises(SavedRunComparisonError, match="normalization"):
         compare_saved_runs(reference, candidate)
@@ -418,3 +423,181 @@ def test_phase1b2_cli_legacy_normalization_returns_two(
 
     assert result.exit_code == 2, result.output
     assert not output.exists()
+
+
+def _named_tool_contract(tool_name: str) -> Contract:
+    payload = _contract(
+        semantic_key="api_token",
+        semantic_value="opaque-sensitive-value",
+    ).model_dump(mode="json")
+    tool = payload["tools"].pop("lookup")
+    payload["tools"] = {tool_name: tool}
+    return Contract.model_validate(payload)
+
+
+def _tenant_named_identity_contract(identity_name: str) -> Contract:
+    payload = _contract().model_dump(mode="json")
+    payload["identities"][identity_name] = {
+        "headers": {},
+        "environment": {},
+        "role": "negative-probe",
+    }
+    payload["tools"]["lookup"]["tenant_probes"] = {
+        identity_name: {
+            "arguments": {"api_token": "opaque-sensitive-value"},
+            "resource_tenant_path": "tenant",
+            "expected_tenant": "tenant-b",
+            "require_denial": True,
+        }
+    }
+    return Contract.model_validate(payload)
+
+
+def _named_prompt_contract(prompt_name: str) -> Contract:
+    payload = _contract(
+        location="temporal_prompt",
+        semantic_key="access_token",
+        semantic_value="opaque-sensitive-value",
+    ).model_dump(mode="json")
+    prompt = payload["temporal_integrity"]["prompt_probes"].pop("credential_prompt")
+    payload["temporal_integrity"]["prompt_probes"] = {prompt_name: prompt}
+    return Contract.model_validate(payload)
+
+
+def test_phase1b2_v3_classifiers_use_structural_paths_not_named_map_spelling() -> None:
+    assert _is_credential_map_path(("server", "environment"))
+    assert _is_credential_map_path(("identities", "reviewer", "headers"))
+    assert _is_credential_map_path(("identities", "reviewer", "environment"))
+
+    assert not _is_credential_map_path(("tools", "headers"))
+    assert not _is_credential_map_path(("tools", "environment"))
+    assert not _is_credential_map_path(("identities", "headers"))
+    assert not _is_credential_map_path(("observers", "environment"))
+    assert not _is_credential_map_path(("tools", "lookup", "tenant_probes", "headers"))
+
+    assert _is_semantic_argument_path(("tools", "lookup", "probe_arguments"))
+    assert _is_semantic_argument_path(("tools", "lookup", "tenant_probes", "reviewer", "arguments"))
+    assert _is_semantic_argument_path(("tools", "lookup", "policy_probes", "0", "arguments"))
+    assert _is_semantic_argument_path(("tools", "lookup", "replay_probe", "arguments"))
+    assert _is_semantic_argument_path(("session_tests", "0", "write", "arguments"))
+    assert _is_semantic_argument_path(("session_tests", "0", "read", "arguments"))
+    assert _is_semantic_argument_path(("temporal_integrity", "driver_arguments"))
+    assert _is_semantic_argument_path(("temporal_integrity", "prompt_probes", "headers"))
+
+    assert not _is_semantic_argument_path(("tools", "arguments"))
+    assert not _is_semantic_argument_path(("tools", "probe_arguments"))
+    assert not _is_semantic_argument_path(("identities", "arguments"))
+
+
+def test_phase1b2_legacy_normalization_v2_is_rejected_for_assurance(
+    tmp_path: Path,
+) -> None:
+    reference = _write_actual_run(tmp_path / "reference", _contract())
+    candidate = _write_actual_run(tmp_path / "candidate", _contract())
+    _force_normalization(reference, 2)
+    _force_normalization(candidate, 2)
+
+    with pytest.raises(SavedRunComparisonError, match=r"normalization.*2"):
+        compare_saved_runs(reference, candidate)
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    [
+        "lookup",
+        "headers",
+        "environment",
+        "arguments",
+        "probe_arguments",
+        "driver_arguments",
+        "prompt_probes",
+    ],
+)
+def test_phase1b2_named_tool_cannot_change_sensitive_semantic_classification(
+    tmp_path: Path,
+    tool_name: str,
+) -> None:
+    value = "opaque-sensitive-value"
+    run_dir = _write_actual_run(tmp_path / "run", _named_tool_contract(tool_name))
+    receipt = _receipt(run_dir)
+    expected_path = f"tools.{tool_name}.probe_arguments.api_token"
+
+    assert receipt["normalization_version"] == 3
+    assert expected_path in receipt["normalization"]["unverified_sensitive_fields"]
+    assert value not in (run_dir / "receipt.json").read_text(encoding="utf-8")
+
+    with pytest.raises(SavedRunComparisonError, match="sensitive semantic fields"):
+        compare_saved_runs(run_dir, run_dir)
+
+
+@pytest.mark.parametrize(
+    "identity_name",
+    [
+        "reviewer",
+        "headers",
+        "environment",
+        "arguments",
+        "probe_arguments",
+        "driver_arguments",
+        "prompt_probes",
+    ],
+)
+def test_phase1b2_tenant_named_map_entry_cannot_change_argument_classification(
+    tmp_path: Path,
+    identity_name: str,
+) -> None:
+    value = "opaque-sensitive-value"
+    run_dir = _write_actual_run(
+        tmp_path / "run",
+        _tenant_named_identity_contract(identity_name),
+    )
+    receipt = _receipt(run_dir)
+    expected_path = f"tools.lookup.tenant_probes.{identity_name}.arguments.api_token"
+
+    assert expected_path in receipt["normalization"]["unverified_sensitive_fields"]
+    assert value not in (run_dir / "receipt.json").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "identity_name",
+    ["reviewer", "headers", "environment", "arguments", "prompt_probes"],
+)
+def test_phase1b2_identity_name_cannot_change_real_credential_map_handling(
+    identity_name: str,
+) -> None:
+    payload = _contract().model_dump(mode="json")
+    identity = payload["identities"].pop("reviewer")
+    identity["environment"] = {"API_TOKEN": "identity-known-secret"}
+    payload["identities"] = {identity_name: identity}
+    payload["tools"]["lookup"]["permitted_identities"] = [identity_name]
+
+    normalized, unverified = _normalize_contract(Contract.model_validate(payload))
+
+    assert unverified == []
+    assert normalized["identities"][identity_name]["headers"]["Authorization"] == "[credential]"
+    assert normalized["identities"][identity_name]["environment"]["API_TOKEN"] == "[credential]"
+
+
+@pytest.mark.parametrize(
+    "prompt_name",
+    [
+        "credential_prompt",
+        "headers",
+        "environment",
+        "arguments",
+        "probe_arguments",
+        "driver_arguments",
+        "prompt_probes",
+    ],
+)
+def test_phase1b2_prompt_name_cannot_change_sensitive_semantic_classification(
+    tmp_path: Path,
+    prompt_name: str,
+) -> None:
+    value = "opaque-sensitive-value"
+    run_dir = _write_actual_run(tmp_path / "run", _named_prompt_contract(prompt_name))
+    receipt = _receipt(run_dir)
+    expected_path = f"temporal_integrity.prompt_probes.{prompt_name}.access_token"
+
+    assert expected_path in receipt["normalization"]["unverified_sensitive_fields"]
+    assert value not in (run_dir / "receipt.json").read_text(encoding="utf-8")

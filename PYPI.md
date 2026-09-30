@@ -90,163 +90,54 @@ Reports can include JSON, HTML, JUnit and SARIF. `mcp-guard history` reads recen
 history. Configuration drift is a review signal, not a malware verdict, and interval monitoring
 re-runs the reviewed contract rather than approving a newly generated policy.
 
+`monitor --once` is monitoring/alerting behavior, not a CI approval decision.
+A completed monitor cycle can return normally when its recorded assessment is
+non-pass. For approval use `mcp-guard run`, the Python assessment, or a
+separately protected trusted gate. `--no-fail` is for demo/diagnostic retention
+and must not become the approval verdict.
+
 ## Example 1: multi-tenant support agent contract
 
-This is a **starter pattern**, not a copy/paste production policy.
+Use the parser-tested starter at `contracts/examples/tenant-isolation.yaml`.
+
+It deliberately uses one permitted tenant-A identity for both the tenant-A
+positive control and the tenant-B negative resource probe. This matches Guard's
+same-identity positive-control rule and avoids requiring one tenant-A request to
+succeed for multiple tenant identities.
+
+The synthetic fixture's denial convention is explicit:
 
 ```yaml
-version: 1
-
-server:
-  name: support-platform-mcp
-  transport: streamable-http
-  url: https://mcp.staging.example.com/mcp
-
-  # Keep the MCP request and every followed redirect on reviewed origins.
-  http_destination:
-    allowed_origins:
-      - https://mcp.staging.example.com
-    allow_redirects: false
-
-identities:
-  tenant_a_agent:
-    tenant: tenant-a
-    role: support_agent
-    headers:
-      # Keep real credentials outside Git.
-      Authorization: Bearer ${TENANT_A_MCP_TOKEN}
-
-  tenant_b_agent:
-    tenant: tenant-b
-    role: support_agent
-    headers:
-      Authorization: Bearer ${TENANT_B_MCP_TOKEN}
-
-tools:
-  customer_lookup:
-    description: Return a customer record owned by the caller's tenant.
-    permitted_identities:
-      - tenant_a_agent
-      - tenant_b_agent
-
-    # Positive-control input.
-    probe_arguments:
-      customer_id: tenant-a-synthetic-001
-
-    read_only: true
-    side_effect_identity: tenant_a_agent
-
-    # [] is an active deny-all policy for this effect family.
-    # Use null/omit when you are not making that policy claim.
-    allowed_network_destinations: []
-    allowed_filesystem_writes: []
-
-    tenant_probes:
-      tenant_a_agent:
-        # Ask tenant A's identity for a synthetic tenant B object.
-        arguments:
-          customer_id: tenant-b-synthetic-001
-
-        resource_tenant_path: tenant
-        expected_tenant: tenant-a
-        require_denial: true
-
-        # Synthetic protected content that must not be disclosed.
-        confidentiality:
-          values:
-            - SYNTHETIC_TENANT_B_PRIVATE_CANARY
+denial_error_markers:
+  - GUARD_DEMO_DENIED
 ```
 
-**Use this when:** a support/copilot agent can query CRM, ticketing, HR, finance, or other tenant-scoped business data.
+An arbitrary MCP error is not authorization-denial evidence. The negative probe
+also uses a synthetic confidentiality canary rather than production data.
 
-`read_only: true` is a real side-effect claim. For approval-style absence assurance, configure matching
-observer coverage for the effect families Guard requires. Missing observation is not silently converted
-into proof that no side effect occurred. The repository's HTTP demo shows a complete observed pattern.
+`read_only: true` remains a real side-effect claim. Configure matching observer
+coverage when making approval-style absence claims.
 
 ## Example 2: local coding-assistant MCP server
 
+Use the parser-tested starter at
+`contracts/examples/local-coding-assistant.yaml`.
+
+The environment-leak example configures one explicit non-production canary:
+
 ```yaml
-version: 1
-
 server:
-  name: reviewed-local-dev-tools
-  transport: stdio
-
-  command: /path/to/project/.venv/bin/python
-  args:
-    - -m
-    - company_mcp.devtools
-  cwd: /path/to/project
-
-  stdio_launch:
-    mode: restricted
-
-    # Canonical executable reviewed by the team.
-    allowed_executables:
-      - /canonical/path/to/python3.11
-
-    # Prevent launch from unrelated checkouts/directories.
-    allowed_cwd_roots:
-      - /path/to/project
-
-    # Start with a minimal inherited environment.
-    inherit_environment:
-      - PATH
-
-identities:
-  developer_agent:
-    role: developer
-    tenant: local-workspace
-
-tools:
-  repo_read:
-    description: Read files only from the approved project workspace.
-    permitted_identities:
-      - developer_agent
-    probe_arguments:
-      path: README.md
-    side_effect_identity: developer_agent
-    read_only: true
-
-    policy_probes:
-      - id: DEV-PATH-ESCAPE-001
-        identity: developer_agent
-        description: A repo reader must not escape the reviewed workspace.
-        arguments:
-          path: ../outside-workspace-canary.txt
-        severity: critical
-        checks:
-          - type: denied
-
-  diagnostics:
-    description: Return diagnostics without echoing developer credentials.
-    permitted_identities:
-      - developer_agent
-    probe_arguments: {}
-    side_effect_identity: developer_agent
-    read_only: true
-
-    policy_probes:
-      - id: DEV-ENV-LEAK-001
-        identity: developer_agent
-        arguments: {}
-        severity: critical
-        checks:
-          - type: response_not_contains_env
-            env_names:
-              - AWS_SECRET_ACCESS_KEY
-              - GITHUB_TOKEN
-              - NPM_TOKEN
+  environment:
+    GUARD_DEMO_SECRET: synthetic-guard-demo-secret-value
 ```
 
-**Use this when:** Claude Code, Codex, VS Code/GitHub Copilot, or another MCP-capable development host launches a local server with project, command, or credential access.
+and checks exactly `GUARD_DEMO_SECRET` with `response_not_contains_env`.
+Do not inject real AWS, GitHub, registry, or other production credentials merely
+to make an example observable.
 
-Replace every placeholder path with a real local path before validation. In restricted mode,
-`allowed_executables` must identify existing canonical executable targets and `allowed_cwd_roots`
-must identify existing approved roots. `read_only: true` also requires appropriate observer evidence
-when you want absence-of-side-effect assurance.
-
-Restricted launch is policy hardening, not an OS sandbox.
+The path-denial example uses the explicit `GUARD_DEMO_DENIED` convention.
+For a real deployment, add restricted STDIO launch with actual reviewed
+executable and cwd paths.
 
 ## Example 3: delayed tool/prompt metadata-change fragment
 
@@ -323,12 +214,21 @@ Replay assurance requires matching observer coverage. Zero observed effects are 
 
 ## CI and release-regression pattern
 
+`--output` is an output root. Each `run` creates a generated leaf run directory.
+Pass the exact reviewed leaf directories to `compare-saved`:
+
 ```bash
+REFERENCE_RUN_DIR="reports/approved-reference/<reference-run-id>"
+CANDIDATE_RUN_DIR="reports/candidate/<candidate-run-id>"
+
 mcp-guard baseline compare-saved \
-  reports/approved-reference \
-  reports/candidate \
+  "$REFERENCE_RUN_DIR" \
+  "$CANDIDATE_RUN_DIR" \
   --output saved-run-diff.json
 ```
+
+Use the exact `run_dir` printed/returned by Guard. Do not recursively select a
+report or guess the newest directory.
 
 Exit semantics:
 

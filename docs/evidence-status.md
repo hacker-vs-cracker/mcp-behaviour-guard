@@ -19,7 +19,7 @@ Replay preflight includes the configured replay event kind and the tool's releva
 
 Malformed audit events are an observer error. They must not be quietly dropped and mistaken for an empty, healthy audit stream.
 
-CLI exit codes: 0 for pass, 1 for a confirmed failed claim, 2 for an inconclusive or untested run. `--no-fail` overrides those codes for demonstrations.
+CLI `run` exit codes are 0 for pass, 1 for a confirmed failed claim, and 2 for an inconclusive or untested run. `--no-fail` overrides those codes for demonstration/diagnostic retention only and must not be used as an approval verdict. `monitor --once` is monitoring/alerting behavior rather than an assessment-sensitive CI gate.
 
 Invocation arguments, tool responses, prompt payloads and session identifiers are omitted from exported run evidence. Known configured secrets and bearer tokens are filtered from remaining strings. Tool metadata, observer details and filenames can still contain sensitive business information. Use synthetic fixtures, restrict artifact access and review reports before forwarding them to CI or a SIEM.
 

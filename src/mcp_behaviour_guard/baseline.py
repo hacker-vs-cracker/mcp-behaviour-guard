@@ -179,6 +179,9 @@ def _normalise_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(normalised, key=lambda item: json.dumps(item, sort_keys=True, default=str))
 
 
+_SUPPORTED_SAVED_RUN_NORMALIZATION_VERSIONS = frozenset({3})
+
+
 class SavedRunComparisonError(ValueError):
     """Saved run artifacts are missing, inconsistent, or unsupported."""
 
@@ -353,10 +356,12 @@ def _load_saved_run(root: Path, label: str) -> dict[str, Any]:
         raise SavedRunComparisonError(
             f"{label} receipt schema is unsupported: {receipt.get('schema_version')!r}"
         )
-    if receipt.get("normalization_version") != 2:
+    normalization_version = receipt.get("normalization_version")
+    if normalization_version not in _SUPPORTED_SAVED_RUN_NORMALIZATION_VERSIONS:
         raise SavedRunComparisonError(
-            f"{label} normalization version is unsupported: "
-            f"{receipt.get('normalization_version')!r}"
+            f"{label} normalization version is unsupported: {normalization_version!r}; "
+            "supported versions: "
+            f"{sorted(_SUPPORTED_SAVED_RUN_NORMALIZATION_VERSIONS)}"
         )
 
     normalization = receipt.get("normalization")

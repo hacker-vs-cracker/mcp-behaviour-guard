@@ -113,157 +113,53 @@ mcp-guard run contracts/server.yaml \
   --database .guard/candidate.db
 ```
 
-Retain the whole run directory, including `report.json`, `receipt.json`, and any declared tool inventory.
+Guard writes a generated leaf run directory below the output root. Retain that
+whole leaf directory, including `report.json`, `receipt.json`, and any declared
+tool inventory.
 
 Offline regression comparison:
 
 ```bash
+REFERENCE_RUN_DIR="reports/approved-reference/<reference-run-id>"
+CANDIDATE_RUN_DIR="reports/candidate/<candidate-run-id>"
+
 mcp-guard baseline compare-saved \
-  reports/approved-reference \
-  reports/candidate \
+  "$REFERENCE_RUN_DIR" \
+  "$CANDIDATE_RUN_DIR" \
   --output saved-run-diff.json
 ```
 
-The comparator can validate supported artifacts and comparison semantics, but it cannot establish by itself that:
+Use the exact `run_dir` printed by the CLI or returned by the Python API. Do not
+recursively select a report or infer the newest directory.
 
-- the reference came from an independent approval authority;
-- the candidate could not modify the reference;
-- the contract/policy was protected;
-- credentials/deployment/job identity came from a trusted authority;
-- the final CI gate was protected.
+The comparator validates supported artifacts and comparison semantics, but does
+not establish independent reference authority, protected policy, candidate
+identity, credentials/deployment identity, or protected final gate.
 
-Those are the trust bindings for the separate trusted-CI/reference-authority layer.
+`monitor --once` is monitoring/alerting behavior rather than the approval
+decision. `--no-fail` can preserve demo/diagnostic output but its zero exit must
+never be treated as approval.
 
-The YAML below is intentionally a starter pattern. Complete deployment contracts also need
-target-specific safety settings, observer configuration, report choices and any other claims required
-by the assurance level you want. See `docs/contract-reference.md` for the full schema.
+## 7. Tested contract: tenant-scoped business service
 
-## 7. Commented contract: tenant-scoped business service
+Use `contracts/examples/tenant-isolation.yaml`.
 
-```yaml
-version: 1
+The canonical example is parser-tested. It uses the same permitted tenant-A
+identity for its positive control and tenant-B negative resource probe, an
+explicit `GUARD_DEMO_DENIED` marker, and a synthetic confidentiality canary.
 
-server:
-  name: crm-mcp-staging
-  transport: streamable-http
-  url: https://crm-mcp.staging.example.com/mcp
-  http_destination:
-    # Do not silently send MCP/auth traffic to an unreviewed redirect origin.
-    allowed_origins:
-      - https://crm-mcp.staging.example.com
-    allow_redirects: false
+## 8. Tested contract: local developer tooling
 
-identities:
-  support_a:
-    tenant: tenant-a
-    role: support
-    headers:
-      Authorization: Bearer ${SUPPORT_A_TOKEN}
+Use `contracts/examples/local-coding-assistant.yaml`.
 
-  support_b:
-    tenant: tenant-b
-    role: support
-    headers:
-      Authorization: Bearer ${SUPPORT_B_TOKEN}
+The canonical example is parser-tested. It configures an explicit synthetic
+`GUARD_DEMO_SECRET` canary for `response_not_contains_env` and an explicit
+`GUARD_DEMO_DENIED` path-denial convention. Never use real cloud, GitHub,
+registry, or production credentials just to make the example testable.
 
-tools:
-  customer_lookup:
-    permitted_identities: [support_a, support_b]
-
-    # Positive-control request for the allowed identity.
-    probe_arguments:
-      customer_id: tenant-a-synthetic-001
-
-    side_effect_identity: support_a
-    read_only: true
-
-    # Active deny-all claims require matching observer coverage.
-    allowed_network_destinations: []
-    allowed_filesystem_writes: []
-
-    tenant_probes:
-      support_a:
-        # Deliberately ask tenant A for a tenant B fixture.
-        arguments:
-          customer_id: tenant-b-synthetic-001
-
-        resource_tenant_path: tenant
-        expected_tenant: tenant-a
-        require_denial: true
-
-        # Synthetic protected tenant-B content.
-        confidentiality:
-          values:
-            - SYNTHETIC_TENANT_B_PRIVATE_CANARY
-```
-
-## 8. Commented contract: local developer tooling
-
-```yaml
-version: 1
-
-server:
-  name: local-dev-mcp
-  transport: stdio
-  command: /project/.venv/bin/python
-  args: [-m, company_mcp.devtools]
-  cwd: /project
-
-  stdio_launch:
-    mode: restricted
-
-    # Canonical interpreter identity reviewed by the team.
-    allowed_executables:
-      - /canonical/python3.11
-
-    # Prevent launch from another checkout.
-    allowed_cwd_roots:
-      - /project
-
-    # Explicitly inherit only what the child needs.
-    inherit_environment:
-      - PATH
-
-identities:
-  developer:
-    role: developer
-    tenant: local-workspace
-
-tools:
-  repo_read:
-    permitted_identities: [developer]
-    probe_arguments:
-      path: README.md
-    side_effect_identity: developer
-    read_only: true
-
-    policy_probes:
-      - id: LOCAL-PATH-ESCAPE-001
-        identity: developer
-        arguments:
-          path: ../outside-canary.txt
-        severity: critical
-        checks:
-          - type: denied
-
-  diagnostics:
-    permitted_identities: [developer]
-    probe_arguments: {}
-    side_effect_identity: developer
-    read_only: true
-
-    policy_probes:
-      - id: LOCAL-ENV-LEAK-001
-        identity: developer
-        arguments: {}
-        severity: critical
-        checks:
-          - type: response_not_contains_env
-            env_names:
-              - AWS_SECRET_ACCESS_KEY
-              - GITHUB_TOKEN
-              - NPM_TOKEN
-```
+For a real local MCP deployment, add restricted STDIO launch with actual
+reviewed executable and cwd paths. Restricted launch is policy hardening, not
+an OS sandbox.
 
 ## 9. Commented contract fragment: delayed metadata / rug-pull check
 
