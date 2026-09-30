@@ -1,0 +1,56 @@
+version: 1
+
+server:
+  name: local-coding-assistant-example
+  transport: stdio
+  command: python
+  args:
+    - -m
+    - company_mcp.devtools
+  cwd: .
+  environment:
+    GUARD_DEMO_SECRET: synthetic-guard-demo-secret-value
+
+identities:
+  developer_agent:
+    role: developer
+    tenant: local-workspace
+
+tools:
+  repo_read:
+    description: Synthetic workspace-bound read.
+    permitted_identities:
+      - developer_agent
+    probe_arguments:
+      path: README.md
+    denial_error_markers:
+      - GUARD_DEMO_DENIED
+    side_effect_identity: developer_agent
+    read_only: true
+
+    policy_probes:
+      - id: DEV-PATH-ESCAPE-001
+        identity: developer_agent
+        arguments:
+          path: ../outside-workspace-canary.txt
+        severity: critical
+        checks:
+          - type: denied
+
+  diagnostics:
+    description: Synthetic environment-leak check.
+    permitted_identities:
+      - developer_agent
+    probe_arguments: {}
+    side_effect_identity: developer_agent
+    read_only: true
+
+    policy_probes:
+      - id: DEV-ENV-LEAK-001
+        identity: developer_agent
+        arguments: {}
+        severity: critical
+        checks:
+          - type: response_not_contains_env
+            env_names:
+              - GUARD_DEMO_SECRET

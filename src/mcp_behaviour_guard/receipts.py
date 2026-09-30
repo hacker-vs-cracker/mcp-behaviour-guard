@@ -11,7 +11,7 @@ from .models import Contract, RunSummary
 from .util import file_sha256, stable_hash
 
 _RECEIPT_SCHEMA_VERSION = 1
-_NORMALIZATION_VERSION = 2
+_NORMALIZATION_VERSION = 3
 _CREDENTIAL_MARKER = "[credential]"
 _UNVERIFIED_SENSITIVE_STRING = "[unverified-sensitive-string]"
 _SENSITIVE_KEY = re.compile(
@@ -24,8 +24,6 @@ _QUERY_SECRET = re.compile(
     r"([?&](?:token|api_key|secret|password)=)[^&#\s]+",
     re.I,
 )
-_CREDENTIAL_MAP_FIELDS = frozenset({"headers", "environment"})
-_SEMANTIC_ARGUMENT_FIELDS = frozenset({"probe_arguments", "arguments", "driver_arguments"})
 
 
 def write_run_receipt(
@@ -120,6 +118,48 @@ def _normalize_contract(contract: Contract) -> tuple[dict[str, Any], list[str]]:
     return scrubbed, sorted(unverified_sensitive_fields)
 
 
+def _is_credential_map_path(path: tuple[str, ...]) -> bool:
+    if path == ("server", "environment"):
+        return True
+    return len(path) == 3 and path[0] == "identities" and path[2] in {"headers", "environment"}
+
+
+def _is_semantic_argument_path(path: tuple[str, ...]) -> bool:
+    if len(path) == 3 and path[0] == "tools" and path[2] == "probe_arguments":
+        return True
+    if (
+        len(path) == 5
+        and path[0] == "tools"
+        and path[2] == "tenant_probes"
+        and path[4] == "arguments"
+    ):
+        return True
+    if (
+        len(path) == 5
+        and path[0] == "tools"
+        and path[2] == "policy_probes"
+        and path[4] == "arguments"
+    ):
+        return True
+    if (
+        len(path) == 4
+        and path[0] == "tools"
+        and path[2] == "replay_probe"
+        and path[3] == "arguments"
+    ):
+        return True
+    if (
+        len(path) == 4
+        and path[0] == "session_tests"
+        and path[2] in {"write", "read"}
+        and path[3] == "arguments"
+    ):
+        return True
+    if path == ("temporal_integrity", "driver_arguments"):
+        return True
+    return len(path) == 3 and path[0] == "temporal_integrity" and path[1] == "prompt_probes"
+
+
 def _scrub(
     value: Any,
     secrets: set[str],
@@ -130,64 +170,32 @@ def _scrub(
     unverified_sensitive_fields: set[str],
 ) -> Any:
     if isinstance(value, dict):
+        if _is_credential_map_path(path):
+            return _scrub_credential_map(
+                value,
+                secrets,
+                path=path,
+                unverified_sensitive_fields=unverified_sensitive_fields,
+            )
+
+        semantic_here = semantic_arguments or _is_semantic_argument_path(path)
         cleaned: dict[str, Any] = {}
-
-        if semantic_arguments:
-            for raw_key, item in value.items():
-                label = str(raw_key)
-                child_path = (*path, label)
-                child_sensitive = sensitive_semantic_context or bool(_SENSITIVE_KEY.search(label))
-                cleaned[label] = _scrub(
-                    item,
-                    secrets,
-                    path=child_path,
-                    semantic_arguments=True,
-                    sensitive_semantic_context=child_sensitive,
-                    unverified_sensitive_fields=unverified_sensitive_fields,
-                )
-            return cleaned
-
         for raw_key, item in value.items():
             label = str(raw_key)
             child_path = (*path, label)
-
-            if label in _CREDENTIAL_MAP_FIELDS and isinstance(item, dict):
-                cleaned[label] = _scrub_credential_map(
-                    item,
-                    secrets,
-                    path=child_path,
-                    unverified_sensitive_fields=unverified_sensitive_fields,
-                )
-            elif label in _SEMANTIC_ARGUMENT_FIELDS:
-                cleaned[label] = _scrub(
-                    item,
-                    secrets,
-                    path=child_path,
-                    semantic_arguments=True,
-                    sensitive_semantic_context=False,
-                    unverified_sensitive_fields=unverified_sensitive_fields,
-                )
-            elif label == "prompt_probes" and isinstance(item, dict):
-                cleaned[label] = {
-                    str(prompt_name): _scrub(
-                        prompt_arguments,
-                        secrets,
-                        path=(*child_path, str(prompt_name)),
-                        semantic_arguments=True,
-                        sensitive_semantic_context=False,
-                        unverified_sensitive_fields=unverified_sensitive_fields,
-                    )
-                    for prompt_name, prompt_arguments in item.items()
-                }
-            else:
-                cleaned[label] = _scrub(
-                    item,
-                    secrets,
-                    path=child_path,
-                    semantic_arguments=False,
-                    sensitive_semantic_context=False,
-                    unverified_sensitive_fields=unverified_sensitive_fields,
-                )
+            child_sensitive = (
+                sensitive_semantic_context or bool(_SENSITIVE_KEY.search(label))
+                if semantic_here
+                else False
+            )
+            cleaned[label] = _scrub(
+                item,
+                secrets,
+                path=child_path,
+                semantic_arguments=semantic_here,
+                sensitive_semantic_context=child_sensitive,
+                unverified_sensitive_fields=unverified_sensitive_fields,
+            )
         return cleaned
 
     if isinstance(value, list):

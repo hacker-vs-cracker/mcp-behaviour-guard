@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.6.2 - 2026-09-30
+- Correct saved-run normalization with structural path classification and normalization v3; historical v1/v2 receipts remain immutable and are not accepted as v3 assurance inputs.
+- Correct developer examples for exact leaf run directories, same-identity tenant controls, explicit synthetic denial markers/canaries, Stage 0 preflight wording, and monitoring versus approval semantics.
+
 ## 0.6.1 - 2026-09-29
 - Split the GitHub and PyPI landing pages so PyPI is developer-first, add organization-oriented automation scenarios and commented contract starters, and add a developer automation playbook covering tenant isolation, local coding assistants, temporal metadata drift, replay/idempotency, remote MCP boundaries and saved-run CI usage.
 

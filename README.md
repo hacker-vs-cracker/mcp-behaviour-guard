@@ -82,9 +82,12 @@ mcp-guard run contracts/server.yaml \
   --output reports/candidate \
   --database .guard/candidate.db
 
+REFERENCE_RUN_DIR="reports/approved-reference/<reference-run-id>"
+CANDIDATE_RUN_DIR="reports/candidate/<candidate-run-id>"
+
 mcp-guard baseline compare-saved \
-  reports/approved-reference \
-  reports/candidate \
+  "$REFERENCE_RUN_DIR" \
+  "$CANDIDATE_RUN_DIR" \
   --output saved-run-diff.json
 ```
 
@@ -525,7 +528,7 @@ Each run can produce:
 - tool inventory and baseline artifacts;
 - SQLite run, invocation, finding and alert history.
 
-Run once from cron, launchd or CI:
+Run one scheduled monitoring/alerting cycle from cron, launchd or a CI scheduler:
 
 ```bash
 mcp-guard monitor contracts/production.yaml \
@@ -541,6 +544,8 @@ mcp-guard monitor contracts/production.yaml --interval 3600
 ```
 
 Finding fingerprints suppress repeated alerts unless a configured repeat interval is reached. Interval monitoring reloads the reviewed contract and reruns its checks; it does not automatically approve a newly generated contract.
+
+`monitor --once` is not an assessment-sensitive CI approval gate. A completed monitoring cycle can return normally with a non-pass recorded assessment. Use `mcp-guard run`, the Python assessment, or a separately protected gate for approval decisions.
 
 ## Similar solutions and where this fits
 

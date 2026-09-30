@@ -37,9 +37,12 @@ The offline comparator must not call the MCP target, run a contract, or capture 
 ## Basic use
 
 ```bash
+REFERENCE_RUN_DIR="reports/reference-root/<reference-run-id>"
+CANDIDATE_RUN_DIR="reports/candidate-root/<candidate-run-id>"
+
 mcp-guard baseline compare-saved \
-  reports/reference-run \
-  reports/candidate-run \
+  "$REFERENCE_RUN_DIR" \
+  "$CANDIDATE_RUN_DIR" \
   --output saved-run-diff.json
 ```
 
@@ -84,25 +87,32 @@ or other external identity was independently authorized.
 One-sided known/unknown identity transitions fail closed. Known context changes are classified by
 their semantics rather than silently treated as equivalent.
 
-## Normalization version 2
+## Normalization version 3
 
 Current saved-run comparison requires:
 
 ```text
 receipt schema:        1
-normalization version: 2
+normalization version: 3
 report schema:         2
 ```
 
-Normalization v2 exists because a generic sensitive-key scrub could erase meaningful semantic
-arguments such as numeric `max_tokens` or `token_budget` values. V2 preserves typed semantic values
-while keeping bounded credential handling separate.
+Normalization v3 makes credential-map and semantic-argument handling depend on
+their structural model path rather than the spelling of a named-map entry. A
+valid tool, identity, tenant-probe key, or other named entry such as `headers`
+or `environment` therefore cannot select credential-map behavior merely by
+name.
 
-Normalization v1 and v2 digests are not treated as equivalent. Historical v1 receipts remain
-historical evidence, but they cannot be used as assurance-equivalent inputs to the v2 comparator.
+V3 preserves the intended v2 behavior for typed semantic numbers/booleans and
+known credentials, while correcting released v2 inputs that could otherwise be
+emitted as comparison-eligible under the wrong structural interpretation.
 
-**Migration:** create new saved runs with the current writer rather than editing historical receipt
-files in place.
+Normalization v1, v2, and v3 digests are not assurance-equivalent. Historical
+v1/v2 receipts remain immutable historical evidence. The corrected comparator
+accepts v3 for approval-style saved-run comparison.
+
+**Migration:** generate fresh runs with the corrected v3 writer. Do not edit or
+rewrite historical receipts.
 
 ## Secret and ambiguous-value treatment
 

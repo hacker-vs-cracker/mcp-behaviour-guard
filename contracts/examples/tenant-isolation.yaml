@@ -1,0 +1,40 @@
+version: 1
+
+server:
+  name: tenant-isolation-example
+  transport: streamable-http
+  url: http://127.0.0.1:8000/mcp
+
+identities:
+  tenant_a_agent:
+    tenant: tenant-a
+    role: support
+    headers:
+      Authorization: Bearer synthetic-tenant-a-token
+
+tools:
+  customer_lookup:
+    description: Synthetic tenant-scoped positive and negative controls.
+    permitted_identities:
+      - tenant_a_agent
+
+    # Positive control for the same identity used by the negative tenant probe.
+    probe_arguments:
+      customer_id: tenant-a-synthetic-001
+
+    denial_error_markers:
+      - GUARD_DEMO_DENIED
+    side_effect_identity: tenant_a_agent
+    read_only: true
+
+    tenant_probes:
+      tenant_a_agent:
+        # Tenant A identity deliberately requests a tenant B synthetic object.
+        arguments:
+          customer_id: tenant-b-synthetic-001
+        resource_tenant_path: tenant
+        expected_tenant: tenant-a
+        require_denial: true
+        confidentiality:
+          values:
+            - SYNTHETIC_TENANT_B_PRIVATE_CANARY
