@@ -9,8 +9,8 @@ TEXT = WORKFLOW.read_text(encoding="utf-8")
 EXPECTED_ACTIONS = {
     "actions/checkout": "3d3c42e5aac5ba805825da76410c181273ba90b1",
     "actions/setup-python": "5fda3b95a4ea91299a34e894583c3862153e4b97",
-    "docker/setup-buildx-action": "d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5",
-    "docker/build-push-action": "f9f3042f7e2789586610d6e8b85c8f03e5195baf",
+    "docker/setup-buildx-action": "f87e5991a6d7451dcb8d9637bfbc97413f497069",
+    "docker/build-push-action": "c3c9e263c25d99ce0380d002d59b67737d91b0dc",
 }
 
 
@@ -26,7 +26,11 @@ def test_ci_uses_immutable_action_shas() -> None:
 
 def test_ci_uses_current_approved_action_commits() -> None:
     for action, sha in EXPECTED_ACTIONS.items():
-        assert f"{action}@{sha}" in TEXT
+        assert f"{action}@{sha}" in TEXT, (
+            f"{action} is not at the reviewed approved commit {sha}. "
+            "For Dependabot action updates, verify the upstream version tag and "
+            "review the new immutable SHA before updating EXPECTED_ACTIONS."
+        )
 
 
 def test_ci_verifies_each_demo_report_semantically() -> None:
