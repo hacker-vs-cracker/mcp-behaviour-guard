@@ -1,0 +1,14 @@
+version: 1
+external:
+  actions/checkout: 3d3c42e5aac5ba805825da76410c181273ba90b1
+  actions/setup-python: 5fda3b95a4ea91299a34e894583c3862153e4b97
+  docker/setup-buildx-action: f87e5991a6d7451dcb8d9637bfbc97413f497069
+  docker/build-push-action: c3c9e263c25d99ce0380d002d59b67737d91b0dc
+  github/codeql-action/init: 2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2
+  github/codeql-action/analyze: 2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2
+  actions/dependency-review-action: a1d282b36b6f3519aa1f3fc636f609c47dddb294
+  actions/upload-artifact: 043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+  actions/download-artifact: 3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+  pypa/gh-action-pypi-publish: dc37677b2e1c63e2034f94d8a5b11f265b73ba33
+local: []
+docker: []

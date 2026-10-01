@@ -100,9 +100,18 @@ non-pass. For approval use `mcp-guard run`, the Python assessment, or a
 separately protected trusted gate. `--no-fail` is for demo/diagnostic retention
 and must not become the approval verdict.
 
+The canonical example YAML files below live in the GitHub repository; they are not
+installed as wheel package data. If you installed from PyPI, clone or download the
+repository to use these source templates, or open the explicit repository links below.
+
 ## Example 1: multi-tenant support agent contract
 
-Use the parser-tested starter at `contracts/examples/tenant-isolation.yaml`.
+Use the source template at
+<https://github.com/hacker-vs-cracker/mcp-behaviour-guard/blob/main/contracts/examples/tenant-isolation.yaml>.
+
+Repository tests behaviorally demonstrate the specific synthetic positive control,
+recognized denial, generic-error non-denial, and confidentiality-canary cases. That
+bounded demonstration is not proof that an arbitrary deployment is safe.
 
 It deliberately uses one permitted tenant-A identity for both the tenant-A
 positive control and the tenant-B negative resource probe. This matches Guard's
@@ -124,8 +133,12 @@ coverage when making approval-style absence claims.
 
 ## Example 2: local coding-assistant MCP server
 
-Use the parser-tested starter at
-`contracts/examples/local-coding-assistant.yaml`.
+Use the source template at
+<https://github.com/hacker-vs-cracker/mcp-behaviour-guard/blob/main/contracts/examples/local-coding-assistant.yaml>.
+
+Repository tests behaviorally demonstrate the specific synthetic positive control,
+recognized path denial, generic-error non-denial, child canary delivery and deliberate
+canary-disclosure cases. The file is a template, not a ready-to-run deployment recipe.
 
 The environment-leak example configures one explicit non-production canary:
 
@@ -140,8 +153,13 @@ Do not inject real AWS, GitHub, registry, or other production credentials merely
 to make an example observable.
 
 The path-denial example uses the explicit `GUARD_DEMO_DENIED` convention.
-For a real deployment, add restricted STDIO launch with actual reviewed
-executable and cwd paths.
+
+Without restricted `stdio_launch`, the child starts from the evaluator parent's
+environment and then receives the configured contract/identity values. The synthetic
+canary makes one leak check deterministic; it does not sanitize inherited AWS, GitHub,
+registry, cloud or other real variables, and it is not containment. For a real
+deployment, use restricted STDIO launch with actual reviewed executable/cwd paths and
+an explicit `inherit_environment` allowlist, or a sanitized disposable container/VM.
 
 ## Example 3: delayed tool/prompt metadata-change fragment
 

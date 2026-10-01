@@ -1,3 +1,10 @@
+# Source template: replace command, args, and cwd with reviewed values for your deployment.
+# Without restricted stdio_launch, the child inherits the evaluator parent environment.
+# GUARD_DEMO_SECRET is only a synthetic deterministic leak canary. It does not sanitize
+# inherited cloud, registry, GitHub, or other real environment variables, and it is not
+# containment. For untrusted local MCP testing, use restricted stdio_launch with an
+# explicit inherit_environment allowlist or a sanitized/disposable container or VM.
+
 version: 1
 
 server:
