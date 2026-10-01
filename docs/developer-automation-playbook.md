@@ -75,8 +75,17 @@ Use:
 - filesystem/process side-effect claims
 - independent observers where complete evidence is required
 
-Replace the placeholder executable/workspace paths in the commented example with real existing paths.
-Restricted STDIO validation expects reviewed canonical executable identity and approved existing cwd roots.
+Start from `contracts/examples/local-coding-assistant.yaml`, which is a source template.
+Replace its placeholder command, arguments and working directory with reviewed existing
+paths for the deployment. See `docs/contract-reference.md` for restricted `stdio_launch`
+configuration and validation rules.
+
+Legacy/unrestricted STDIO starts from the evaluator parent's environment before applying
+the contract environment. The `GUARD_DEMO_SECRET` value makes one synthetic leak check
+deterministic; it does not sanitize real inherited cloud, registry, GitHub or other
+variables and does not provide containment. For untrusted local MCP testing, use
+restricted STDIO with an explicit `inherit_environment` allowlist or a sanitized,
+disposable container/VM.
 
 Use OS/container isolation for stronger containment. Restricted launch is not a sandbox.
 
@@ -144,22 +153,27 @@ never be treated as approval.
 
 Use `contracts/examples/tenant-isolation.yaml`.
 
-The canonical example is parser-tested. It uses the same permitted tenant-A
-identity for its positive control and tenant-B negative resource probe, an
-explicit `GUARD_DEMO_DENIED` marker, and a synthetic confidentiality canary.
+The canonical example is behaviorally demonstrated by repository tests for these
+specific synthetic controls. It uses the same permitted tenant-A identity for its
+positive control and tenant-B negative resource probe, an explicit
+`GUARD_DEMO_DENIED` marker, and a synthetic confidentiality canary. This is not proof
+that an arbitrary tenant deployment is safe.
 
 ## 8. Tested contract: local developer tooling
 
 Use `contracts/examples/local-coding-assistant.yaml`.
 
-The canonical example is parser-tested. It configures an explicit synthetic
+The canonical source template is behaviorally demonstrated by repository tests for
+these specific synthetic controls. It configures an explicit synthetic
 `GUARD_DEMO_SECRET` canary for `response_not_contains_env` and an explicit
 `GUARD_DEMO_DENIED` path-denial convention. Never use real cloud, GitHub,
 registry, or production credentials just to make the example testable.
 
-For a real local MCP deployment, add restricted STDIO launch with actual
-reviewed executable and cwd paths. Restricted launch is policy hardening, not
-an OS sandbox.
+The template's legacy/unrestricted STDIO launch inherits the evaluator parent's
+environment. The synthetic canary does not remove or sanitize those inherited values.
+For a real local MCP deployment, use restricted STDIO launch with actual reviewed
+executable/cwd paths and an explicit environment allowlist, or run from a sanitized
+disposable container/VM. Restricted launch is policy hardening, not an OS sandbox.
 
 ## 9. Commented contract fragment: delayed metadata / rug-pull check
 
