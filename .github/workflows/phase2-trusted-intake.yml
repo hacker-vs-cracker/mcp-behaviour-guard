@@ -1,0 +1,54 @@
+name: phase2-trusted-intake
+
+on:
+  workflow_run:
+    workflows:
+      - ci
+    types:
+      - completed
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: phase2-trusted-intake-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+  cancel-in-progress: false
+
+jobs:
+  intake:
+    if: ${{ github.event.workflow_run.event == 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out trusted default-branch controller
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up pinned Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.11.14'
+
+      - name: Resolve trusted workflow-run intake
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TRUSTED_COMMIT: ${{ github.sha }}
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+          GITHUB_API_URL: ${{ github.api_url }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$TRUSTED_COMMIT"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          python assurance/phase2/ci/collect_workflow_run_intake.py             --repo "$GITHUB_WORKSPACE"             --event "$GITHUB_EVENT_PATH"             --trusted-commit "$TRUSTED_COMMIT"             --expected-repository "$EXPECTED_REPOSITORY"             --api-url "$GITHUB_API_URL"             --output phase2c-intake/intake.json             --lookup-output phase2c-intake/pull-request-lookup.json
+
+      - name: Upload normalized trusted intake
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: phase2c-trusted-intake-${{ github.run_id }}
+          path: phase2c-intake/intake.json
+          if-no-files-found: error
+          retention-days: 7
