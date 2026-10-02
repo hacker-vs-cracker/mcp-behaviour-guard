@@ -207,7 +207,7 @@ def main() -> int:
     args = parser.parse_args()
 
     token = os.environ.get("GITHUB_TOKEN", "")
-    value = collect(
+    collect(
         repo=args.repo,
         event_path=args.event,
         trusted_commit=args.trusted_commit,
@@ -217,7 +217,6 @@ def main() -> int:
         output=args.output,
         lookup_output=args.lookup_output,
     )
-    print(json.dumps(value, sort_keys=True))
     return 0
 
 

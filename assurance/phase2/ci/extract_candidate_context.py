@@ -227,14 +227,13 @@ def main() -> int:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--manifest", type=Path, required=True)
     args = parser.parse_args()
-    manifest = materialize(
+    materialize(
         repo=args.repo,
         candidate_commit=args.candidate_commit,
         trusted_commit=args.trusted_commit,
         output_dir=args.output_dir,
         manifest_path=args.manifest,
     )
-    print(json.dumps(manifest, sort_keys=True))
     return 0
 
 
