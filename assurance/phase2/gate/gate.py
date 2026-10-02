@@ -34,9 +34,12 @@ class MatrixAssessment:
 
 def _sha(path: Path) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as exc:
+        raise GateError(f"cannot hash trusted artifact {path}: {exc}") from exc
     return digest.hexdigest()
 
 
@@ -256,6 +259,8 @@ def _validate_context_files(
         errors.append("execution context schema_version is not 1")
     if context.get("policy_profile_digest") != policy_digest:
         errors.append("execution context policy profile digest mismatch")
+    if context.get("platform") != policy.get("platform"):
+        errors.append("execution context platform differs from selected policy")
     if expected_attempt_id is not None and context.get("attempt_id") != expected_attempt_id:
         errors.append("execution context attempt differs from trusted selected attempt")
     if (

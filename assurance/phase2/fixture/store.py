@@ -186,6 +186,40 @@ class FixtureStore:
                 );
                 """
             )
+            self._begin_immediate(connection)
+            try:
+                active = self._active_attempt_id(connection)
+                if active is not None:
+                    row = connection.execute(
+                        "SELECT state FROM attempts WHERE attempt_id = ?", (active,)
+                    ).fetchone()
+                    if row is None:
+                        raise FixtureError(f"active attempt record is missing: {active}")
+                    state = str(row["state"])
+                    if state in {"PREPARED", "OPEN", "FENCED"}:
+                        connection.execute(
+                            """
+                            UPDATE attempts
+                            SET state = 'RECOVERY_REQUIRED',
+                                audit_complete = 0,
+                                final_watermark = NULL,
+                                final_request_count = NULL
+                            WHERE attempt_id = ?
+                            """,
+                            (active,),
+                        )
+                    elif state in {"FINALIZED", "ABORTED"}:
+                        connection.execute(
+                            "UPDATE fixture_meta SET active_attempt_id = NULL WHERE singleton_id = 1"
+                        )
+                    elif state != "RECOVERY_REQUIRED":
+                        raise FixtureError(
+                            f"unexpected active attempt state during bootstrap: {state}"
+                        )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
 
     @staticmethod
     def _begin_immediate(connection: sqlite3.Connection) -> None:
@@ -256,6 +290,41 @@ class FixtureStore:
                 connection.execute(
                     "UPDATE attempts SET state = 'FENCED', fenced_at = ? WHERE attempt_id = ?",
                     (_utc_now(), attempt_id),
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+
+    def abort_recovery(self, attempt_id: str) -> None:
+        with self._connect() as connection:
+            self._begin_immediate(connection)
+            try:
+                self._require_active_state(connection, attempt_id, "RECOVERY_REQUIRED")
+                now = _utc_now()
+                connection.execute(
+                    """
+                    UPDATE requests
+                    SET state = 'FAILED',
+                        finished_at = COALESCE(finished_at, ?),
+                        rejection_reason = COALESCE(rejection_reason, 'recovery_abort')
+                    WHERE attempt_id = ? AND state = 'ADMITTED'
+                    """,
+                    (now, attempt_id),
+                )
+                connection.execute(
+                    """
+                    UPDATE attempts
+                    SET state = 'ABORTED',
+                        audit_complete = 0,
+                        final_watermark = NULL,
+                        final_request_count = NULL
+                    WHERE attempt_id = ?
+                    """,
+                    (attempt_id,),
+                )
+                connection.execute(
+                    "UPDATE fixture_meta SET active_attempt_id = NULL WHERE singleton_id = 1"
                 )
                 connection.commit()
             except Exception:

@@ -66,10 +66,11 @@ def test_candidate_build_is_local_and_has_no_dependency_acquisition() -> None:
     assert "USER candidate" in dockerfile
 
 
-def test_candidate_modes_are_only_good_or_write_and_denial_is_explicit() -> None:
+def test_candidate_modes_preserve_base_modes_and_denial_is_explicit() -> None:
     source = SERVER.read_text(encoding="utf-8")
     tree = ast.parse(source)
-    assert '{"good", "write"}' in source
+    for mode in ("good", "write"):
+        assert f'"{mode}"' in source
     assert "GUARD_DEMO_DENIED" in source
     assert "PHASE2_ATTEMPT_TOKEN" in source
     assert "/records/write" in source

@@ -86,6 +86,10 @@ class ControlHandler(BaseHTTPRequestHandler):
                     self.store.close_attempt(attempt_id)
                     self._send(HTTPStatus.OK, {"attempt_id": attempt_id, "state": "FENCED"})
                     return
+                if action == "abort-recovery":
+                    self.store.abort_recovery(attempt_id)
+                    self._send(HTTPStatus.OK, {"attempt_id": attempt_id, "state": "ABORTED"})
+                    return
                 if action == "final-snapshot":
                     self._send(HTTPStatus.OK, self.store.final_snapshot(attempt_id))
                     return
