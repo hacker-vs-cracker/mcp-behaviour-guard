@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "profile_id": "phase2c-trusted-ci-v1",
+  "status": "DESIGN_FROZEN",
+  "controller": {
+    "workflow_source": "protected-default-branch",
+    "preferred_trigger": "workflow_run",
+    "expected_upstream_workflow_id": 316477065,
+    "expected_upstream_workflow_path": ".github/workflows/ci.yml",
+    "expected_upstream_event": "pull_request",
+    "upstream_conclusion_is_authoritative": false,
+    "candidate_workflow_artifacts_are_authority": false
+  },
+  "candidate": {
+    "source_identity": "exact-pr-head-sha",
+    "allowed_paths": [
+      "assurance/phase2/vertical/candidate_server.py"
+    ],
+    "allowed_git_modes": [
+      "100644"
+    ],
+    "max_source_bytes": 524288,
+    "materialized_name": "candidate_server.py",
+    "trusted_dockerfile_path": "assurance/phase2/vertical/Dockerfile",
+    "trusted_dockerfile_source": "protected-default-branch",
+    "build_context_policy": "allowlist-only",
+    "candidate_supplied_dockerfile_allowed": false,
+    "candidate_supplied_workflow_allowed_as_authority": false,
+    "candidate_receives_publisher_credentials": false,
+    "candidate_receives_repository_write_token": false,
+    "candidate_receives_docker_socket": false,
+    "candidate_receives_internet": false,
+    "candidate_receives_trusted_output_mount": false,
+    "candidate_receives_control_plane_network": false
+  },
+  "trusted_inputs": [
+    "assurance/phase2/evaluator/Dockerfile",
+    "assurance/phase2/evaluator/requirements.lock",
+    "assurance/phase2/fixture/Dockerfile",
+    "assurance/phase2/fixture/store.py",
+    "assurance/phase2/fixture/app_service.py",
+    "assurance/phase2/fixture/control_service.py",
+    "assurance/phase2/gate/Dockerfile",
+    "assurance/phase2/gate/gate.py",
+    "assurance/phase2/gate/gate-rules.json",
+    "assurance/phase2/gate/expected-checks.json",
+    "assurance/phase2/vertical/Dockerfile",
+    "assurance/phase2/vertical/contract.yaml"
+  ],
+  "platform": {
+    "os": "linux",
+    "architecture": "amd64",
+    "phase2b_arm64_image_identity_reuse_allowed": false,
+    "runtime_profile_status": "UNPROMOTED"
+  },
+  "verdict": {
+    "outcomes": [
+      "PASS",
+      "BLOCK",
+      "REVIEW",
+      "INVALID"
+    ],
+    "only_pass_maps_to_success_status": true,
+    "bind_pr_number": true,
+    "bind_head_sha": true,
+    "bind_base_sha": true,
+    "bind_policy_profile_digest": true,
+    "bind_reference_digest": true,
+    "bind_result_bundle_digest": true
+  },
+  "publisher": {
+    "job_separation_required": true,
+    "fresh_runner_required": true,
+    "identity": "dedicated-github-app",
+    "status_context": "mcp-guard-phase2/trusted-verdict",
+    "integration_id": null,
+    "bootstrap_status": "UNBOOTSTRAPPED",
+    "credential_available_to_candidate_execution": false
+  }
+}

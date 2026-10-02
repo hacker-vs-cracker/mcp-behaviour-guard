@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "profile_id": "phase2c-ci-amd64-v1",
+  "status": "UNPROMOTED",
+  "consumable": false,
+  "platform": "linux/amd64",
+  "guard": {
+    "version": "0.6.2",
+    "wheel_sha256": "d27b68638f7896999e22e0a74b0a82cb16c47994e9b98b7940eb9aa7eb9818af"
+  },
+  "base_image": {
+    "reference": "python:3.11.14-slim",
+    "platform_manifest_digest": null,
+    "selection_rule": "resolve-and-freeze-immutable-linux-amd64-manifest-before-promotion"
+  },
+  "authority": {
+    "contract_sha256": "63a9c0fe9035c6b7c56451aefc1840ea92a8fdd9668c5aba4f8767e1bc63a35b",
+    "expected_checks_sha256": "0f3af25ff38e4e01fdd06e947bcb12ec3b99d8bdc276d1237db7590ed4c69776",
+    "gate_rules_sha256": "c7ff6fe7227f683ac81e33a6fa07bafc5b5624f28d39309bc1ee49986b3af7b0"
+  },
+  "images": {
+    "evaluator": null,
+    "fixture": null,
+    "gate": null,
+    "vertical_candidate": null
+  },
+  "reference": {
+    "status": "UNPROMOTED",
+    "approval_bundle_digest": null,
+    "origin_attempt_id": null
+  },
+  "publisher": {
+    "status_context": "mcp-guard-phase2/trusted-verdict",
+    "integration_id": null,
+    "status": "UNBOOTSTRAPPED"
+  },
+  "promotion_requirements": [
+    "immutable-linux-amd64-base-manifest",
+    "exact-trusted-source-commit",
+    "source-image-byte-bindings",
+    "isolated-good-reference-attempt",
+    "trusted-final-ledger-clean",
+    "gate-pass",
+    "approval-bundle-digest"
+  ]
+}
