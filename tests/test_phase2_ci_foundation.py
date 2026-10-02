@@ -187,3 +187,49 @@ def test_candidate_materialization_rejects_non_exact_commit_sha(tmp_path: Path) 
             output_dir=tmp_path / "context",
             manifest_path=tmp_path / "manifest.json",
         )
+
+
+def test_candidate_materialization_rejects_oversize_before_blob_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    repo, trusted = _init_repo(tmp_path)
+
+    source = repo / "assurance/phase2/vertical/candidate_server.py"
+    source.write_bytes(b"x" * (524288 + 1))
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "oversize candidate")
+    candidate = _git(repo, "rev-parse", "HEAD")
+    entry = module._tree_entry(repo, candidate, "assurance/phase2/vertical/candidate_server.py")
+
+    original_blob = module._blob
+
+    def guarded_blob(repo_path: Path, oid: str) -> bytes:
+        if oid == entry.oid:
+            raise AssertionError("oversized candidate blob must not be read")
+        return original_blob(repo_path, oid)
+
+    monkeypatch.setattr(module, "_blob", guarded_blob)
+    with pytest.raises(module.CandidateContextError, match="exceeds max_source_bytes"):
+        module.materialize(
+            repo=repo,
+            candidate_commit=candidate,
+            trusted_commit=trusted,
+            output_dir=tmp_path / "context",
+            manifest_path=tmp_path / "manifest.json",
+        )
+    assert not (tmp_path / "context").exists()
+
+
+def test_trust_boundary_freezes_same_repository_controller_intake() -> None:
+    payload = json.loads(BOUNDARY.read_text(encoding="utf-8"))
+    controller = payload["controller"]
+    candidate = payload["candidate"]
+    assert controller["expected_repository"] == "hacker-vs-cracker/mcp-behaviour-guard"
+    assert controller["expected_upstream_workflow_name"] == "ci"
+    assert controller["require_workflow_run_action"] == "completed"
+    assert controller["require_workflow_run_status"] == "completed"
+    assert controller["require_exactly_one_associated_pull_request"] is True
+    assert candidate["source_scope"] == "same-repository-pull-request-only"
+    assert candidate["fork_pull_requests_supported"] is False

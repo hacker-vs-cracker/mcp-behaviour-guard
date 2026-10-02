@@ -68,6 +68,17 @@ def _blob(repo: Path, oid: str) -> bytes:
     return _git(repo, "cat-file", "blob", oid)
 
 
+def _blob_size(repo: Path, oid: str) -> int:
+    raw = _git(repo, "cat-file", "-s", oid).decode("ascii").strip()
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise CandidateContextError(f"object {oid} reported invalid size: {raw!r}") from exc
+    if value < 0:
+        raise CandidateContextError(f"object {oid} reported negative size")
+    return value
+
+
 def _json_blob(repo: Path, commit: str, path: str, label: str) -> tuple[dict[str, Any], bytes]:
     entry = _tree_entry(repo, commit, path)
     if entry.mode != "100644" or entry.kind != "blob":
@@ -140,10 +151,15 @@ def materialize(
             f"candidate source must be a regular {allowed_modes[0]} blob; "
             f"got mode={candidate_entry.mode} kind={candidate_entry.kind}"
         )
-    candidate_raw = _blob(repo, candidate_entry.oid)
-    if len(candidate_raw) > max_bytes:
+    candidate_size = _blob_size(repo, candidate_entry.oid)
+    if candidate_size > max_bytes:
         raise CandidateContextError(
-            f"candidate source exceeds max_source_bytes: {len(candidate_raw)} > {max_bytes}"
+            f"candidate source exceeds max_source_bytes: {candidate_size} > {max_bytes}"
+        )
+    candidate_raw = _blob(repo, candidate_entry.oid)
+    if len(candidate_raw) != candidate_size:
+        raise CandidateContextError(
+            f"candidate blob size changed while reading: {len(candidate_raw)} != {candidate_size}"
         )
     if b"\0" in candidate_raw:
         raise CandidateContextError("candidate source contains a NUL byte")
