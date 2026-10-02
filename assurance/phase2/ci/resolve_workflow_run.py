@@ -54,12 +54,11 @@ def _sha(value: Any, label: str) -> str:
     return raw
 
 
-def _load_json(path: Path, label: str) -> dict[str, Any]:
+def _load_json(path: Path, label: str) -> Any:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise WorkflowRunResolutionError(f"cannot load {label}: {exc}") from exc
-    return _object(value, label)
 
 
 def _validate_trusted_checkout(repo: Path, trusted_commit: str) -> dict[str, Any]:
@@ -88,7 +87,66 @@ def _validate_trusted_checkout(repo: Path, trusted_commit: str) -> dict[str, Any
     return {"boundary": boundary, "boundary_sha256": hashlib.sha256(raw).hexdigest()}
 
 
-def resolve(*, repo: Path, event_path: Path, trusted_commit: str) -> dict[str, Any]:
+def _current_pr_matches(
+    *,
+    value: Any,
+    expected_repo: str,
+    expected_state: str,
+    head_sha: str,
+    head_branch: str,
+) -> tuple[bool, dict[str, Any] | None]:
+    if not isinstance(value, dict):
+        return False, None
+    try:
+        number = _positive_int(value.get("number"), "pull_request.number")
+        state = _string(value.get("state"), "pull_request.state")
+        head = _object(value.get("head"), "pull_request.head")
+        base = _object(value.get("base"), "pull_request.base")
+        pr_head_sha = _sha(head.get("sha"), "pull_request.head.sha")
+        pr_base_sha = _sha(base.get("sha"), "pull_request.base.sha")
+        pr_head_ref = _string(head.get("ref"), "pull_request.head.ref")
+        pr_base_ref = _string(base.get("ref"), "pull_request.base.ref")
+        pr_head_repo = _string(
+            _object(head.get("repo"), "pull_request.head.repo").get("full_name"),
+            "pull_request.head.repo.full_name",
+        )
+        pr_base_repo = _string(
+            _object(base.get("repo"), "pull_request.base.repo").get("full_name"),
+            "pull_request.base.repo.full_name",
+        )
+    except WorkflowRunResolutionError:
+        return False, None
+
+    matches = (
+        state == expected_state
+        and pr_head_sha == head_sha
+        and pr_head_ref == head_branch
+        and pr_head_repo == expected_repo
+        and pr_base_ref == "main"
+        and pr_base_repo == expected_repo
+    )
+    if not matches:
+        return False, None
+
+    return True, {
+        "number": number,
+        "state": state,
+        "head_sha": pr_head_sha,
+        "head_ref": pr_head_ref,
+        "head_repository": pr_head_repo,
+        "base_sha": pr_base_sha,
+        "base_ref": pr_base_ref,
+        "base_repository": pr_base_repo,
+    }
+
+
+def resolve(
+    *,
+    repo: Path,
+    event_path: Path,
+    pull_request_lookup_path: Path,
+    trusted_commit: str,
+) -> dict[str, Any]:
     repo = repo.resolve()
     trusted = _validate_trusted_checkout(repo, trusted_commit)
     boundary = trusted["boundary"]
@@ -109,14 +167,23 @@ def resolve(*, repo: Path, event_path: Path, trusted_commit: str) -> dict[str, A
     expected_status = _string(
         controller.get("require_workflow_run_status"), "require_workflow_run_status"
     )
-    if controller.get("require_exactly_one_associated_pull_request") is not True:
-        raise WorkflowRunResolutionError("exactly-one-PR policy is not frozen")
+    expected_pr_state = _string(
+        controller.get("require_current_pull_request_state"),
+        "require_current_pull_request_state",
+    )
+    if controller.get("event_pull_requests_are_authority") is not False:
+        raise WorkflowRunResolutionError("workflow_run event PR array must be non-authoritative")
+    if controller.get("pull_request_lookup_source") != "trusted-github-rest-commit-pulls":
+        raise WorkflowRunResolutionError("trusted PR lookup source is not frozen")
+    if controller.get("require_exactly_one_current_matching_pull_request") is not True:
+        raise WorkflowRunResolutionError("exactly-one-current-PR policy is not frozen")
     if candidate_policy.get("source_scope") != "same-repository-pull-request-only":
         raise WorkflowRunResolutionError("candidate source scope is not same-repository-only")
     if candidate_policy.get("fork_pull_requests_supported") is not False:
         raise WorkflowRunResolutionError("fork PR policy is not frozen off")
 
     event = _load_json(event_path, "workflow_run event")
+    event = _object(event, "workflow_run event")
     if event.get("action") != expected_action:
         raise WorkflowRunResolutionError(
             f"workflow_run action mismatch: {event.get('action')!r} != {expected_action!r}"
@@ -168,43 +235,27 @@ def resolve(*, repo: Path, event_path: Path, trusted_commit: str) -> dict[str, A
             if nested_name != expected_repo:
                 raise WorkflowRunResolutionError(f"workflow_run {key} is not same-repository")
 
-    pull_requests = run.get("pull_requests")
-    if not isinstance(pull_requests, list) or len(pull_requests) != 1:
-        count = len(pull_requests) if isinstance(pull_requests, list) else "non-list"
-        raise WorkflowRunResolutionError(
-            f"workflow_run must have exactly one associated PR; got {count}"
-        )
-    pr = _object(pull_requests[0], "workflow_run.pull_requests[0]")
-    pr_number = _positive_int(pr.get("number"), "pull_request.number")
-    pr_head = _object(pr.get("head"), "pull_request.head")
-    pr_base = _object(pr.get("base"), "pull_request.base")
+    lookup = _load_json(pull_request_lookup_path, "trusted commit-to-PR lookup")
+    if not isinstance(lookup, list):
+        raise WorkflowRunResolutionError("trusted commit-to-PR lookup must be a JSON array")
 
-    pr_head_sha = _sha(pr_head.get("sha"), "pull_request.head.sha")
-    pr_base_sha = _sha(pr_base.get("sha"), "pull_request.base.sha")
-    pr_head_ref = _string(pr_head.get("ref"), "pull_request.head.ref")
-    pr_base_ref = _string(pr_base.get("ref"), "pull_request.base.ref")
-    pr_head_repo = _string(
-        _object(pr_head.get("repo"), "pull_request.head.repo").get("full_name"),
-        "pull_request.head.repo.full_name",
-    )
-    pr_base_repo = _string(
-        _object(pr_base.get("repo"), "pull_request.base.repo").get("full_name"),
-        "pull_request.base.repo.full_name",
-    )
+    matches: list[dict[str, Any]] = []
+    for item in lookup:
+        matched, normalized = _current_pr_matches(
+            value=item,
+            expected_repo=expected_repo,
+            expected_state=expected_pr_state,
+            head_sha=head_sha,
+            head_branch=head_branch,
+        )
+        if matched and normalized is not None:
+            matches.append(normalized)
 
-    if pr_head_repo != expected_repo or pr_base_repo != expected_repo:
-        raise WorkflowRunResolutionError("fork/cross-repository pull requests are not supported")
-    if pr_base_ref != "main":
-        raise WorkflowRunResolutionError(f"pull request base is not main: {pr_base_ref!r}")
-    if pr_head_sha != head_sha:
+    if len(matches) != 1:
         raise WorkflowRunResolutionError(
-            f"workflow_run head SHA differs from associated PR head: {head_sha} != {pr_head_sha}"
+            f"expected exactly one current PR matching workflow-run head; got {len(matches)}"
         )
-    if head_branch != pr_head_ref:
-        raise WorkflowRunResolutionError(
-            f"workflow_run head branch differs from associated PR head ref: "
-            f"{head_branch!r} != {pr_head_ref!r}"
-        )
+    current_pr = matches[0]
 
     return {
         "schema_version": 1,
@@ -223,20 +274,18 @@ def resolve(*, repo: Path, event_path: Path, trusted_commit: str) -> dict[str, A
             "status": status,
             "conclusion": conclusion,
             "conclusion_is_authoritative": False,
+            "event_pull_requests_are_authority": False,
         },
         "pull_request": {
-            "number": pr_number,
-            "head_sha": pr_head_sha,
-            "head_ref": pr_head_ref,
-            "head_repository": pr_head_repo,
-            "base_sha": pr_base_sha,
-            "base_ref": pr_base_ref,
-            "base_repository": pr_base_repo,
+            **current_pr,
             "source_scope": "same-repository-pull-request-only",
+            "lookup_source": "trusted-github-rest-commit-pulls",
         },
         "authority": {
             "candidate_workflow_artifacts_are_authority": False,
             "upstream_ci_conclusion_is_phase2_verdict": False,
+            "workflow_run_event_pull_requests_are_authority": False,
+            "stale_workflow_run_rejected_if_current_pr_head_moved": True,
         },
     }
 
@@ -245,10 +294,16 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", type=Path, required=True)
     parser.add_argument("--event", type=Path, required=True)
+    parser.add_argument("--pull-request-lookup", type=Path, required=True)
     parser.add_argument("--trusted-commit", required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    value = resolve(repo=args.repo, event_path=args.event, trusted_commit=args.trusted_commit)
+    value = resolve(
+        repo=args.repo,
+        event_path=args.event,
+        pull_request_lookup_path=args.pull_request_lookup,
+        trusted_commit=args.trusted_commit,
+    )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps(value, sort_keys=True))

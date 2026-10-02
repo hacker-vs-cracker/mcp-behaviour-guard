@@ -230,6 +230,12 @@ def test_trust_boundary_freezes_same_repository_controller_intake() -> None:
     assert controller["expected_upstream_workflow_name"] == "ci"
     assert controller["require_workflow_run_action"] == "completed"
     assert controller["require_workflow_run_status"] == "completed"
-    assert controller["require_exactly_one_associated_pull_request"] is True
+    assert controller["event_pull_requests_are_authority"] is False
+    assert controller["pull_request_lookup_source"] == "trusted-github-rest-commit-pulls"
+    assert controller["pull_request_lookup_endpoint"] == (
+        "repos/{repository}/commits/{head_sha}/pulls"
+    )
+    assert controller["require_exactly_one_current_matching_pull_request"] is True
+    assert controller["require_current_pull_request_state"] == "open"
     assert candidate["source_scope"] == "same-repository-pull-request-only"
     assert candidate["fork_pull_requests_supported"] is False

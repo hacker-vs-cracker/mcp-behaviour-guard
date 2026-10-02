@@ -12,6 +12,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 RESOLVER = ROOT / "assurance/phase2/ci/resolve_workflow_run.py"
 BOUNDARY = ROOT / "assurance/phase2/ci/trust-boundary.json"
+REPOSITORY = "hacker-vs-cracker/mcp-behaviour-guard"
 
 
 def _module() -> ModuleType:
@@ -51,8 +52,8 @@ def _trusted_repo(tmp_path: Path) -> tuple[Path, str]:
     return repo, _git(repo, "rev-parse", "HEAD")
 
 
-def _event(head_sha: str, base_sha: str) -> dict[str, object]:
-    repository = {"full_name": "hacker-vs-cracker/mcp-behaviour-guard"}
+def _event(head_sha: str) -> dict[str, object]:
+    repository = {"full_name": REPOSITORY}
     return {
         "action": "completed",
         "repository": repository,
@@ -68,48 +69,149 @@ def _event(head_sha: str, base_sha: str) -> dict[str, object]:
             "head_branch": "feature/example",
             "repository": repository,
             "head_repository": repository,
-            "pull_requests": [
-                {
-                    "number": 77,
-                    "head": {
-                        "sha": head_sha,
-                        "ref": "feature/example",
-                        "repo": repository,
-                    },
-                    "base": {
-                        "sha": base_sha,
-                        "ref": "main",
-                        "repo": repository,
-                    },
-                }
-            ],
+            # Real repository history demonstrated this can be empty.
+            "pull_requests": [],
         },
     }
 
 
-def _write_event(tmp_path: Path, value: dict[str, object]) -> Path:
-    path = tmp_path / "event.json"
+def _pr(
+    *,
+    number: int = 77,
+    state: str = "open",
+    head_sha: str = "a" * 40,
+    head_ref: str = "feature/example",
+    head_repo: str = REPOSITORY,
+    base_sha: str = "b" * 40,
+    base_ref: str = "main",
+    base_repo: str = REPOSITORY,
+) -> dict[str, object]:
+    return {
+        "number": number,
+        "state": state,
+        "head": {
+            "sha": head_sha,
+            "ref": head_ref,
+            "repo": {"full_name": head_repo},
+        },
+        "base": {
+            "sha": base_sha,
+            "ref": base_ref,
+            "repo": {"full_name": base_repo},
+        },
+    }
+
+
+def _write(tmp_path: Path, name: str, value: object) -> Path:
+    path = tmp_path / name
     path.write_text(json.dumps(value), encoding="utf-8")
     return path
 
 
-def test_valid_workflow_run_binds_exact_pr_and_does_not_trust_upstream_conclusion(
+def _resolve(
+    module: ModuleType,
+    *,
     tmp_path: Path,
-) -> None:
-    module = _module()
-    repo, trusted = _trusted_repo(tmp_path)
-    value = module.resolve(
+    repo: Path,
+    trusted: str,
+    event: dict[str, object],
+    lookup: list[dict[str, object]],
+) -> dict[str, object]:
+    return module.resolve(
         repo=repo,
-        event_path=_write_event(tmp_path, _event("a" * 40, "b" * 40)),
+        event_path=_write(tmp_path, "event.json", event),
+        pull_request_lookup_path=_write(tmp_path, "pulls.json", lookup),
         trusted_commit=trusted,
     )
-    assert value["trusted_controller"]["commit_sha"] == trusted
-    assert value["upstream"]["conclusion"] == "failure"
-    assert value["upstream"]["conclusion_is_authoritative"] is False
+
+
+def test_accepts_real_empty_event_pr_array_via_trusted_current_pr_lookup(tmp_path: Path) -> None:
+    module = _module()
+    repo, trusted = _trusted_repo(tmp_path)
+    value = _resolve(
+        module,
+        tmp_path=tmp_path,
+        repo=repo,
+        trusted=trusted,
+        event=_event("a" * 40),
+        lookup=[_pr()],
+    )
     assert value["pull_request"]["number"] == 77
     assert value["pull_request"]["head_sha"] == "a" * 40
     assert value["pull_request"]["base_sha"] == "b" * 40
-    assert value["authority"]["upstream_ci_conclusion_is_phase2_verdict"] is False
+    assert value["pull_request"]["lookup_source"] == "trusted-github-rest-commit-pulls"
+    assert value["upstream"]["event_pull_requests_are_authority"] is False
+    assert value["upstream"]["conclusion"] == "failure"
+    assert value["upstream"]["conclusion_is_authoritative"] is False
+
+
+def test_event_pr_array_is_never_authority(tmp_path: Path) -> None:
+    module = _module()
+    repo, trusted = _trusted_repo(tmp_path)
+    event = _event("a" * 40)
+    run = event["workflow_run"]
+    assert isinstance(run, dict)
+    run["pull_requests"] = [
+        {
+            "number": 999,
+            "head": {"sha": "c" * 40},
+            "base": {"sha": "d" * 40},
+        }
+    ]
+    value = _resolve(
+        module,
+        tmp_path=tmp_path,
+        repo=repo,
+        trusted=trusted,
+        event=event,
+        lookup=[_pr(number=77)],
+    )
+    assert value["pull_request"]["number"] == 77
+    assert value["authority"]["workflow_run_event_pull_requests_are_authority"] is False
+
+
+def test_stale_workflow_run_is_rejected_after_pr_head_moves(tmp_path: Path) -> None:
+    module = _module()
+    repo, trusted = _trusted_repo(tmp_path)
+    with pytest.raises(
+        module.WorkflowRunResolutionError,
+        match="exactly one current PR matching workflow-run head",
+    ):
+        _resolve(
+            module,
+            tmp_path=tmp_path,
+            repo=repo,
+            trusted=trusted,
+            event=_event("a" * 40),
+            lookup=[_pr(head_sha="c" * 40)],
+        )
+
+
+@pytest.mark.parametrize(
+    ("lookup", "message"),
+    [
+        ([_pr(state="closed")], "exactly one current PR"),
+        ([_pr(head_repo="attacker/fork")], "exactly one current PR"),
+        ([_pr(base_ref="develop")], "exactly one current PR"),
+        ([_pr(), _pr(number=78)], "exactly one current PR"),
+    ],
+)
+def test_rejects_closed_fork_wrong_base_or_ambiguous_current_pr(
+    tmp_path: Path,
+    lookup: list[dict[str, object]],
+    message: str,
+) -> None:
+    module = _module()
+    repo, trusted = _trusted_repo(tmp_path)
+    with pytest.raises(module.WorkflowRunResolutionError, match=message):
+        _resolve(
+            module,
+            tmp_path=tmp_path,
+            repo=repo,
+            trusted=trusted,
+            event=_event("a" * 40),
+            lookup=lookup,
+        )
 
 
 @pytest.mark.parametrize(
@@ -128,62 +230,62 @@ def test_rejects_wrong_upstream_identity(
 ) -> None:
     module = _module()
     repo, trusted = _trusted_repo(tmp_path)
-    event = _event("a" * 40, "b" * 40)
+    event = _event("a" * 40)
     run = event["workflow_run"]
     assert isinstance(run, dict)
     run[field] = value
     with pytest.raises(module.WorkflowRunResolutionError, match=message):
-        module.resolve(
+        _resolve(
+            module,
+            tmp_path=tmp_path,
             repo=repo,
-            event_path=_write_event(tmp_path, event),
-            trusted_commit=trusted,
+            trusted=trusted,
+            event=event,
+            lookup=[_pr()],
         )
 
 
-def test_rejects_wrong_action_or_fork_or_multiple_prs(tmp_path: Path) -> None:
+def test_rejects_wrong_action_repository_or_dirty_trusted_checkout(tmp_path: Path) -> None:
     module = _module()
     repo, trusted = _trusted_repo(tmp_path)
 
-    event = _event("a" * 40, "b" * 40)
+    event = _event("a" * 40)
     event["action"] = "requested"
     with pytest.raises(module.WorkflowRunResolutionError, match="workflow_run action mismatch"):
-        module.resolve(repo=repo, event_path=_write_event(tmp_path, event), trusted_commit=trusted)
+        _resolve(
+            module,
+            tmp_path=tmp_path,
+            repo=repo,
+            trusted=trusted,
+            event=event,
+            lookup=[_pr()],
+        )
 
-    event = _event("a" * 40, "b" * 40)
+    event = _event("a" * 40)
     run = event["workflow_run"]
     assert isinstance(run, dict)
     run["head_repository"] = {"full_name": "attacker/fork"}
     with pytest.raises(
         module.WorkflowRunResolutionError, match="head_repository is not same-repository"
     ):
-        module.resolve(repo=repo, event_path=_write_event(tmp_path, event), trusted_commit=trusted)
+        _resolve(
+            module,
+            tmp_path=tmp_path,
+            repo=repo,
+            trusted=trusted,
+            event=event,
+            lookup=[_pr()],
+        )
 
-    event = _event("a" * 40, "b" * 40)
-    run = event["workflow_run"]
-    assert isinstance(run, dict)
-    pulls = run["pull_requests"]
-    assert isinstance(pulls, list)
-    pulls.append(dict(pulls[0]))
-    with pytest.raises(module.WorkflowRunResolutionError, match="exactly one associated PR"):
-        module.resolve(repo=repo, event_path=_write_event(tmp_path, event), trusted_commit=trusted)
-
-
-def test_rejects_head_mismatch_and_dirty_or_wrong_trusted_checkout(tmp_path: Path) -> None:
-    module = _module()
-    repo, trusted = _trusted_repo(tmp_path)
-    event = _event("a" * 40, "b" * 40)
-    run = event["workflow_run"]
-    assert isinstance(run, dict)
-    run["head_sha"] = "c" * 40
-    with pytest.raises(module.WorkflowRunResolutionError, match="head SHA differs"):
-        module.resolve(repo=repo, event_path=_write_event(tmp_path, event), trusted_commit=trusted)
-
-    event_path = _write_event(tmp_path, _event("a" * 40, "b" * 40))
-    with pytest.raises(module.WorkflowRunResolutionError, match="trusted checkout HEAD differs"):
-        module.resolve(repo=repo, event_path=event_path, trusted_commit="c" * 40)
-
-    (repo / "untrusted.tmp").write_text("dirty", encoding="utf-8")
+    (repo / "dirty.tmp").write_text("dirty", encoding="utf-8")
     with pytest.raises(
         module.WorkflowRunResolutionError, match="trusted controller checkout is dirty"
     ):
-        module.resolve(repo=repo, event_path=event_path, trusted_commit=trusted)
+        _resolve(
+            module,
+            tmp_path=tmp_path,
+            repo=repo,
+            trusted=trusted,
+            event=_event("a" * 40),
+            lookup=[_pr()],
+        )
