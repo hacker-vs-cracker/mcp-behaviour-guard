@@ -1,0 +1,4 @@
+phase2c-trusted-intake-live-proof
+base=68fd18f15132902cf6d4502566262f17268a01d8
+created_utc=20261002T064419Z
+purpose=ephemeral-unmerged-trigger-only
