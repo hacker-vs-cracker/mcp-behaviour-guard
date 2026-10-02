@@ -24,13 +24,21 @@ def test_runtime_profile_binds_arm64_base_guard_and_built_images() -> None:
     assert re.fullmatch(r"sha256:[0-9a-f]{64}", profile["base_image"]["platform_manifest_digest"])
     assert profile["guard"]["version"] == "0.6.2"
     assert profile["guard"]["wheel_sha256"] == GUARD_WHEEL_SHA
-    for key in ("evaluator", "fixture", "candidate_probe"):
+    assert profile["phase2b_profile_status"] == "closed-local-candidate"
+    assert profile["fixture_profile"]["profile_id"] == "phase2-fixture-v2"
+    for key in ("evaluator", "fixture", "candidate_probe", "vertical_candidate", "gate"):
         image = profile["images"][key]
         assert re.fullmatch(r"sha256:[0-9a-f]{64}", image["oci_index_digest"])
         assert re.fullmatch(r"sha256:[0-9a-f]{64}", image["platform_manifest_digest"])
         assert re.fullmatch(r"sha256:[0-9a-f]{64}", image["config_digest"])
         assert image["os"] == "linux"
         assert image["architecture"] == "arm64"
+    assert profile["closure_scope"] == {
+        "phase2c_trusted_ci": False,
+        "reference_gate": "local-only",
+        "release_changed": False,
+        "remote_branch_published": False,
+    }
 
 
 def test_evaluator_dependency_install_is_offline_hash_locked_and_not_built_from_repository_source() -> (
