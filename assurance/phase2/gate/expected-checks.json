@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "required_findings": {
+    "AUTH-LOOKUP-RECORD-ANONYMOUS": {
+      "observation": "complete",
+      "status": "passed"
+    },
+    "AUTH-LOOKUP-RECORD-REVIEWER": {
+      "observation": "complete",
+      "status": "passed"
+    },
+    "BEHAVIOUR-LOOKUP-RECORD": {
+      "observation": "complete",
+      "status": "passed"
+    },
+    "INVENTORY-001": {
+      "observation": "not_required",
+      "status": "passed"
+    }
+  },
+  "conditional_suffixes": [
+    "-EFFECTS"
+  ],
+  "unknown_finding_policy": "review"
+}

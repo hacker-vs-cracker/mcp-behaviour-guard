@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "outcomes": [
+    "PASS",
+    "BLOCK",
+    "REVIEW",
+    "INVALID"
+  ],
+  "precedence": [
+    "invalid_authority_or_subject_binding",
+    "authentic_confirmed_violation",
+    "invalid_or_incomplete_trusted_completion",
+    "declared_review_condition",
+    "pass"
+  ],
+  "rejected_attempt_without_committed_violation": "REVIEW",
+  "inventory_add_remove_current_contract_violation": "BLOCK",
+  "schema_only_capability_change_without_current_failure": "REVIEW",
+  "freshness_authority": "trusted_execution_context",
+  "publication": "same_filesystem_staging_then_atomic_rename",
+  "comparator_exit_code_is_not_gate_verdict": true
+}
