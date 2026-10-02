@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "profile_id": "phase2-fixture-v2",
+  "attempt_concurrency": 1,
+  "candidate_principal": "candidate_app",
+  "internal_async_queue": false,
+  "observer": {
+    "type": "http_audit",
+    "correlation": "none",
+    "reset_semantics": "advance_cursor_without_deletion",
+    "sequence_scope": "per_attempt_unfiltered_ledger",
+    "observes": [
+      "database_write"
+    ],
+    "final_snapshot_required": true
+  },
+  "store": {
+    "engine": "sqlite",
+    "transaction_mode": "BEGIN IMMEDIATE",
+    "business_and_audit_commit": "atomic",
+    "audit_hash_chain": true
+  },
+  "deadlines_seconds": {
+    "close": 5,
+    "drain": 5,
+    "collection": 5
+  },
+  "services": {
+    "app_port": 8001,
+    "control_port": 9000,
+    "control_host_publish": false
+  },
+  "restart_recovery": {
+    "active_nonterminal_on_bootstrap": "RECOVERY_REQUIRED",
+    "resume_allowed": false,
+    "trusted_abort_required": true,
+    "old_credentials_after_abort": "stale"
+  }
+}

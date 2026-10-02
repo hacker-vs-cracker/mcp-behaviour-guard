@@ -1,0 +1,111 @@
+{
+  "authority": {
+    "contract_sha256": "63a9c0fe9035c6b7c56451aefc1840ea92a8fdd9668c5aba4f8767e1bc63a35b",
+    "expected_checks_sha256": "0f3af25ff38e4e01fdd06e947bcb12ec3b99d8bdc276d1237db7590ed4c69776",
+    "gate_rules_sha256": "c7ff6fe7227f683ac81e33a6fa07bafc5b5624f28d39309bc1ee49986b3af7b0"
+  },
+  "base_image": {
+    "platform_manifest_digest": "sha256:e2a8684dde3dcdd30b8e0e15e9e85421ce7fa80e5eda041fd79b443404533265",
+    "reference": "python:3.11.14-slim"
+  },
+  "candidate_runtime": {
+    "cap_drop": [
+      "ALL"
+    ],
+    "host_mounts": false,
+    "memory_bytes": 268435456,
+    "nano_cpus": 500000000,
+    "no_new_privileges": true,
+    "pids_limit": 64,
+    "read_only_rootfs": true,
+    "tmpfs": "/tmp:rw,noexec,nosuid,size=16m"
+  },
+  "closure_scope": {
+    "phase2c_trusted_ci": false,
+    "reference_gate": "local-only",
+    "release_changed": false,
+    "remote_branch_published": false
+  },
+  "evaluator_lock": {
+    "requirements_sha256": "7f135a827bad87dc89e5a359824d0abe727f376f213865330b4da8c14cead267"
+  },
+  "fixture_profile": {
+    "profile_id": "phase2-fixture-v2",
+    "sha256": "3dd6b7a3a290d6b9c483c0e5b9ca200e7387361c67a4fd1cdd6583cc8f18fe09"
+  },
+  "guard": {
+    "version": "0.6.2",
+    "wheel_sha256": "d27b68638f7896999e22e0a74b0a82cb16c47994e9b98b7940eb9aa7eb9818af"
+  },
+  "images": {
+    "candidate_probe": {
+      "architecture": "arm64",
+      "config_digest": "sha256:0798f7c38a8f1e004dac33401f18890d71f0127683a466326c487c6528031285",
+      "oci_index_digest": "sha256:f45ae82b0a042d326f66eec7d6c270a1d9d08d620afaadac0c83c0151f09b2ba",
+      "os": "linux",
+      "platform_manifest_digest": "sha256:3c42b14cab2644868ac88cec463647b0975f2075bd1d71d8103088101b74f1f4",
+      "tag": "mcp-guard-phase2-candidate-probe:20261001T062354"
+    },
+    "evaluator": {
+      "architecture": "arm64",
+      "config_digest": "sha256:3d2c270ce158a574fb9ea46feb3e24c36d80c3f0dcd725c8a501757869c06b4d",
+      "oci_index_digest": "sha256:8c9d993f160e461e6f46e1c815aba0c7c96b01593f241842bd8afb9d6568e9f2",
+      "os": "linux",
+      "platform_manifest_digest": "sha256:00a96b724c4554f378179e7a776e89034176d9ba29a4ee8159b4fbb361af9aac",
+      "tag": "mcp-guard-phase2-evaluator:20261001T062354"
+    },
+    "fixture": {
+      "architecture": "arm64",
+      "config_digest": "sha256:89ffc0a5de8c86dbb0d1b4c8d608fcc6b74ba103e7df80df826f71322c97bc39",
+      "oci_index_digest": "sha256:0fad49fc56b4ff31e4477323361238e74b2f18563d6338c141b6d129e5bfb290",
+      "os": "linux",
+      "platform_manifest_digest": "sha256:f00848ecfdc4dc4b460b1b0d1db9f7c7846e0da59aa9f6004782a1f79f2d8ef4",
+      "tag": "mcp-guard-phase2-fixture-recovery:20261002T014250Z"
+    },
+    "gate": {
+      "architecture": "arm64",
+      "config_digest": "sha256:91522d2abdfbba3957d36e1f0886cbb2d4f74f471b4f9b53c612ac6f86573276",
+      "oci_index_digest": "sha256:ca696e37273548167c26f1ca4929311bbf591362821beb5f28cae1a22c97f3b5",
+      "os": "linux",
+      "platform_manifest_digest": "sha256:7d7b173e7c0adb84582a37e7adc74f13b83a45ffb9fcc573bd0deac6834ad3b4",
+      "tag": "mcp-guard-phase2-gate-adversarial:20261002T014250Z"
+    },
+    "vertical_candidate": {
+      "architecture": "arm64",
+      "config_digest": "sha256:3267d3141606aa24401c5afe38a2de28cfb525d8f9131fb6e95ce50011324aaf",
+      "oci_index_digest": "sha256:80adff3c9e6e5a227b3651356973fc4e55120b9992eb5076db021edd78696926",
+      "os": "linux",
+      "platform_manifest_digest": "sha256:f3659b2ec116d9fb9a286bbb46477a05a1cdd2acd192584d75f3be0b2c9a5970",
+      "tag": "mcp-guard-phase2-candidate-adversarial:20261002T014250Z"
+    }
+  },
+  "network_policy": {
+    "candidate_fixture_app": "internal-isolated-bridge",
+    "evaluator_candidate": "internal-isolated-bridge",
+    "evaluator_fixture_control": "internal-isolated-bridge",
+    "host_ports_published": false,
+    "stable_candidate_alias": "candidate",
+    "stable_control_alias": "fixture-control",
+    "stable_fixture_app_alias": "fixture-app"
+  },
+  "phase2b_profile_status": "closed-local-candidate",
+  "platform": "linux/arm64",
+  "schema_version": 1,
+  "source_hashes": {
+    "candidate_probe": "9d37e8fcdf8794cc32331c47a9db184bf0669d519a59b4061f7ddb5d6694a140",
+    "candidate_probe_dockerfile": "7cb8921f0b5b67ed71e7781ec1903014327649a03751422f7bdeb44cb127afa0",
+    "evaluator_dockerfile": "1601d8a88e589b1920563fa17e5a0236012bd26bf75008d1a1ff9b755faf3b8d",
+    "fixture_app": "b8954bbc01925079d5b3245f3983a2a0d29ff9edddfad63e5d14cb45ff0a7ac7",
+    "fixture_control": "f30f28e4e6f87ba2a0653c26894eac47df6aeb10d530ef3fee46be7d36327c51",
+    "fixture_dockerfile": "753b6a52cbe90c12e3a00eefeff9eb0f323858e87c187204f692cd9a0495befd",
+    "fixture_store": "55d0a3c9b8563bd8e3b4536a428eee19ea46cfb5f1f49dfd78b2d185947b89fa",
+    "gate": "fd61907d09d3e99197308840196646096d4e40a5a7281619c37e24d0826f4a85",
+    "gate_dockerfile": "3de96d4a569065cdcf733508b6d4ef63a692ac0ff10b9e8a120ad4b495283db9",
+    "run_adversarial": "a9dc8b37f8036ceaafec4600ae3c328b1335f396401fa73dada4ed7cfb19d3b9",
+    "run_approval": "e0d15213e059a0d518faca6a58c2a1488cb97f029f6296d0ae2fb9c681692e22",
+    "run_isolation": "d1dd9d69120c496cf5a2470888318a18a6ad241f7df1e22bd659cb63f07f4124",
+    "run_vertical": "3a954b7d3688ff7885e7b70c2a95f9b1401d788aa0052360d8ba156e760b90d8",
+    "vertical_candidate": "a003d4f2c08e685f90e0be619a76e30aa25844c7f63f42a36a9374b59c414a3a",
+    "vertical_dockerfile": "d2e5c31187d635ed2a0cc18307c0c0368eac6eff1113d962cb979548ce96859d"
+  }
+}

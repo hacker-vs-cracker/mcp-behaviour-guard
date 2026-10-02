@@ -1,0 +1,52 @@
+version: 1
+
+server:
+  name: phase2-vertical-synthetic-candidate
+  transport: streamable-http
+  url: http://${PHASE2_CANDIDATE_HOST}:7000/mcp
+  timeout_seconds: 10
+  verify_tls: false
+  http_destination:
+    allowed_origins:
+      - http://${PHASE2_CANDIDATE_HOST}:7000
+    allow_redirects: false
+
+identities:
+  reviewer:
+    description: Synthetic permitted identity for the Phase 2 local proof.
+    headers:
+      Authorization: Bearer synthetic-phase2-reviewer-token
+
+  anonymous:
+    description: Deliberately unauthenticated negative identity.
+
+tools:
+  lookup_record:
+    description: Synthetic lookup used to prove bounded trusted database-write observation.
+    permitted_identities:
+      - reviewer
+    probe_arguments:
+      record_id: synthetic-record-001
+    denial_error_markers:
+      - GUARD_DEMO_DENIED
+    side_effect_identity: reviewer
+    read_only: false
+    forbidden_side_effects:
+      - database_write
+
+observers:
+  trusted_database_audit:
+    type: http_audit
+    events_url: http://${PHASE2_CONTROL_HOST}:9000/observer/events
+    reset_url: http://${PHASE2_CONTROL_HOST}:9000/observer/reset
+    correlation: none
+    observes:
+      - database_write
+
+safety:
+  destructive_tests: true
+  require_lab_mode: true
+
+reports:
+  formats:
+    - json
