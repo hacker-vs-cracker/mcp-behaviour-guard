@@ -10,13 +10,29 @@ from typing import Any
 
 import pytest
 
-from assurance.phase2.fixture.store import FixtureStore, StaleCredential
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+STORE_PATH = PROJECT_ROOT / "assurance/phase2/fixture/store.py"
 GATE_PATH = PROJECT_ROOT / "assurance/phase2/gate/gate.py"
 PROFILE_PATH = PROJECT_ROOT / "assurance/phase2/fixture-profile.json"
 CANDIDATE_PATH = PROJECT_ROOT / "assurance/phase2/vertical/candidate_server.py"
 RUNNER_PATH = PROJECT_ROOT / "assurance/phase2/run_adversarial_closure.py"
+
+
+def _store_module() -> ModuleType:
+    spec = importlib.util.spec_from_file_location(
+        "phase2_fixture_store_adversarial_test", STORE_PATH
+    )
+    if spec is None or spec.loader is None:
+        raise AssertionError("could not load Phase 2 fixture store module")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_STORE = _store_module()
+FixtureStore = _STORE.FixtureStore
+StaleCredential = _STORE.StaleCredential
 
 
 def _gate_module() -> ModuleType:
