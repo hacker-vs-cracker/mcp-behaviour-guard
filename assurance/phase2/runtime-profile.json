@@ -1,0 +1,68 @@
+{
+  "base_image": {
+    "platform_manifest_digest": "sha256:e2a8684dde3dcdd30b8e0e15e9e85421ce7fa80e5eda041fd79b443404533265",
+    "reference": "python:3.11.14-slim"
+  },
+  "candidate_runtime": {
+    "cap_drop": [
+      "ALL"
+    ],
+    "host_mounts": false,
+    "memory_bytes": 268435456,
+    "nano_cpus": 500000000,
+    "no_new_privileges": true,
+    "pids_limit": 64,
+    "read_only_rootfs": true,
+    "tmpfs": "/tmp:rw,noexec,nosuid,size=16m"
+  },
+  "evaluator_lock": {
+    "requirements_sha256": "7f135a827bad87dc89e5a359824d0abe727f376f213865330b4da8c14cead267"
+  },
+  "guard": {
+    "version": "0.6.2",
+    "wheel_sha256": "d27b68638f7896999e22e0a74b0a82cb16c47994e9b98b7940eb9aa7eb9818af"
+  },
+  "images": {
+    "candidate_probe": {
+      "architecture": "arm64",
+      "config_digest": "sha256:0798f7c38a8f1e004dac33401f18890d71f0127683a466326c487c6528031285",
+      "oci_index_digest": "sha256:f45ae82b0a042d326f66eec7d6c270a1d9d08d620afaadac0c83c0151f09b2ba",
+      "os": "linux",
+      "platform_manifest_digest": "sha256:3c42b14cab2644868ac88cec463647b0975f2075bd1d71d8103088101b74f1f4",
+      "tag": "mcp-guard-phase2-candidate-probe:20261001T062354"
+    },
+    "evaluator": {
+      "architecture": "arm64",
+      "config_digest": "sha256:3d2c270ce158a574fb9ea46feb3e24c36d80c3f0dcd725c8a501757869c06b4d",
+      "oci_index_digest": "sha256:8c9d993f160e461e6f46e1c815aba0c7c96b01593f241842bd8afb9d6568e9f2",
+      "os": "linux",
+      "platform_manifest_digest": "sha256:00a96b724c4554f378179e7a776e89034176d9ba29a4ee8159b4fbb361af9aac",
+      "tag": "mcp-guard-phase2-evaluator:20261001T062354"
+    },
+    "fixture": {
+      "architecture": "arm64",
+      "config_digest": "sha256:80ff1d63ea8058911fdee8d5383c683f4f329f55cb912b38e60d462a8b972691",
+      "oci_index_digest": "sha256:8b95f773bd2ebbe0a6f8b8218172416cc1a00ea98c13d041bc338e405efc8358",
+      "os": "linux",
+      "platform_manifest_digest": "sha256:e1885ac5eef031dea99440e396f5bf25a306a528ee0e9c35706cc2cec100b712",
+      "tag": "mcp-guard-phase2-fixture:20261001T062354"
+    }
+  },
+  "network_policy": {
+    "candidate_fixture_app": "internal-isolated-bridge",
+    "evaluator_candidate": "internal-isolated-bridge",
+    "evaluator_fixture_control": "internal-isolated-bridge",
+    "host_ports_published": false
+  },
+  "platform": "linux/arm64",
+  "schema_version": 1,
+  "source_hashes": {
+    "candidate_dockerfile": "7cb8921f0b5b67ed71e7781ec1903014327649a03751422f7bdeb44cb127afa0",
+    "candidate_probe": "9d37e8fcdf8794cc32331c47a9db184bf0669d519a59b4061f7ddb5d6694a140",
+    "evaluator_dockerfile": "1601d8a88e589b1920563fa17e5a0236012bd26bf75008d1a1ff9b755faf3b8d",
+    "fixture_app": "b8954bbc01925079d5b3245f3983a2a0d29ff9edddfad63e5d14cb45ff0a7ac7",
+    "fixture_control": "da632a48430befad126abf79b675c8e357325cfa46d5f3244e82b0c6be953476",
+    "fixture_dockerfile": "753b6a52cbe90c12e3a00eefeff9eb0f323858e87c187204f692cd9a0495befd",
+    "fixture_store": "61ad2591af6d47b114dbaf91fde5c353a5091d24bba4aa2bd09c4f2dc056a152"
+  }
+}
