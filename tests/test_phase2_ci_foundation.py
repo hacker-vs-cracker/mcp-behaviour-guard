@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import subprocess
@@ -104,6 +105,79 @@ def test_amd64_runtime_profile_is_explicitly_non_consumable_until_promotion() ->
     assert all(value is None for value in payload["images"].values())
     assert payload["reference"]["approval_bundle_digest"] is None
     assert payload["publisher"]["integration_id"] is None
+
+
+def test_amd64_evaluator_lock_is_separate_exact_and_bound() -> None:
+    amd64_path = ROOT / "assurance/phase2/ci/evaluator-requirements-amd64.lock"
+    arm64_path = ROOT / "assurance/phase2/evaluator/requirements.lock"
+
+    amd64_bytes = amd64_path.read_bytes()
+    arm64_bytes = arm64_path.read_bytes()
+    assert hashlib.sha256(amd64_bytes).hexdigest() == (
+        "a18436b0d48f7eacf5b8f4142685a12b11eed3105039e4d3a0eab2b42a3ec22b"
+    )
+    assert hashlib.sha256(arm64_bytes).hexdigest() == (
+        "7f135a827bad87dc89e5a359824d0abe727f376f213865330b4da8c14cead267"
+    )
+    assert amd64_bytes != arm64_bytes
+
+    def parse_lock(raw: bytes) -> dict[str, tuple[str, str]]:
+        records: dict[str, tuple[str, str]] = {}
+        for line in raw.decode("utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            spec, separator, digest = stripped.partition(" --hash=sha256:")
+            assert separator
+            name, version = spec.split("==", 1)
+            assert name not in records
+            assert len(digest) == 64
+            records[name] = (version, digest)
+        return records
+
+    amd64 = parse_lock(amd64_bytes)
+    arm64 = parse_lock(arm64_bytes)
+    assert len(amd64) == 41
+    assert set(amd64) == set(arm64)
+    assert {name: version for name, (version, _digest) in amd64.items()} == {
+        name: version for name, (version, _digest) in arm64.items()
+    }
+
+    changed = sorted(name for name in amd64 if amd64[name][1] != arm64[name][1])
+    assert changed == [
+        "cffi",
+        "cryptography",
+        "markupsafe",
+        "pydantic-core",
+        "pyyaml",
+        "rpds-py",
+    ]
+
+    expected_binding = {
+        "path": "assurance/phase2/ci/evaluator-requirements-amd64.lock",
+        "requirements_sha256": ("a18436b0d48f7eacf5b8f4142685a12b11eed3105039e4d3a0eab2b42a3ec22b"),
+        "target_platform": "linux/amd64",
+        "historical_arm64_path": "assurance/phase2/evaluator/requirements.lock",
+        "historical_arm64_requirements_sha256": (
+            "7f135a827bad87dc89e5a359824d0abe727f376f213865330b4da8c14cead267"
+        ),
+        "historical_arm64_reuse_allowed": False,
+    }
+
+    boundary = json.loads(BOUNDARY.read_text(encoding="utf-8"))
+    assert boundary["evaluator_lock"] == expected_binding
+    assert boundary["trusted_inputs"].count("assurance/phase2/evaluator/requirements.lock") == 1
+    assert (
+        boundary["trusted_inputs"].count("assurance/phase2/ci/evaluator-requirements-amd64.lock")
+        == 1
+    )
+
+    profile = json.loads(PROFILE.read_text(encoding="utf-8"))
+    assert profile["status"] == "UNPROMOTED"
+    assert profile["consumable"] is False
+    assert profile["evaluator_lock"] == expected_binding
+    assert profile["base_image"]["platform_manifest_digest"] is None
+    assert all(value is None for value in profile["images"].values())
 
 
 def test_candidate_materialization_uses_only_allowlisted_blob_and_trusted_dockerfile(

@@ -8,6 +8,14 @@
     "version": "0.6.2",
     "wheel_sha256": "d27b68638f7896999e22e0a74b0a82cb16c47994e9b98b7940eb9aa7eb9818af"
   },
+  "evaluator_lock": {
+    "path": "assurance/phase2/ci/evaluator-requirements-amd64.lock",
+    "requirements_sha256": "a18436b0d48f7eacf5b8f4142685a12b11eed3105039e4d3a0eab2b42a3ec22b",
+    "target_platform": "linux/amd64",
+    "historical_arm64_path": "assurance/phase2/evaluator/requirements.lock",
+    "historical_arm64_requirements_sha256": "7f135a827bad87dc89e5a359824d0abe727f376f213865330b4da8c14cead267",
+    "historical_arm64_reuse_allowed": false
+  },
   "base_image": {
     "reference": "python:3.11.14-slim",
     "platform_manifest_digest": null,
