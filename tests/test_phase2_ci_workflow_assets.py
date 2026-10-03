@@ -215,6 +215,47 @@ def test_collector_fetches_only_exact_commit_pr_lookup_and_resolves(
     assert lookup_output.is_file()
 
 
+def test_collector_resolves_before_writing_repo_local_evidence(
+    tmp_path: Path,
+) -> None:
+    import subprocess
+
+    module = _module()
+    repo, trusted = _trusted_repo(tmp_path)
+    event_path = tmp_path / "event.json"
+    event_path.write_text(json.dumps(_event()), encoding="utf-8")
+
+    output = repo / "phase2c-intake" / "intake.json"
+    lookup_output = repo / "phase2c-intake" / "pull-request-lookup.json"
+
+    value = module.collect(
+        repo=repo,
+        event_path=event_path,
+        trusted_commit=trusted,
+        expected_repository="hacker-vs-cracker/mcp-behaviour-guard",
+        api_url="https://api.github.com",
+        token="test-token",
+        output=output,
+        lookup_output=lookup_output,
+        fetch_json=lambda _url, _token: [_pr()],
+    )
+
+    assert value["pull_request"]["number"] == 77
+    assert output.is_file()
+    assert lookup_output.is_file()
+
+    status = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain=v1", "--untracked-files=all"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    assert sorted(status) == [
+        "?? phase2c-intake/intake.json",
+        "?? phase2c-intake/pull-request-lookup.json",
+    ]
+
+
 def test_collector_rejects_api_origin_prefix_confusion_before_network(
     tmp_path: Path,
 ) -> None:
