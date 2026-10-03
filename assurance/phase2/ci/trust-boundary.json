@@ -49,6 +49,14 @@
     },
     "workflow_source": "protected-default-branch"
   },
+  "evaluator_lock": {
+    "path": "assurance/phase2/ci/evaluator-requirements-amd64.lock",
+    "requirements_sha256": "a18436b0d48f7eacf5b8f4142685a12b11eed3105039e4d3a0eab2b42a3ec22b",
+    "target_platform": "linux/amd64",
+    "historical_arm64_path": "assurance/phase2/evaluator/requirements.lock",
+    "historical_arm64_requirements_sha256": "7f135a827bad87dc89e5a359824d0abe727f376f213865330b4da8c14cead267",
+    "historical_arm64_reuse_allowed": false
+  },
   "platform": {
     "architecture": "amd64",
     "os": "linux",
@@ -71,6 +79,7 @@
   "trusted_inputs": [
     "assurance/phase2/evaluator/Dockerfile",
     "assurance/phase2/evaluator/requirements.lock",
+    "assurance/phase2/ci/evaluator-requirements-amd64.lock",
     "assurance/phase2/fixture/Dockerfile",
     "assurance/phase2/fixture/store.py",
     "assurance/phase2/fixture/app_service.py",
