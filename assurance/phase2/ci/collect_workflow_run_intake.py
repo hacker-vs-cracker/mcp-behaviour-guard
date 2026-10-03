@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import re
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -172,21 +173,34 @@ def collect(
     if not isinstance(lookup, list):
         raise WorkflowRunCollectionError("trusted PR lookup response must be a JSON array")
 
+    with tempfile.TemporaryDirectory(prefix="phase2c-pr-lookup-") as temp_dir:
+        temp_lookup = (Path(temp_dir) / "pull-request-lookup.json").resolve()
+        try:
+            temp_lookup.relative_to(repo)
+        except ValueError:
+            pass
+        else:
+            raise WorkflowRunCollectionError("temporary PR lookup must be outside trusted checkout")
+
+        temp_lookup.write_text(
+            json.dumps(lookup, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        try:
+            intake = resolve(
+                repo=repo,
+                event_path=event_path,
+                pull_request_lookup_path=temp_lookup,
+                trusted_commit=trusted_commit,
+            )
+        except WorkflowRunResolutionError as exc:
+            raise WorkflowRunCollectionError(f"trusted intake resolution failed: {exc}") from exc
+
     lookup_output.parent.mkdir(parents=True, exist_ok=True)
     lookup_output.write_text(
         json.dumps(lookup, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    try:
-        intake = resolve(
-            repo=repo,
-            event_path=event_path,
-            pull_request_lookup_path=lookup_output,
-            trusted_commit=trusted_commit,
-        )
-    except WorkflowRunResolutionError as exc:
-        raise WorkflowRunCollectionError(f"trusted intake resolution failed: {exc}") from exc
-
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
         json.dumps(intake, indent=2, sort_keys=True) + "\n",
