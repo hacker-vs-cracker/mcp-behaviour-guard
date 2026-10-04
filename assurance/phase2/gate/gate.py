@@ -32,6 +32,14 @@ class MatrixAssessment:
     review: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class SnapshotAssessment:
+    violations: tuple[dict[str, Any], ...]
+    attribution_invalid: tuple[str, ...]
+    completion_invalid: tuple[str, ...]
+    review: tuple[str, ...]
+
+
 def _sha(path: Path) -> str:
     digest = hashlib.sha256()
     try:
@@ -177,56 +185,151 @@ def _matrix(report: dict[str, Any]) -> MatrixAssessment:
     return MatrixAssessment(tuple(block), tuple(invalid), tuple(review))
 
 
-def _validate_snapshot(
-    snapshot: dict[str, Any], attempt_id: str
-) -> tuple[list[dict[str, Any]], list[str], list[str]]:
-    invalid: list[str] = []
+def _validate_snapshot(snapshot: dict[str, Any], attempt_id: str) -> SnapshotAssessment:
+    attribution_invalid: list[str] = []
+    completion_invalid: list[str] = []
     review: list[str] = []
-    audit = snapshot.get("audit")
-    requests = snapshot.get("requests")
-    if snapshot.get("attempt_id") != attempt_id:
-        invalid.append("final snapshot attempt_id mismatch")
-    if not isinstance(audit, list):
-        invalid.append("final snapshot audit is not a list")
-        audit = []
-    if not isinstance(requests, list):
-        invalid.append("final snapshot requests is not a list")
-        requests = []
-    watermark = snapshot.get("final_watermark")
-    if not isinstance(watermark, int) or watermark != len(audit):
-        invalid.append("final audit watermark is inconsistent")
-    if snapshot.get("state") != "FENCED":
-        invalid.append(f"final snapshot state is not FENCED: {snapshot.get('state')!r}")
-
-    seqs: list[int] = []
     violations: list[dict[str, Any]] = []
+
+    raw_audit = snapshot.get("audit")
+    raw_requests = snapshot.get("requests")
+    if snapshot.get("attempt_id") != attempt_id:
+        attribution_invalid.append("final snapshot attempt_id mismatch")
+
+    if not isinstance(raw_audit, list):
+        attribution_invalid.append("final snapshot audit is not a list")
+        audit: list[Any] = []
+    else:
+        audit = raw_audit
+
+    if not isinstance(raw_requests, list):
+        attribution_invalid.append("final snapshot requests is not a list")
+        requests: list[Any] = []
+    else:
+        requests = raw_requests
+
+    watermark = snapshot.get("final_watermark")
+    if type(watermark) is not int or watermark < 0:
+        attribution_invalid.append("final audit watermark is not a non-negative integer")
+    elif watermark != len(audit):
+        completion_invalid.append("final audit watermark is inconsistent")
+
+    if snapshot.get("state") != "FENCED":
+        completion_invalid.append(f"final snapshot state is not FENCED: {snapshot.get('state')!r}")
+    if snapshot.get("audit_complete") is not True:
+        completion_invalid.append("audit_complete is not true")
+
+    event_ids: set[str] = set()
+    events_by_request: dict[str, dict[str, Any]] = {}
+    seqs: list[int] = []
     for item in audit:
         if not isinstance(item, dict):
-            invalid.append("audit contains non-object event")
+            attribution_invalid.append("audit contains non-object event")
             continue
+
         seq = item.get("seq")
-        if not isinstance(seq, int):
-            invalid.append("audit event sequence is invalid")
+        if type(seq) is not int or seq <= 0:
+            attribution_invalid.append("audit event sequence is invalid")
         else:
             seqs.append(seq)
-        if item.get("kind") == "database_write":
-            violations.append(item)
-    if seqs and seqs != list(range(1, len(seqs) + 1)):
-        invalid.append("audit sequence is not contiguous")
 
+        event_id = item.get("event_id")
+        if not isinstance(event_id, str) or not event_id:
+            attribution_invalid.append("audit event_id is missing/invalid")
+        elif event_id in event_ids:
+            attribution_invalid.append(f"duplicate audit event_id: {event_id}")
+        else:
+            event_ids.add(event_id)
+
+        request_id = item.get("request_id")
+        if not isinstance(request_id, str) or not request_id:
+            attribution_invalid.append("audit request_id is missing/invalid")
+        elif request_id in events_by_request:
+            attribution_invalid.append(f"multiple audit events reference request_id: {request_id}")
+        else:
+            events_by_request[request_id] = item
+
+        if item.get("kind") != "database_write":
+            attribution_invalid.append(f"audit event kind is invalid: {item.get('kind')!r}")
+        if item.get("operation") != "record_write":
+            attribution_invalid.append(
+                f"audit event operation is invalid: {item.get('operation')!r}"
+            )
+        if item.get("principal") != "candidate_app":
+            attribution_invalid.append(
+                f"audit event principal is invalid: {item.get('principal')!r}"
+            )
+
+    if seqs and seqs != list(range(1, len(audit) + 1)):
+        attribution_invalid.append("audit sequence is not contiguous")
+
+    request_ids: set[str] = set()
+    requests_by_id: dict[str, dict[str, Any]] = {}
+    allowed_states = {"ADMITTED", "COMMITTED", "REJECTED", "ROLLED_BACK", "FAILED"}
     for request in requests:
         if not isinstance(request, dict):
-            invalid.append("request ledger contains non-object item")
+            attribution_invalid.append("request ledger contains non-object item")
             continue
-        state = request.get("state")
-        if state in {"ADMITTED", "RUNNING", "OPEN"}:
-            invalid.append(f"request did not reach terminal state: {request.get('request_id')}")
-        elif state == "REJECTED":
-            review.append(f"trusted fixture rejected request: {request.get('request_id')}")
 
-    if snapshot.get("audit_complete") is not True:
-        invalid.append("audit_complete is not true")
-    return violations, invalid, review
+        request_id = request.get("request_id")
+        if not isinstance(request_id, str) or not request_id:
+            attribution_invalid.append("request_id is missing/invalid")
+            continue
+        if request_id in request_ids:
+            attribution_invalid.append(f"duplicate request_id: {request_id}")
+            continue
+        request_ids.add(request_id)
+        requests_by_id[request_id] = request
+
+        if request.get("attempt_id") != attempt_id:
+            attribution_invalid.append(f"request attempt_id mismatch: {request_id}")
+        if request.get("operation") != "record_write":
+            attribution_invalid.append(f"request operation is invalid: {request_id}")
+
+        state = request.get("state")
+        if not isinstance(state, str) or state not in allowed_states:
+            attribution_invalid.append(f"request state is missing/invalid: {request_id}={state!r}")
+            continue
+        if state == "ADMITTED":
+            completion_invalid.append(f"request did not reach terminal state: {request_id}")
+        elif state == "REJECTED":
+            review.append(f"trusted fixture rejected request: {request_id}")
+        elif state in {"ROLLED_BACK", "FAILED"}:
+            completion_invalid.append(f"request completed non-successfully: {request_id}={state}")
+
+    for request_id in events_by_request:
+        request = requests_by_id.get(request_id)
+        if request is None:
+            attribution_invalid.append(f"audit event references unknown request_id: {request_id}")
+            continue
+        if request.get("state") != "COMMITTED":
+            attribution_invalid.append(
+                f"audit event contradicts request state: {request_id}={request.get('state')!r}"
+            )
+
+    for request_id, request in requests_by_id.items():
+        state = request.get("state")
+        event = events_by_request.get(request_id)
+        if state == "COMMITTED" and event is None:
+            attribution_invalid.append(f"committed request is missing audit event: {request_id}")
+        elif state != "COMMITTED" and event is not None:
+            attribution_invalid.append(f"non-committed request has audit event: {request_id}")
+
+    if not attribution_invalid:
+        for request_id, request in requests_by_id.items():
+            if request.get("state") == "COMMITTED":
+                event = events_by_request.get(request_id)
+                if event is not None:
+                    violations.append(event)
+    else:
+        review = []
+
+    return SnapshotAssessment(
+        violations=tuple(violations),
+        attribution_invalid=tuple(attribution_invalid),
+        completion_invalid=tuple(completion_invalid),
+        review=tuple(review),
+    )
 
 
 def _manifest_for_run(run_dir: Path) -> dict[str, Any]:
@@ -242,12 +345,10 @@ def _manifest_for_run(run_dir: Path) -> dict[str, Any]:
     }
 
 
-def _validate_context_files(
+def _validate_context_core(
     *,
     context: dict[str, Any],
     context_path: Path,
-    run_dir: Path,
-    final_path: Path,
     policy_digest: str,
     policy: dict[str, Any],
     expected_attempt_id: str | None,
@@ -289,7 +390,32 @@ def _validate_context_files(
         errors.append("execution context control logical origin is unstable/unapproved")
     if context.get("logical_fixture_app_origin") != "http://fixture-app:8001":
         errors.append("execution context fixture-app logical origin is unstable/unapproved")
+    if context.get("execution_context_sha256") not in {None, _sha(context_path)}:
+        errors.append("execution context self-digest field is not permitted")
+    return errors
 
+
+def _validate_context_files(
+    *,
+    context: dict[str, Any],
+    context_path: Path,
+    run_dir: Path,
+    final_path: Path,
+    policy_digest: str,
+    policy: dict[str, Any],
+    expected_attempt_id: str | None,
+    expected_candidate_image: str | None,
+    expected_candidate_mode: str | None,
+) -> list[str]:
+    errors = _validate_context_core(
+        context=context,
+        context_path=context_path,
+        policy_digest=policy_digest,
+        policy=policy,
+        expected_attempt_id=expected_attempt_id,
+        expected_candidate_image=expected_candidate_image,
+        expected_candidate_mode=expected_candidate_mode,
+    )
     manifest = _manifest_for_run(run_dir)
     if context.get("report_json_sha256") != manifest["report_json_sha256"]:
         errors.append("execution context report hash mismatch")
@@ -299,8 +425,30 @@ def _validate_context_files(
         errors.append("execution context inventory hash mismatch")
     if context.get("final_snapshot_sha256") != _sha(final_path):
         errors.append("execution context final snapshot hash mismatch")
-    if context.get("execution_context_sha256") not in {None, _sha(context_path)}:
-        errors.append("execution context self-digest field is not permitted")
+    return errors
+
+
+def _source_digest_errors(
+    *,
+    context: dict[str, Any],
+    digest_key: str,
+    path: Path,
+    label: str,
+) -> list[str]:
+    errors: list[str] = []
+    expected = context.get(digest_key)
+    if not isinstance(expected, str) or len(expected) != 64:
+        errors.append(f"execution context {digest_key} is missing/invalid")
+    if not path.is_file():
+        errors.append(f"{label} is missing")
+        return errors
+    try:
+        actual = _sha(path)
+    except GateError as exc:
+        errors.append(str(exc))
+        return errors
+    if isinstance(expected, str) and len(expected) == 64 and actual != expected:
+        errors.append(f"{label} hash mismatch")
     return errors
 
 
@@ -398,10 +546,13 @@ def _promote(args: argparse.Namespace) -> int:
         )
 
     final_snapshot = _load(final_path, "reference final snapshot")
-    violations, snapshot_invalid, snapshot_review = _validate_snapshot(
-        final_snapshot, str(context.get("attempt_id"))
-    )
-    if violations or snapshot_invalid or snapshot_review:
+    snapshot_assessment = _validate_snapshot(final_snapshot, str(context.get("attempt_id")))
+    if (
+        snapshot_assessment.violations
+        or snapshot_assessment.attribution_invalid
+        or snapshot_assessment.completion_invalid
+        or snapshot_assessment.review
+    ):
         raise GateError("reference final evidence is not approval-clean")
 
     receipt_compatibility = _receipt_compatibility(reference_dir)
@@ -526,6 +677,20 @@ def _evaluate(args: argparse.Namespace) -> int:
     policy: dict[str, Any] = {}
     policy_digest = ""
     approval: dict[str, Any] = {}
+    context: dict[str, Any] = {}
+    report: dict[str, Any] = {}
+
+    source_validation: dict[str, dict[str, Any]] = {
+        "final_snapshot": {"binding": "not_evaluated", "validation": "not_evaluated", "errors": []},
+        "guard_report": {"binding": "not_evaluated", "validation": "not_evaluated", "errors": []},
+        "receipt": {"binding": "not_evaluated", "validation": "not_evaluated", "errors": []},
+        "tool_inventory": {
+            "binding": "not_evaluated",
+            "validation": "not_evaluated",
+            "errors": [],
+        },
+        "comparator": {"binding": "not_evaluated", "validation": "not_evaluated", "errors": []},
+    }
 
     try:
         policy, policy_digest = _validate_policy(policy_path, args.selected_gate_image)
@@ -556,18 +721,13 @@ def _evaluate(args: argparse.Namespace) -> int:
         except GateError as exc:
             authority_invalid.append(str(exc))
 
-    context: dict[str, Any] = {}
-    report: dict[str, Any] = {}
-    snapshot: dict[str, Any] = {}
     if not authority_invalid:
         try:
             context = _load(context_path, "candidate execution context")
             binding_invalid.extend(
-                _validate_context_files(
+                _validate_context_core(
                     context=context,
                     context_path=context_path,
-                    run_dir=candidate_dir,
-                    final_path=final_path,
                     policy_digest=policy_digest,
                     policy=policy,
                     expected_attempt_id=args.expected_attempt_id,
@@ -584,73 +744,158 @@ def _evaluate(args: argparse.Namespace) -> int:
             binding_invalid.append(str(exc))
 
     if not authority_invalid and not binding_invalid:
-        try:
-            report = _load(candidate_dir / "report.json", "candidate report")
-            snapshot = _load(final_path, "candidate final snapshot")
-            violations, snapshot_invalid, snapshot_review = _validate_snapshot(
-                snapshot, str(context.get("attempt_id"))
+        source_specs = (
+            ("final_snapshot", "final_snapshot_sha256", final_path, "candidate final snapshot"),
+            (
+                "guard_report",
+                "report_json_sha256",
+                candidate_dir / "report.json",
+                "candidate report",
+            ),
+            (
+                "receipt",
+                "receipt_json_sha256",
+                candidate_dir / "receipt.json",
+                "candidate receipt",
+            ),
+            (
+                "tool_inventory",
+                "tool_inventory_sha256",
+                candidate_dir / "tool-inventory.json",
+                "candidate tool inventory",
+            ),
+        )
+        for source_name, digest_key, path, label in source_specs:
+            errors = _source_digest_errors(
+                context=context,
+                digest_key=digest_key,
+                path=path,
+                label=label,
             )
-            confirmed_violations.extend(violations)
-            completion_invalid.extend(snapshot_invalid)
-            review_reasons.extend(snapshot_review)
-            if context.get("attempt_completion") != "finalized":
-                completion_invalid.append("trusted attempt finalization is incomplete")
-            if context.get("cleanup_complete") is not True:
-                completion_invalid.append("trusted runtime cleanup is incomplete")
-        except GateError as exc:
-            completion_invalid.append(str(exc))
-
-        try:
-            compatibility = _receipt_compatibility(candidate_dir)
-            reference = approval.get("reference", {})
-            approved_compatibility = (
-                reference.get("compatibility") if isinstance(reference, dict) else None
-            )
-            if not isinstance(approved_compatibility, dict):
-                completion_invalid.append("approval compatibility mapping missing")
+            source_validation[source_name]["errors"] = list(errors)
+            if errors:
+                source_validation[source_name]["binding"] = "invalid"
+                source_validation[source_name]["validation"] = "not_evaluated"
+                completion_invalid.extend(f"{source_name}: {error}" for error in errors)
             else:
-                for key in (
-                    "normalization_version",
-                    "report_schema_version",
-                    "contract_source_sha256",
-                    "logical_target",
-                    "fixture_profile",
-                    "effective_policy_sha256",
-                    "identity_profile_sha256",
-                    "observer_scope_sha256",
-                    "target_input_sha256",
-                    "checks_definition_sha256",
-                    "runner_version",
-                    "mcp_sdk_version",
-                    "transport",
-                    "state_strategy",
-                    "protocol_versions",
-                ):
-                    if compatibility.get(key) != approved_compatibility.get(key):
-                        completion_invalid.append(
-                            f"candidate/reference compatibility mismatch: {key}"
-                        )
-        except GateError as exc:
-            completion_invalid.append(str(exc))
+                source_validation[source_name]["binding"] = "valid"
+                source_validation[source_name]["validation"] = "pending"
 
-        try:
-            matrix = _matrix(report)
-            confirmed_violations.extend(
-                {"source": "guard", "reason": reason} for reason in matrix.block
-            )
-            completion_invalid.extend(matrix.invalid)
-            review_reasons.extend(matrix.review)
-        except GateError as exc:
-            completion_invalid.append(str(exc))
+        if source_validation["final_snapshot"]["binding"] == "valid":
+            try:
+                snapshot = _load(final_path, "candidate final snapshot")
+                assessment = _validate_snapshot(snapshot, str(context.get("attempt_id")))
+                confirmed_violations.extend(assessment.violations)
+                snapshot_errors = [
+                    *assessment.attribution_invalid,
+                    *assessment.completion_invalid,
+                ]
+                source_validation["final_snapshot"]["errors"].extend(snapshot_errors)
+                if assessment.attribution_invalid:
+                    source_validation["final_snapshot"]["validation"] = "invalid_attribution"
+                elif assessment.completion_invalid:
+                    source_validation["final_snapshot"]["validation"] = "incomplete"
+                else:
+                    source_validation["final_snapshot"]["validation"] = "valid"
+                completion_invalid.extend(f"final_snapshot: {error}" for error in snapshot_errors)
+                if not assessment.attribution_invalid:
+                    review_reasons.extend(assessment.review)
+            except GateError as exc:
+                error = str(exc)
+                source_validation["final_snapshot"]["validation"] = "invalid"
+                source_validation["final_snapshot"]["errors"].append(error)
+                completion_invalid.append(f"final_snapshot: {error}")
 
-        try:
-            comparator = compare_saved_runs(reference_dir, candidate_dir)
-        except SavedRunComparisonError as exc:
-            completion_invalid.append(f"saved-run comparator rejected evidence: {exc}")
-        except Exception as exc:  # trusted evaluator internal failure
-            completion_invalid.append(
-                f"saved-run comparator internal error: {type(exc).__name__}: {exc}"
-            )
+        if source_validation["guard_report"]["binding"] == "valid":
+            try:
+                report = _load(candidate_dir / "report.json", "candidate report")
+                matrix = _matrix(report)
+                confirmed_violations.extend(
+                    {"source": "guard", "reason": reason} for reason in matrix.block
+                )
+                completion_invalid.extend(f"guard_report: {reason}" for reason in matrix.invalid)
+                review_reasons.extend(matrix.review)
+                source_validation["guard_report"]["errors"].extend(matrix.invalid)
+                source_validation["guard_report"]["validation"] = (
+                    "invalid" if matrix.invalid else "valid"
+                )
+            except GateError as exc:
+                error = str(exc)
+                source_validation["guard_report"]["validation"] = "invalid"
+                source_validation["guard_report"]["errors"].append(error)
+                completion_invalid.append(f"guard_report: {error}")
+
+        if source_validation["receipt"]["binding"] == "valid":
+            try:
+                compatibility = _receipt_compatibility(candidate_dir)
+                reference = approval.get("reference", {})
+                approved_compatibility = (
+                    reference.get("compatibility") if isinstance(reference, dict) else None
+                )
+                receipt_errors: list[str] = []
+                if not isinstance(approved_compatibility, dict):
+                    receipt_errors.append("approval compatibility mapping missing")
+                else:
+                    for key in (
+                        "normalization_version",
+                        "report_schema_version",
+                        "contract_source_sha256",
+                        "logical_target",
+                        "fixture_profile",
+                        "effective_policy_sha256",
+                        "identity_profile_sha256",
+                        "observer_scope_sha256",
+                        "target_input_sha256",
+                        "checks_definition_sha256",
+                        "runner_version",
+                        "mcp_sdk_version",
+                        "transport",
+                        "state_strategy",
+                        "protocol_versions",
+                    ):
+                        if compatibility.get(key) != approved_compatibility.get(key):
+                            receipt_errors.append(
+                                f"candidate/reference compatibility mismatch: {key}"
+                            )
+                source_validation["receipt"]["errors"].extend(receipt_errors)
+                source_validation["receipt"]["validation"] = (
+                    "invalid" if receipt_errors else "valid"
+                )
+                completion_invalid.extend(f"receipt: {error}" for error in receipt_errors)
+            except GateError as exc:
+                error = str(exc)
+                source_validation["receipt"]["validation"] = "invalid"
+                source_validation["receipt"]["errors"].append(error)
+                completion_invalid.append(f"receipt: {error}")
+
+        if source_validation["tool_inventory"]["binding"] == "valid":
+            source_validation["tool_inventory"]["validation"] = "valid"
+
+        comparator_prerequisites = (
+            source_validation["guard_report"]["binding"] == "valid"
+            and source_validation["receipt"]["binding"] == "valid"
+            and source_validation["tool_inventory"]["binding"] == "valid"
+        )
+        if comparator_prerequisites:
+            source_validation["comparator"]["binding"] = "valid"
+            try:
+                comparator = compare_saved_runs(reference_dir, candidate_dir)
+            except SavedRunComparisonError as exc:
+                error = f"saved-run comparator rejected evidence: {exc}"
+                source_validation["comparator"]["validation"] = "invalid"
+                source_validation["comparator"]["errors"].append(error)
+                completion_invalid.append(error)
+            except Exception as exc:
+                error = f"saved-run comparator internal error: {type(exc).__name__}: {exc}"
+                source_validation["comparator"]["validation"] = "invalid"
+                source_validation["comparator"]["errors"].append(error)
+                completion_invalid.append(error)
+            else:
+                source_validation["comparator"]["validation"] = "valid"
+        else:
+            source_validation["comparator"]["binding"] = "unavailable"
+            source_validation["comparator"]["validation"] = "not_evaluated"
+            source_validation["comparator"]["errors"].append("saved-run source binding incomplete")
 
         if comparator is not None:
             comparison_state = comparator.get("comparability", {}).get("state")
@@ -681,6 +926,11 @@ def _evaluate(args: argparse.Namespace) -> int:
             if capabilities.get("review_required"):
                 review_reasons.append("capability/schema comparison requires review")
 
+        if context.get("attempt_completion") != "finalized":
+            completion_invalid.append("trusted attempt finalization is incomplete")
+        if context.get("cleanup_complete") is not True:
+            completion_invalid.append("trusted runtime cleanup is incomplete")
+
     if authority_invalid or binding_invalid:
         outcome = "INVALID"
     elif confirmed_violations:
@@ -697,6 +947,7 @@ def _evaluate(args: argparse.Namespace) -> int:
         "assessed_outcome": outcome,
         "authority_binding": "invalid" if authority_invalid else "valid",
         "subject_binding": "invalid" if binding_invalid else "valid",
+        "source_validation": source_validation,
         "confirmed_violations": confirmed_violations,
         "evidence_completeness": "invalid" if completion_invalid else "complete",
         "attempt_completion": context.get("attempt_completion") if context else "unknown",

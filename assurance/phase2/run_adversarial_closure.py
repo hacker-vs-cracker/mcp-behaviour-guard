@@ -2,14 +2,26 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import json
 import subprocess
+import sys
 import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from failure_evidence import cleanup_resources
+from run_approval_demo import (
+    _copy_volume,
+    _gate_run,
+    _init_gate_volume,
+    _make_policy,
+    _read_gate_json,
+    _sha,
+    _write,
+)
 from run_isolation_check import IsolationError, _resource_args, _run, _wait_exec
 
 _CONTROL_CLIENT = r"""
@@ -59,6 +71,7 @@ class Runtime:
     evaluator: str
     candidate: str
     attempt_id: str
+    cleanup_attempt_id: str
     token: str
     containers: list[str]
     networks: list[str]
@@ -110,6 +123,25 @@ def _candidate_http(runtime: Runtime, method: str, path: str) -> dict[str, Any]:
     return value
 
 
+def _best_effort_fence(runtime: Runtime) -> None:
+    attempt_id = runtime.cleanup_attempt_id
+    if not attempt_id:
+        return
+    snapshot = _control(runtime, "GET", f"/attempts/{attempt_id}")
+    attempt = snapshot.get("attempt")
+    if not isinstance(attempt, dict):
+        raise IsolationError(f"{runtime.label}: failure fence could not read trusted attempt state")
+    state = str(attempt.get("state") or "")
+    if state == "OPEN":
+        _control(runtime, "POST", f"/attempts/{attempt_id}/close")
+        return
+    if state in {"PREPARED", "FENCED", "FINALIZED", "ABORTED", "RECOVERY_REQUIRED"}:
+        return
+    raise IsolationError(
+        f"{runtime.label}: failure fence observed unexpected attempt state: {state!r}"
+    )
+
+
 def _start_runtime(
     *,
     label: str,
@@ -132,6 +164,7 @@ def _start_runtime(
         evaluator=f"p2b5-evaluator-{label}-{suffix}",
         candidate=f"p2b5-candidate-{label}-{suffix}",
         attempt_id=f"{label}-{suffix}",
+        cleanup_attempt_id=f"{label}-{suffix}",
         token="",
         containers=[],
         networks=[],
@@ -293,43 +326,61 @@ def _start_runtime(
     return runtime
 
 
-def _cleanup(runtime: Runtime, output: Path) -> None:
-    errors: list[str] = []
-    for name in reversed(runtime.containers):
-        result = _run("docker", "rm", "-f", name, check=False)
-        if result.returncode != 0 and "No such container" not in result.stderr:
-            errors.append(f"container {name}: {result.stderr.strip()}")
-    for name in reversed(runtime.networks):
-        result = _run("docker", "network", "rm", name, check=False)
-        if result.returncode != 0:
-            errors.append(f"network {name}: {result.stderr.strip()}")
-    for name in reversed(runtime.volumes):
-        result = _run("docker", "volume", "rm", name, check=False)
-        if result.returncode != 0:
-            errors.append(f"volume {name}: {result.stderr.strip()}")
-
-    for name in runtime.containers:
-        if _run("docker", "container", "inspect", name, check=False).returncode == 0:
-            errors.append(f"container still present: {name}")
-    for name in runtime.networks:
-        if _run("docker", "network", "inspect", name, check=False).returncode == 0:
-            errors.append(f"network still present: {name}")
-    for name in runtime.volumes:
-        if _run("docker", "volume", "inspect", name, check=False).returncode == 0:
-            errors.append(f"volume still present: {name}")
-
-    output.mkdir(parents=True, exist_ok=True)
-    (output / "cleanup.json").write_text(
-        json.dumps(
-            {"cleanup_complete": not errors, "cleanup_errors": errors},
-            indent=2,
-            sort_keys=True,
+def _cleanup(
+    runtime: Runtime,
+    output: Path,
+    *,
+    fixture_image: str,
+    evaluator_image: str,
+    preserve_on_failure: bool,
+    failure_stage: str | None,
+) -> None:
+    try:
+        result = cleanup_resources(
+            run=_run,
+            evidence_dir=output,
+            containers=runtime.containers,
+            networks=runtime.networks,
+            volumes=runtime.volumes,
+            state_volume=runtime.state_volume,
+            output_volume=runtime.output_volume,
+            fixture_image=fixture_image,
+            evaluator_image=evaluator_image,
+            preserve_on_failure=preserve_on_failure,
+            failure_stage=failure_stage,
+            fence=(lambda: _best_effort_fence(runtime)) if preserve_on_failure else None,
         )
-        + "\n",
-        encoding="utf-8",
-    )
-    if errors:
-        raise IsolationError(f"{runtime.label}: cleanup errors: {errors}")
+    except Exception as exc:
+        output.mkdir(parents=True, exist_ok=True)
+        (output / "cleanup-helper-error.json").write_text(
+            json.dumps(
+                {
+                    "failure_stage": failure_stage,
+                    "cleanup_error_type": type(exc).__name__,
+                    "cleanup_error": str(exc),
+                    "primary_error_present": preserve_on_failure,
+                    "owned_resources": {
+                        "containers": list(runtime.containers),
+                        "networks": list(runtime.networks),
+                        "volumes": list(runtime.volumes),
+                    },
+                    "finish_only_recovery_required": True,
+                    "committed_pass_permitted": False,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        if preserve_on_failure:
+            return
+        raise
+
+    if not result.cleanup_complete and not preserve_on_failure:
+        raise IsolationError(
+            f"{runtime.label}: cleanup incomplete; finish-only recovery required: {result!r}"
+        )
 
 
 def _guard_command(runtime: Runtime) -> list[str]:
@@ -364,15 +415,25 @@ def _run_guard(runtime: Runtime, case_dir: Path) -> int:
     return result.returncode
 
 
-def _finalize(runtime: Runtime, case_dir: Path) -> dict[str, Any]:
+def _finalize(
+    runtime: Runtime,
+    case_dir: Path,
+    stage: dict[str, str],
+) -> dict[str, Any]:
+    stage["value"] = "attempt_close"
     _control(runtime, "POST", f"/attempts/{runtime.attempt_id}/close")
     _run("docker", "stop", "-t", "2", runtime.candidate, check=False)
+
+    stage["value"] = "final_snapshot_export"
     snapshot = _control(runtime, "POST", f"/attempts/{runtime.attempt_id}/final-snapshot")
     (case_dir / "final-snapshot.json").write_text(
         json.dumps(snapshot, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+
+    stage["value"] = "finalization"
     _control(runtime, "POST", f"/attempts/{runtime.attempt_id}/finalize")
+    stage["value"] = "complete"
     return snapshot
 
 
@@ -432,10 +493,11 @@ def _case_startup(
         contract=contract,
     )
     case_dir = output / "startup"
+    stage = {"value": "case_execution"}
     try:
         _assert_control_unreachable(runtime)
         guard_exit = _run_guard(runtime, case_dir)
-        snapshot = _finalize(runtime, case_dir)
+        snapshot = _finalize(runtime, case_dir, stage)
         if len(snapshot.get("audit", [])) < 1:
             raise IsolationError("startup: whole-attempt audit missed startup write")
         return {
@@ -445,7 +507,14 @@ def _case_startup(
             "control_unreachable": True,
         }
     finally:
-        _cleanup(runtime, case_dir)
+        _cleanup(
+            runtime,
+            case_dir,
+            fixture_image=fixture_image,
+            evaluator_image=evaluator_image,
+            preserve_on_failure=sys.exc_info()[0] is not None,
+            failure_stage=(stage["value"] if sys.exc_info()[0] is not None else None),
+        )
 
 
 def _case_interprobe(
@@ -465,6 +534,7 @@ def _case_interprobe(
         contract=contract,
     )
     case_dir = output / "interprobe"
+    stage = {"value": "case_execution"}
     case_dir.mkdir(parents=True, exist_ok=True)
     process: subprocess.Popen[str] | None = None
     try:
@@ -491,7 +561,7 @@ def _case_interprobe(
             f"{return_code}\n",
             encoding="utf-8",
         )
-        snapshot = _finalize(runtime, case_dir)
+        snapshot = _finalize(runtime, case_dir, stage)
         if len(snapshot.get("audit", [])) < 1:
             raise IsolationError("interprobe: whole-attempt audit missed inter-probe write")
         background_result = final_state.get("background_result")
@@ -506,10 +576,35 @@ def _case_interprobe(
             "expected_gate_effect": "BLOCK",
         }
     finally:
+        active_error = sys.exc_info()[1]
+        process_cleanup_error: Exception | None = None
         if process is not None and process.poll() is None:
-            process.kill()
-            process.communicate()
-        _cleanup(runtime, case_dir)
+            try:
+                process.kill()
+                process.communicate(timeout=5)
+            except Exception as exc:
+                process_cleanup_error = exc
+                with contextlib.suppress(Exception):
+                    process.kill()
+                    process.communicate(timeout=2)
+
+        preserve_on_failure = active_error is not None or process_cleanup_error is not None
+        cleanup_failure_stage: str | None = None
+        if active_error is not None:
+            cleanup_failure_stage = stage["value"]
+        elif process_cleanup_error is not None:
+            cleanup_failure_stage = "process_cleanup"
+
+        _cleanup(
+            runtime,
+            case_dir,
+            fixture_image=fixture_image,
+            evaluator_image=evaluator_image,
+            preserve_on_failure=preserve_on_failure,
+            failure_stage=cleanup_failure_stage,
+        )
+        if active_error is None and process_cleanup_error is not None:
+            raise process_cleanup_error
 
 
 def _case_delayed(
@@ -529,6 +624,7 @@ def _case_delayed(
         contract=contract,
     )
     case_dir = output / "delayed"
+    stage = {"value": "case_execution"}
     try:
         guard_exit = _run_guard(runtime, case_dir)
         state = _wait_background(runtime, started_only=True)
@@ -538,7 +634,7 @@ def _case_delayed(
         if released.get("status") != 200:
             raise IsolationError(f"delayed: release endpoint failed: {released!r}")
         final_state = _wait_background(runtime)
-        snapshot = _finalize(runtime, case_dir)
+        snapshot = _finalize(runtime, case_dir, stage)
         if len(snapshot.get("audit", [])) < 1:
             raise IsolationError("delayed: whole-attempt audit missed post-Guard pre-fence write")
         background_result = final_state.get("background_result")
@@ -553,7 +649,14 @@ def _case_delayed(
             "expected_gate_effect": "BLOCK",
         }
     finally:
-        _cleanup(runtime, case_dir)
+        _cleanup(
+            runtime,
+            case_dir,
+            fixture_image=fixture_image,
+            evaluator_image=evaluator_image,
+            preserve_on_failure=sys.exc_info()[0] is not None,
+            failure_stage=(stage["value"] if sys.exc_info()[0] is not None else None),
+        )
 
 
 def _case_crash(
@@ -577,16 +680,21 @@ def _case_crash(
         guard_exit = _run_guard(runtime, case_dir)
         if guard_exit == 0:
             raise IsolationError("crash: candidate crash incorrectly produced Guard PASS")
-        snapshot = _finalize(runtime, case_dir)
-        if snapshot.get("audit") != []:
-            raise IsolationError("crash: unexpected committed database write")
         return {
             "guard_exit_code": guard_exit,
             "audit_count": 0,
             "expected_gate_effect": "INVALID",
+            "final_snapshot_intentionally_absent": True,
         }
     finally:
-        _cleanup(runtime, case_dir)
+        _cleanup(
+            runtime,
+            case_dir,
+            fixture_image=fixture_image,
+            evaluator_image=evaluator_image,
+            preserve_on_failure=True,
+            failure_stage="candidate_crash",
+        )
 
 
 def _case_recovery(
@@ -606,6 +714,7 @@ def _case_recovery(
         contract=contract,
     )
     case_dir = output / "recovery"
+    stage = {"value": "case_execution"}
     case_dir.mkdir(parents=True, exist_ok=True)
     try:
         old_token = runtime.token
@@ -674,6 +783,7 @@ def _case_recovery(
         )
 
         snapshot = _control(runtime, "GET", f"/attempts/{runtime.attempt_id}")
+        _write(case_dir / "recovery-required-state.json", snapshot)
         attempt = snapshot.get("attempt")
         if not isinstance(attempt, dict) or attempt.get("state") != "RECOVERY_REQUIRED":
             raise IsolationError(f"recovery: orphan did not become RECOVERY_REQUIRED: {snapshot!r}")
@@ -711,6 +821,7 @@ def _case_recovery(
         new_attempt = str(created.get("attempt_id") or "")
         if not new_attempt:
             raise IsolationError("recovery: new attempt could not be created after trusted abort")
+        runtime.cleanup_attempt_id = new_attempt
         _control(runtime, "POST", f"/attempts/{new_attempt}/open")
 
         response = _run("docker", "exec", runtime.candidate, "python", "-c", auth_code)
@@ -720,13 +831,19 @@ def _case_recovery(
                 f"recovery: stale old token returned {status_after_new} after new attempt"
             )
 
+        stage["value"] = "attempt_close"
         _control(runtime, "POST", f"/attempts/{new_attempt}/close")
+        stage["value"] = "final_snapshot_export"
         final = _control(runtime, "POST", f"/attempts/{new_attempt}/final-snapshot")
+        _write(case_dir / "recovery-new-attempt-final-snapshot.json", final)
         if final.get("audit") != []:
             raise IsolationError("recovery: new attempt unexpectedly inherited old audit")
+        stage["value"] = "finalization"
         _control(runtime, "POST", f"/attempts/{new_attempt}/finalize")
+        stage["value"] = "case_execution"
 
         recovered = _control(runtime, "GET", f"/attempts/{runtime.attempt_id}")
+        _write(case_dir / "recovery-aborted-state.json", recovered)
         attempt = recovered.get("attempt")
         requests = recovered.get("requests")
         if not isinstance(attempt, dict) or attempt.get("state") != "ABORTED":
@@ -744,58 +861,618 @@ def _case_recovery(
             "pre_abort_old_token_status": status_before_abort,
             "post_new_attempt_old_token_status": status_after_new,
             "new_attempt_audit_count": 0,
+            "new_attempt_id": new_attempt,
             "expected_gate_effect": "INVALID",
         }
     finally:
-        _cleanup(runtime, case_dir)
+        _cleanup(
+            runtime,
+            case_dir,
+            fixture_image=fixture_image,
+            evaluator_image=evaluator_image,
+            preserve_on_failure=sys.exc_info()[0] is not None,
+            failure_stage=(stage["value"] if sys.exc_info()[0] is not None else None),
+        )
+
+
+def _capture_saved_run(runtime: Runtime, case_dir: Path) -> bool:
+    code = (
+        "from pathlib import Path; "
+        "items=sorted({str(p.parent) for p in Path('/trusted-output/reports').glob('*/report.json')}); "
+        "print('' if len(items)!=1 else items[0])"
+    )
+    result = _run(
+        "docker",
+        "exec",
+        runtime.evaluator,
+        "python",
+        "-c",
+        code,
+        check=False,
+    )
+    if result.returncode != 0:
+        return False
+    remote_run = result.stdout.strip()
+    if not remote_run:
+        return False
+    local_run = case_dir / "run"
+    local_run.mkdir(parents=True, exist_ok=True)
+    copied = _run(
+        "docker",
+        "cp",
+        f"{runtime.evaluator}:{remote_run}/.",
+        str(local_run),
+        check=False,
+    )
+    return copied.returncode == 0
+
+
+def _runtime_capture(runtime: Runtime, *, run_captured: bool) -> dict[str, Any]:
+    return {
+        "attempt_id": runtime.attempt_id,
+        "credential_token_sha256": hashlib.sha256(runtime.token.encode("utf-8")).hexdigest(),
+        "run_captured": run_captured,
+        "physical_runtime": {
+            "candidate_container": runtime.candidate,
+            "fixture_app_container": runtime.app,
+            "fixture_control_container": runtime.control,
+            "evaluator_container": runtime.evaluator,
+            "candidate_app_network": runtime.net_ca,
+            "evaluator_candidate_network": runtime.net_ec,
+            "evaluator_control_network": runtime.net_ctrl,
+        },
+    }
+
+
+def _cleanup_complete(case_dir: Path) -> bool:
+    path = case_dir / "cleanup.json"
+    if not path.is_file():
+        return False
+    value = json.loads(path.read_text(encoding="utf-8"))
+    return isinstance(value, dict) and value.get("cleanup_complete") is True
+
+
+def _write_gate_context(
+    *,
+    case_dir: Path,
+    metadata: dict[str, Any],
+    candidate_mode: str,
+    attempt_completion: str,
+    evaluator_image: str,
+    fixture_image: str,
+    candidate_image: str,
+    gate_image: str,
+    policy_digest: str,
+    guard_exit_code: int | None,
+) -> dict[str, Any]:
+    run_dir = case_dir / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    report_path = run_dir / "report.json"
+    receipt_path = run_dir / "receipt.json"
+    inventory_path = run_dir / "tool-inventory.json"
+    final_path = case_dir / "final-snapshot.json"
+
+    report: dict[str, Any] = {}
+    if report_path.is_file():
+        value = json.loads(report_path.read_text(encoding="utf-8"))
+        if isinstance(value, dict):
+            report = value
+
+    receipt: dict[str, Any] = {}
+    if receipt_path.is_file():
+        value = json.loads(receipt_path.read_text(encoding="utf-8"))
+        if isinstance(value, dict):
+            receipt = value
+
+    receipt_context = receipt.get("context")
+    if not isinstance(receipt_context, dict):
+        receipt_context = {}
+
+    context = {
+        "schema_version": 1,
+        "policy_profile_digest": policy_digest,
+        "attempt_id": metadata["attempt_id"],
+        "guard_run_id": report.get("run_id"),
+        "candidate_image": candidate_image,
+        "candidate_mode": candidate_mode,
+        "orchestrator_sha256": _sha(Path(__file__).resolve()),
+        "evaluator_image": evaluator_image,
+        "fixture_image": fixture_image,
+        "gate_image": gate_image,
+        "credential_principal": "candidate_app",
+        "credential_token_sha256": metadata["credential_token_sha256"],
+        "logical_candidate_origin": "http://candidate:7000",
+        "logical_control_origin": "http://fixture-control:9000",
+        "logical_fixture_app_origin": "http://fixture-app:8001",
+        "report_json_sha256": _sha(report_path) if report_path.is_file() else None,
+        "receipt_json_sha256": _sha(receipt_path) if receipt_path.is_file() else None,
+        "tool_inventory_sha256": _sha(inventory_path) if inventory_path.is_file() else None,
+        "final_snapshot_sha256": _sha(final_path) if final_path.is_file() else None,
+        "subject_binding": "valid",
+        "attempt_completion": attempt_completion,
+        "cleanup_complete": _cleanup_complete(case_dir),
+        "platform": "linux/arm64",
+        "physical_runtime": metadata["physical_runtime"],
+        "guard_exit_code": guard_exit_code,
+        "receipt_logical_target": receipt_context.get("logical_target"),
+    }
+    _write(case_dir / "execution-context.json", context)
+    return context
+
+
+def _run_reference(
+    *,
+    evaluator_image: str,
+    fixture_image: str,
+    candidate_image: str,
+    contract: Path,
+    output: Path,
+) -> dict[str, Any]:
+    runtime = _start_runtime(
+        label="reference",
+        mode="good",
+        evaluator_image=evaluator_image,
+        fixture_image=fixture_image,
+        candidate_image=candidate_image,
+        contract=contract,
+    )
+    case_dir = output / "reference"
+    stage = {"value": "case_execution"}
+    result: dict[str, Any] = {}
+    try:
+        guard_exit = _run_guard(runtime, case_dir)
+        if guard_exit != 0:
+            raise IsolationError(f"reference: Guard exit was not zero: {guard_exit}")
+        snapshot = _finalize(runtime, case_dir, stage)
+        if snapshot.get("audit") != []:
+            raise IsolationError("reference: trusted final audit was not clean")
+        if not _capture_saved_run(runtime, case_dir):
+            raise IsolationError("reference: trusted saved run could not be captured")
+        result = {
+            "guard_exit_code": guard_exit,
+            "audit_count": 0,
+            "candidate_mode": "good",
+            "attempt_completion": "finalized",
+            "gate_capture": _runtime_capture(runtime, run_captured=True),
+        }
+    finally:
+        _cleanup(
+            runtime,
+            case_dir,
+            fixture_image=fixture_image,
+            evaluator_image=evaluator_image,
+            preserve_on_failure=sys.exc_info()[0] is not None,
+            failure_stage=stage["value"] if sys.exc_info()[0] is not None else None,
+        )
+    if not _cleanup_complete(case_dir):
+        raise IsolationError("reference: cleanup did not complete")
+    return result
+
+
+def _run_case_with_capture(
+    *,
+    name: str,
+    function: Any,
+    candidate_mode: str,
+    attempt_completion: str,
+    evaluator_image: str,
+    fixture_image: str,
+    candidate_image: str,
+    contract: Path,
+    output: Path,
+) -> dict[str, Any]:
+    global _cleanup
+
+    original_cleanup = _cleanup
+    captured: dict[str, Any] = {}
+
+    def capture_cleanup(
+        runtime: Runtime,
+        output: Path,
+        *,
+        fixture_image: str,
+        evaluator_image: str,
+        preserve_on_failure: bool,
+        failure_stage: str | None,
+    ) -> None:
+        run_captured = _capture_saved_run(runtime, output)
+        captured.update(_runtime_capture(runtime, run_captured=run_captured))
+        original_cleanup(
+            runtime,
+            output,
+            fixture_image=fixture_image,
+            evaluator_image=evaluator_image,
+            preserve_on_failure=preserve_on_failure,
+            failure_stage=failure_stage,
+        )
+
+    _cleanup = capture_cleanup
+    try:
+        result = function(
+            evaluator_image=evaluator_image,
+            fixture_image=fixture_image,
+            candidate_image=candidate_image,
+            contract=contract,
+            output=output,
+        )
+    finally:
+        _cleanup = original_cleanup
+
+    if not captured:
+        raise IsolationError(f"{name}: runtime capture did not execute")
+    if name in {"startup", "interprobe", "delayed"} and not captured["run_captured"]:
+        raise IsolationError(f"{name}: trusted saved run was not captured")
+    case_dir = output / name
+    if not _cleanup_complete(case_dir):
+        raise IsolationError(f"{name}: cleanup did not complete")
+
+    result["candidate_mode"] = candidate_mode
+    result["attempt_completion"] = attempt_completion
+    result["gate_capture"] = captured
+    _write(case_dir / "case-result.json", result)
+    return result
+
+
+def _gate_case(
+    *,
+    name: str,
+    expected_outcome: str,
+    expected_mode: str,
+    case_result: dict[str, Any],
+    gate_image: str,
+    policy_path: Path,
+    evidence_root: Path,
+    authority_volume: str,
+    results_volume: str,
+    approval_digest: str,
+) -> str:
+    capture = case_result.get("gate_capture")
+    if not isinstance(capture, dict):
+        raise IsolationError(f"{name}: gate capture metadata missing")
+    attempt_id = capture.get("attempt_id")
+    if not isinstance(attempt_id, str) or not attempt_id:
+        raise IsolationError(f"{name}: gate attempt_id missing")
+
+    result = _gate_run(
+        gate_image=gate_image,
+        policy=policy_path,
+        evidence_root=evidence_root,
+        authority_volume=authority_volume,
+        results_volume=results_volume,
+        arguments=[
+            "evaluate",
+            "--policy",
+            "/selected/policy-profile.json",
+            "--approval",
+            "/authority/approval-bundle.json",
+            "--selected-approval-digest",
+            approval_digest,
+            "--reference-dir",
+            "/evidence/evidence/reference/run",
+            "--reference-context",
+            "/evidence/evidence/reference/execution-context.json",
+            "--reference-final",
+            "/evidence/evidence/reference/final-snapshot.json",
+            "--candidate-dir",
+            f"/evidence/evidence/{name}/run",
+            "--candidate-context",
+            f"/evidence/evidence/{name}/execution-context.json",
+            "--candidate-final",
+            f"/evidence/evidence/{name}/final-snapshot.json",
+            "--expected-attempt-id",
+            attempt_id,
+            "--expected-candidate-image",
+            str(case_result["candidate_image"]),
+            "--expected-candidate-mode",
+            expected_mode,
+            "--selected-gate-image",
+            gate_image,
+            "--result-root",
+            "/results",
+            "--result-id",
+            f"adversarial-{name}",
+        ],
+    )
+    outcome = _read_gate_json(result, "outcome")
+    if outcome != expected_outcome:
+        raise IsolationError(f"{name}: expected actual gate {expected_outcome}, got {outcome}")
+    return outcome
+
+
+def _validate_published_results(output: Path, expected: dict[str, str]) -> dict[str, Any]:
+    completed = output / "results" / "completed"
+    actual_dirs = sorted(path.name for path in completed.iterdir() if path.is_dir())
+    wanted_dirs = sorted(f"adversarial-{name}" for name in expected)
+    if actual_dirs != wanted_dirs:
+        raise IsolationError(
+            f"published result set mismatch: actual={actual_dirs!r} expected={wanted_dirs!r}"
+        )
+
+    validation: dict[str, Any] = {}
+    for name, expected_outcome in expected.items():
+        bundle = completed / f"adversarial-{name}"
+        decision_path = bundle / "decision.json"
+        manifest_path = bundle / "manifest.json"
+        if not decision_path.is_file() or not manifest_path.is_file():
+            raise IsolationError(f"{name}: committed result bundle is incomplete")
+        decision = json.loads(decision_path.read_text(encoding="utf-8"))
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if decision.get("assessed_outcome") != expected_outcome:
+            raise IsolationError(
+                f"{name}: committed decision mismatch: {decision.get('assessed_outcome')!r}"
+            )
+        if decision.get("authority_binding") != "valid":
+            raise IsolationError(f"{name}: authority binding is not valid")
+        if decision.get("subject_binding") != "valid":
+            raise IsolationError(f"{name}: subject binding is not valid")
+        if decision.get("assessed_outcome") == "PASS":
+            raise IsolationError(f"{name}: adversarial case committed stale PASS")
+
+        if expected_outcome == "BLOCK" and not (bundle / "final-snapshot.json").is_file():
+            raise IsolationError(f"{name}: BLOCK bundle lost final snapshot")
+        if name in {"crash", "recovery"} and (bundle / "final-snapshot.json").exists():
+            raise IsolationError(f"{name}: failure case fabricated a complete final snapshot")
+
+        files = manifest.get("files")
+        if not isinstance(files, dict):
+            raise IsolationError(f"{name}: result manifest file map missing")
+        for filename, expected_hash in files.items():
+            path = bundle / filename
+            if not path.is_file():
+                raise IsolationError(f"{name}: manifest file missing: {filename}")
+            if _sha(path) != expected_hash:
+                raise IsolationError(f"{name}: manifest hash mismatch: {filename}")
+
+        source_validation = decision.get("source_validation")
+        if not isinstance(source_validation, dict):
+            raise IsolationError(f"{name}: per-source validation status missing")
+        if expected_outcome == "BLOCK":
+            violations = decision.get("confirmed_violations")
+            if not isinstance(violations, list) or not violations:
+                raise IsolationError(f"{name}: BLOCK has no confirmed violation")
+        else:
+            if decision.get("evidence_completeness") != "invalid":
+                raise IsolationError(f"{name}: INVALID lacks incomplete/invalid evidence status")
+
+        validation[name] = {
+            "outcome": decision.get("assessed_outcome"),
+            "authority_binding": decision.get("authority_binding"),
+            "subject_binding": decision.get("subject_binding"),
+            "evidence_completeness": decision.get("evidence_completeness"),
+            "confirmed_violation_count": len(decision.get("confirmed_violations") or []),
+            "source_validation": source_validation,
+        }
+    return validation
+
+
+def _copy_gate_volume_best_effort(
+    *,
+    gate_image: str,
+    volume: str,
+    mount: str,
+    destination: Path,
+) -> str | None:
+    try:
+        _copy_volume(gate_image, volume, mount, destination)
+    except Exception as exc:
+        return f"{type(exc).__name__}: {exc}"
+    return None
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--runtime-profile", type=Path, required=True)
+    parser.add_argument("--fixture-profile", type=Path, required=True)
     parser.add_argument("--evaluator-image", required=True)
     parser.add_argument("--fixture-image", required=True)
     parser.add_argument("--candidate-image", required=True)
     parser.add_argument("--contract", type=Path, required=True)
+    parser.add_argument("--gate-dir", type=Path, required=True)
+    parser.add_argument("--gate-image", required=True)
+    parser.add_argument("--guard-wheel-sha", required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 
     args.output.mkdir(parents=True, exist_ok=True)
-    results: dict[str, Any] = {}
-    functions = (
-        ("startup", _case_startup),
-        ("interprobe", _case_interprobe),
-        ("delayed", _case_delayed),
-        ("crash", _case_crash),
-        ("recovery", _case_recovery),
+    evidence = args.output / "evidence"
+    evidence.mkdir(parents=True, exist_ok=True)
+    policy_path = args.output / "policy-profile.json"
+    policy_digest = _make_policy(
+        output=policy_path,
+        contract=args.contract,
+        expected_checks=args.gate_dir / "expected-checks.json",
+        rules=args.gate_dir / "gate-rules.json",
+        gate_source=args.gate_dir / "gate.py",
+        orchestrator=Path(__file__).resolve(),
+        runtime_profile=args.runtime_profile,
+        fixture_profile=args.fixture_profile,
+        evaluator_image=args.evaluator_image,
+        fixture_image=args.fixture_image,
+        gate_image=args.gate_image,
+        guard_wheel_sha=args.guard_wheel_sha,
     )
-    for name, function in functions:
-        results[name] = function(
-            evaluator_image=args.evaluator_image,
-            fixture_image=args.fixture_image,
-            candidate_image=args.candidate_image,
-            contract=args.contract,
-            output=args.output,
+
+    reference = _run_reference(
+        evaluator_image=args.evaluator_image,
+        fixture_image=args.fixture_image,
+        candidate_image=args.candidate_image,
+        contract=args.contract,
+        output=evidence,
+    )
+    reference_capture = reference["gate_capture"]
+    _write_gate_context(
+        case_dir=evidence / "reference",
+        metadata=reference_capture,
+        candidate_mode="good",
+        attempt_completion="finalized",
+        evaluator_image=args.evaluator_image,
+        fixture_image=args.fixture_image,
+        candidate_image=args.candidate_image,
+        gate_image=args.gate_image,
+        policy_digest=policy_digest,
+        guard_exit_code=int(reference["guard_exit_code"]),
+    )
+
+    authority_volume = f"p2r3-authority-{uuid.uuid4().hex[:10]}"
+    results_volume = f"p2r3-results-{uuid.uuid4().hex[:10]}"
+    _run("docker", "volume", "create", authority_volume)
+    _run("docker", "volume", "create", results_volume)
+    _init_gate_volume(args.gate_image, authority_volume, "/authority")
+    _init_gate_volume(args.gate_image, results_volume, "/results")
+
+    gate_volume_errors: list[str] = []
+    try:
+        promoted = _gate_run(
+            gate_image=args.gate_image,
+            policy=policy_path,
+            evidence_root=args.output,
+            authority_volume=authority_volume,
+            results_volume=None,
+            arguments=[
+                "promote",
+                "--policy",
+                "/selected/policy-profile.json",
+                "--reference-dir",
+                "/evidence/evidence/reference/run",
+                "--reference-context",
+                "/evidence/evidence/reference/execution-context.json",
+                "--reference-final",
+                "/evidence/evidence/reference/final-snapshot.json",
+                "--output",
+                "/authority/approval-bundle.json",
+                "--selected-gate-image",
+                args.gate_image,
+            ],
+        )
+        approval_digest = _read_gate_json(promoted, "approval_bundle_digest")
+
+        cases: dict[str, dict[str, Any]] = {}
+        specs = (
+            ("startup", _case_startup, "startup-write", "finalized", "BLOCK"),
+            ("interprobe", _case_interprobe, "interprobe-write", "finalized", "BLOCK"),
+            ("delayed", _case_delayed, "delayed-write", "finalized", "BLOCK"),
+            ("crash", _case_crash, "crash", "candidate_crash_incomplete", "INVALID"),
+            ("recovery", _case_recovery, "good", "recovery_aborted", "INVALID"),
+        )
+        actual_outcomes: dict[str, str] = {}
+        for name, function, mode, completion, expected_outcome in specs:
+            result = _run_case_with_capture(
+                name=name,
+                function=function,
+                candidate_mode=mode,
+                attempt_completion=completion,
+                evaluator_image=args.evaluator_image,
+                fixture_image=args.fixture_image,
+                candidate_image=args.candidate_image,
+                contract=args.contract,
+                output=evidence,
+            )
+            result["candidate_image"] = args.candidate_image
+            _write(evidence / name / "case-result.json", result)
+            guard_exit = result.get("guard_exit_code")
+            guard_exit_value = int(guard_exit) if isinstance(guard_exit, int) else None
+            _write_gate_context(
+                case_dir=evidence / name,
+                metadata=result["gate_capture"],
+                candidate_mode=mode,
+                attempt_completion=completion,
+                evaluator_image=args.evaluator_image,
+                fixture_image=args.fixture_image,
+                candidate_image=args.candidate_image,
+                gate_image=args.gate_image,
+                policy_digest=policy_digest,
+                guard_exit_code=guard_exit_value,
+            )
+            outcome = _gate_case(
+                name=name,
+                expected_outcome=expected_outcome,
+                expected_mode=mode,
+                case_result=result,
+                gate_image=args.gate_image,
+                policy_path=policy_path,
+                evidence_root=args.output,
+                authority_volume=authority_volume,
+                results_volume=results_volume,
+                approval_digest=approval_digest,
+            )
+            result["actual_gate_outcome"] = outcome
+            _write(evidence / name / "case-result.json", result)
+            cases[name] = result
+            actual_outcomes[name] = outcome
+
+        _copy_volume(
+            args.gate_image,
+            authority_volume,
+            "/authority",
+            args.output / "authority",
+        )
+        _copy_volume(
+            args.gate_image,
+            results_volume,
+            "/results",
+            args.output / "results",
         )
 
-    summary = {
-        "schema_version": 1,
-        "scope": "phase2b5_adversarial_closure_only",
-        "images": {
-            "evaluator": args.evaluator_image,
-            "fixture": args.fixture_image,
-            "candidate": args.candidate_image,
-        },
-        "cases": results,
-        "gate_invoked": False,
-        "note": (
-            "2B.4 gate precedence is reused; 2B.5 adds adversarial whole-attempt/recovery evidence."
-        ),
-    }
-    (args.output / "adversarial-summary.json").write_text(
-        json.dumps(summary, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    print(json.dumps(summary, indent=2, sort_keys=True))
+        expected_outcomes = {
+            "startup": "BLOCK",
+            "interprobe": "BLOCK",
+            "delayed": "BLOCK",
+            "crash": "INVALID",
+            "recovery": "INVALID",
+        }
+        published_validation = _validate_published_results(args.output, expected_outcomes)
+        summary = {
+            "schema_version": 2,
+            "scope": "phase2c_r3_adversarial_gate_bridge_local_arm64",
+            "images": {
+                "evaluator": args.evaluator_image,
+                "fixture": args.fixture_image,
+                "candidate": args.candidate_image,
+                "gate": args.gate_image,
+            },
+            "policy_profile_digest": policy_digest,
+            "approval_bundle_digest": approval_digest,
+            "reference_attempt_id": reference_capture["attempt_id"],
+            "cases": cases,
+            "actual_outcomes": actual_outcomes,
+            "published_validation": published_validation,
+            "gate_invoked": True,
+            "note": (
+                "Selected Phase 2B.5 lifecycle cases were composed with the corrected "
+                "trusted gate and committed result publication. Crash/recovery failure "
+                "contexts remain intentionally incomplete and never fabricate final evidence."
+            ),
+        }
+        _write(args.output / "adversarial-summary.json", summary)
+        print(json.dumps(summary, indent=2, sort_keys=True))
+    finally:
+        for volume, mount, destination in (
+            (authority_volume, "/authority", args.output / "authority-final"),
+            (results_volume, "/results", args.output / "results-final"),
+        ):
+            error = _copy_gate_volume_best_effort(
+                gate_image=args.gate_image,
+                volume=volume,
+                mount=mount,
+                destination=destination,
+            )
+            if error is not None:
+                gate_volume_errors.append(f"{volume}: evidence copy: {error}")
+            removed = _run("docker", "volume", "rm", volume, check=False)
+            if removed.returncode != 0:
+                gate_volume_errors.append(f"{volume}: remove: {removed.stderr.strip()}")
+
+        _write(
+            args.output / "gate-resource-ledger.json",
+            {
+                "authority_volume": authority_volume,
+                "results_volume": results_volume,
+                "cleanup_errors": gate_volume_errors,
+                "cleanup_complete": not gate_volume_errors,
+            },
+        )
+        if gate_volume_errors and sys.exc_info()[0] is None:
+            raise IsolationError(f"gate resource cleanup failed: {gate_volume_errors}")
 
 
 if __name__ == "__main__":
