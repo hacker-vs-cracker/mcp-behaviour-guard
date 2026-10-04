@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from failure_evidence import cleanup_resources
 from run_isolation_check import (
     IsolationError,
     _assert_security,
@@ -64,6 +65,20 @@ def _control(
     if not isinstance(value, dict):
         raise IsolationError(f"control response for {path} was not an object")
     return value
+
+
+def _best_effort_fence_attempt(evaluator: str, attempt_id: str) -> None:
+    snapshot = _control(evaluator, "GET", f"/attempts/{attempt_id}")
+    attempt = snapshot.get("attempt")
+    if not isinstance(attempt, dict):
+        raise IsolationError("failure fence could not read trusted attempt state")
+    state = str(attempt.get("state") or "")
+    if state == "OPEN":
+        _control(evaluator, "POST", f"/attempts/{attempt_id}/close")
+        return
+    if state in {"PREPARED", "FENCED", "FINALIZED", "ABORTED", "RECOVERY_REQUIRED"}:
+        return
+    raise IsolationError(f"failure fence observed unexpected attempt state: {state!r}")
 
 
 def _find_run_dir(evaluator: str) -> str:
@@ -194,7 +209,6 @@ def _run_attempt(
     created_containers: list[str] = []
     created_networks: list[str] = []
     created_volumes: list[str] = []
-    cleanup_errors: list[str] = []
     evaluator_control_connected = True
     attempt_dir = evidence_root / label
     attempt_dir.mkdir(parents=True, exist_ok=True)
@@ -203,6 +217,11 @@ def _run_attempt(
     token = ""
     finalized = False
     guard_exit = -1
+    failure_stage = "runtime_setup"
+    primary_error: BaseException | None = None
+    primary_tb = None
+    cleanup_result = None
+    context: dict[str, Any] | None = None
     physical = {
         "candidate_container": candidate,
         "fixture_app_container": app,
@@ -212,6 +231,20 @@ def _run_attempt(
         "evaluator_candidate_network": net_ec,
         "evaluator_control_network": net_ctrl,
     }
+
+    def failure_fence() -> None:
+        if not evaluator_control_connected and evaluator in created_containers:
+            _run(
+                "docker",
+                "network",
+                "connect",
+                "--alias",
+                "evaluator",
+                net_ctrl,
+                evaluator,
+                check=False,
+            )
+        _best_effort_fence_attempt(evaluator, attempt_id)
 
     try:
         for network in (net_ca, net_ec, net_ctrl):
@@ -363,6 +396,7 @@ def _run_attempt(
             _run("docker", "network", "disconnect", net_ctrl, evaluator)
             evaluator_control_connected = False
 
+        failure_stage = "guard_execution"
         guard = _run(
             "docker",
             "exec",
@@ -394,6 +428,7 @@ def _run_attempt(
                 "import urllib.request; urllib.request.urlopen('http://fixture-control:9000/health', timeout=1).read()",
             )
 
+        failure_stage = "attempt_close"
         _control(evaluator, "POST", f"/attempts/{attempt_id}/close")
         if inject_rejected_after_close:
             rejected_code = r"""
@@ -439,98 +474,118 @@ else:
                 raise IsolationError(
                     "post-fence candidate write did not produce expected rejection"
                 )
-        _run("docker", "stop", "-t", "2", candidate)
+
+        _run("docker", "stop", "-t", "2", candidate, check=False)
+
+        failure_stage = "final_snapshot_export"
         final_snapshot = _control(evaluator, "POST", f"/attempts/{attempt_id}/final-snapshot")
         _write(attempt_dir / "final-snapshot.json", final_snapshot)
 
+        failure_stage = "saved_run_copy"
         remote_run = _find_run_dir(evaluator)
         local_run = attempt_dir / "run"
         _run("docker", "cp", f"{evaluator}:{remote_run}/.", str(local_run))
 
+        failure_stage = "finalization"
         finalized_response = _control(evaluator, "POST", f"/attempts/{attempt_id}/finalize")
         finalized = finalized_response.get("state") == "FINALIZED"
         _write(attempt_dir / "finalize-response.json", finalized_response)
-    finally:
-        if not evaluator_control_connected and evaluator in created_containers:
-            _run(
-                "docker",
-                "network",
-                "connect",
-                "--alias",
-                "evaluator",
-                net_ctrl,
-                evaluator,
-                check=False,
-            )
-        for resource in reversed(created_containers):
-            result = _run("docker", "rm", "-f", resource, check=False)
-            if result.returncode != 0:
-                cleanup_errors.append(f"container {resource}: {result.stderr.strip()}")
-        for resource in reversed(created_networks):
-            result = _run("docker", "network", "rm", resource, check=False)
-            if result.returncode != 0:
-                cleanup_errors.append(f"network {resource}: {result.stderr.strip()}")
-        for resource in reversed(created_volumes):
-            result = _run("docker", "volume", "rm", resource, check=False)
-            if result.returncode != 0:
-                cleanup_errors.append(f"volume {resource}: {result.stderr.strip()}")
 
-        for resource in created_containers:
-            if _run("docker", "container", "inspect", resource, check=False).returncode == 0:
-                cleanup_errors.append(f"container {resource}: still present")
-        for resource in created_networks:
-            if _run("docker", "network", "inspect", resource, check=False).returncode == 0:
-                cleanup_errors.append(f"network {resource}: still present")
-        for resource in created_volumes:
-            if _run("docker", "volume", "inspect", resource, check=False).returncode == 0:
-                cleanup_errors.append(f"volume {resource}: still present")
-        _write(
-            attempt_dir / "cleanup.json",
-            {"cleanup_complete": not cleanup_errors, "cleanup_errors": cleanup_errors},
+        failure_stage = "context_assembly"
+        run_dir = attempt_dir / "run"
+        report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
+        receipt = json.loads((run_dir / "receipt.json").read_text(encoding="utf-8"))
+        inventory = run_dir / "tool-inventory.json"
+        if not inventory.is_file():
+            raise IsolationError(f"{label}: tool-inventory.json missing")
+        if not attempt_id or not token or not finalized:
+            raise IsolationError(f"{label}: attempt did not reach trusted finalized state")
+
+        context = {
+            "schema_version": 1,
+            "policy_profile_digest": policy_digest,
+            "attempt_id": attempt_id,
+            "guard_run_id": report.get("run_id"),
+            "candidate_image": candidate_image,
+            "candidate_mode": mode,
+            "orchestrator_sha256": _sha(Path(__file__).resolve()),
+            "evaluator_image": evaluator_image,
+            "fixture_image": fixture_image,
+            "gate_image": gate_image,
+            "credential_principal": "candidate_app",
+            "credential_token_sha256": hashlib.sha256(token.encode("utf-8")).hexdigest(),
+            "logical_candidate_origin": "http://candidate:7000",
+            "logical_control_origin": "http://fixture-control:9000",
+            "logical_fixture_app_origin": "http://fixture-app:8001",
+            "report_json_sha256": _sha(run_dir / "report.json"),
+            "receipt_json_sha256": _sha(run_dir / "receipt.json"),
+            "tool_inventory_sha256": _sha(inventory),
+            "final_snapshot_sha256": _sha(attempt_dir / "final-snapshot.json"),
+            "subject_binding": "valid",
+            "attempt_completion": "finalized",
+            "cleanup_complete": False,
+            "platform": "linux/arm64",
+            "started_at": started,
+            "finished_at": None,
+            "physical_runtime": physical,
+            "guard_exit_code": guard_exit,
+            "injected_rejected_after_close": inject_rejected_after_close,
+            "receipt_logical_target": receipt.get("context", {}).get("logical_target"),
+        }
+        _write(attempt_dir / "execution-context.json", context)
+        failure_stage = "cleanup"
+    except BaseException as exc:
+        primary_error = exc
+        primary_tb = exc.__traceback__
+
+    try:
+        cleanup_result = cleanup_resources(
+            run=_run,
+            evidence_dir=attempt_dir,
+            containers=created_containers,
+            networks=created_networks,
+            volumes=created_volumes,
+            state_volume=state_volume,
+            output_volume=output_volume,
+            fixture_image=fixture_image,
+            evaluator_image=evaluator_image,
+            preserve_on_failure=primary_error is not None,
+            failure_stage=failure_stage if primary_error is not None else None,
+            fence=failure_fence if primary_error is not None and attempt_id else None,
         )
+    except Exception as cleanup_exc:
+        _write(
+            attempt_dir / "cleanup-helper-error.json",
+            {
+                "failure_stage": failure_stage,
+                "cleanup_error_type": type(cleanup_exc).__name__,
+                "cleanup_error": str(cleanup_exc),
+                "primary_error_present": primary_error is not None,
+                "owned_resources": {
+                    "containers": list(created_containers),
+                    "networks": list(created_networks),
+                    "volumes": list(created_volumes),
+                },
+                "finish_only_recovery_required": True,
+                "committed_pass_permitted": False,
+            },
+        )
+        if primary_error is not None:
+            raise primary_error.with_traceback(primary_tb) from cleanup_exc
+        raise
 
-    if cleanup_errors:
-        raise IsolationError(f"{label}: cleanup failed: {cleanup_errors}")
-    run_dir = attempt_dir / "run"
-    report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
-    receipt = json.loads((run_dir / "receipt.json").read_text(encoding="utf-8"))
-    inventory = run_dir / "tool-inventory.json"
-    if not inventory.is_file():
-        raise IsolationError(f"{label}: tool-inventory.json missing")
-    if not attempt_id or not token or not finalized:
-        raise IsolationError(f"{label}: attempt did not reach trusted finalized state")
+    if primary_error is not None:
+        raise primary_error.with_traceback(primary_tb)
 
-    context = {
-        "schema_version": 1,
-        "policy_profile_digest": policy_digest,
-        "attempt_id": attempt_id,
-        "guard_run_id": report.get("run_id"),
-        "candidate_image": candidate_image,
-        "candidate_mode": mode,
-        "orchestrator_sha256": _sha(Path(__file__).resolve()),
-        "evaluator_image": evaluator_image,
-        "fixture_image": fixture_image,
-        "gate_image": gate_image,
-        "credential_principal": "candidate_app",
-        "credential_token_sha256": hashlib.sha256(token.encode("utf-8")).hexdigest(),
-        "logical_candidate_origin": "http://candidate:7000",
-        "logical_control_origin": "http://fixture-control:9000",
-        "logical_fixture_app_origin": "http://fixture-app:8001",
-        "report_json_sha256": _sha(run_dir / "report.json"),
-        "receipt_json_sha256": _sha(run_dir / "receipt.json"),
-        "tool_inventory_sha256": _sha(inventory),
-        "final_snapshot_sha256": _sha(attempt_dir / "final-snapshot.json"),
-        "subject_binding": "valid",
-        "attempt_completion": "finalized",
-        "cleanup_complete": True,
-        "platform": "linux/arm64",
-        "started_at": started,
-        "finished_at": datetime.now(UTC).isoformat(),
-        "physical_runtime": physical,
-        "guard_exit_code": guard_exit,
-        "injected_rejected_after_close": inject_rejected_after_close,
-        "receipt_logical_target": receipt.get("context", {}).get("logical_target"),
-    }
+    if cleanup_result is None or not cleanup_result.cleanup_complete:
+        raise IsolationError(
+            f"{label}: cleanup incomplete; finish-only recovery required: {cleanup_result!r}"
+        )
+    if context is None:
+        raise IsolationError(f"{label}: execution context was not assembled before cleanup")
+
+    context["cleanup_complete"] = True
+    context["finished_at"] = datetime.now(UTC).isoformat()
     _write(attempt_dir / "execution-context.json", context)
     return context
 

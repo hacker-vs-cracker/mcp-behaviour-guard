@@ -5,7 +5,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
@@ -228,26 +228,355 @@ def test_unexpected_and_conditional_findings_follow_frozen_gate_semantics() -> N
     assert any("conditional effect finding is incomplete" in item for item in assessment.invalid)
 
 
-def test_database_write_in_final_snapshot_is_always_a_confirmed_violation() -> None:
-    gate = _gate_module()
-    snapshot = {
-        "attempt_id": "attempt",
+def _valid_write_snapshot(
+    *,
+    attempt_id: str = "attempt",
+    audit_complete: bool = True,
+) -> dict[str, Any]:
+    return {
+        "attempt_id": attempt_id,
         "state": "FENCED",
-        "audit_complete": True,
+        "audit_complete": audit_complete,
         "final_watermark": 1,
-        "requests": [{"request_id": "write-1", "state": "COMMITTED"}],
+        "requests": [
+            {
+                "attempt_id": attempt_id,
+                "request_id": "write-1",
+                "operation": "record_write",
+                "state": "COMMITTED",
+            }
+        ],
         "audit": [
             {
                 "seq": 1,
+                "event_id": "event-1",
                 "kind": "database_write",
                 "request_id": "write-1",
+                "operation": "record_write",
+                "principal": "candidate_app",
             }
         ],
     }
-    violations, invalid, review = gate._validate_snapshot(snapshot, "attempt")
-    assert len(violations) == 1
-    assert invalid == []
-    assert review == []
+
+
+def _clean_snapshot(*, attempt_id: str = "attempt") -> dict[str, Any]:
+    return {
+        "attempt_id": attempt_id,
+        "state": "FENCED",
+        "audit_complete": True,
+        "final_watermark": 0,
+        "requests": [],
+        "audit": [],
+    }
+
+
+def test_database_write_requires_valid_snapshot_attribution() -> None:
+    gate = _gate_module()
+    assessment = gate._validate_snapshot(_valid_write_snapshot(), "attempt")
+    assert len(assessment.violations) == 1
+    assert assessment.attribution_invalid == ()
+    assert assessment.completion_invalid == ()
+    assert assessment.review == ()
+
+    assessment = gate._validate_snapshot(_valid_write_snapshot(attempt_id="other"), "attempt")
+    assert assessment.violations == ()
+    assert "final snapshot attempt_id mismatch" in assessment.attribution_invalid
+
+
+def test_snapshot_rejects_malformed_identity_and_bool_integer_fields() -> None:
+    gate = _gate_module()
+
+    unknown_state = _valid_write_snapshot()
+    unknown_state["requests"][0]["state"] = "BROKEN_STATE"
+    assessment = gate._validate_snapshot(unknown_state, "attempt")
+    assert assessment.violations == ()
+    assert any(
+        "request state is missing/invalid" in item for item in assessment.attribution_invalid
+    )
+
+    missing_state = _valid_write_snapshot()
+    del missing_state["requests"][0]["state"]
+    assessment = gate._validate_snapshot(missing_state, "attempt")
+    assert assessment.violations == ()
+    assert any(
+        "request state is missing/invalid" in item for item in assessment.attribution_invalid
+    )
+
+    bool_watermark = _clean_snapshot()
+    bool_watermark["final_watermark"] = True
+    assessment = gate._validate_snapshot(bool_watermark, "attempt")
+    assert assessment.violations == ()
+    assert "final audit watermark is not a non-negative integer" in assessment.attribution_invalid
+
+    bool_seq = _valid_write_snapshot()
+    bool_seq["audit"][0]["seq"] = True
+    assessment = gate._validate_snapshot(bool_seq, "attempt")
+    assert assessment.violations == ()
+    assert "audit event sequence is invalid" in assessment.attribution_invalid
+
+    duplicate = _valid_write_snapshot()
+    duplicate["final_watermark"] = 2
+    duplicate["audit"].append(
+        {
+            "seq": 2,
+            "event_id": "event-1",
+            "kind": "database_write",
+            "request_id": "write-2",
+            "operation": "record_write",
+            "principal": "candidate_app",
+        }
+    )
+    duplicate["requests"].append(
+        {
+            "attempt_id": "attempt",
+            "request_id": "write-2",
+            "operation": "record_write",
+            "state": "COMMITTED",
+        }
+    )
+    assessment = gate._validate_snapshot(duplicate, "attempt")
+    assert assessment.violations == ()
+    assert "duplicate audit event_id: event-1" in assessment.attribution_invalid
+
+    duplicate_request = _valid_write_snapshot()
+    duplicate_request["requests"].append(dict(duplicate_request["requests"][0]))
+    assessment = gate._validate_snapshot(duplicate_request, "attempt")
+    assert assessment.violations == ()
+    assert "duplicate request_id: write-1" in assessment.attribution_invalid
+
+
+def test_confirmed_write_survives_completion_failure() -> None:
+    gate = _gate_module()
+    assessment = gate._validate_snapshot(
+        _valid_write_snapshot(audit_complete=False),
+        "attempt",
+    )
+    assert len(assessment.violations) == 1
+    assert assessment.attribution_invalid == ()
+    assert "audit_complete is not true" in assessment.completion_invalid
+
+
+def test_rejected_request_is_review_not_committed_violation() -> None:
+    gate = _gate_module()
+    snapshot = _clean_snapshot()
+    snapshot["requests"] = [
+        {
+            "attempt_id": "attempt",
+            "request_id": "rejected-1",
+            "operation": "record_write",
+            "state": "REJECTED",
+        }
+    ]
+    assessment = gate._validate_snapshot(snapshot, "attempt")
+    assert assessment.violations == ()
+    assert assessment.attribution_invalid == ()
+    assert assessment.completion_invalid == ()
+    assert assessment.review == ("trusted fixture rejected request: rejected-1",)
+
+
+def _evaluate_case(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    snapshot: dict[str, Any],
+    report_mode: str = "valid",
+    report: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    gate = _gate_module()
+    candidate_dir = tmp_path / "candidate"
+    candidate_dir.mkdir()
+    final_path = tmp_path / "final.json"
+    final_path.write_text(json.dumps(snapshot), encoding="utf-8")
+
+    receipt_path = candidate_dir / "receipt.json"
+    inventory_path = candidate_dir / "tool-inventory.json"
+    receipt_path.write_text("{}\n", encoding="utf-8")
+    inventory_path.write_text("{}\n", encoding="utf-8")
+
+    report_path = candidate_dir / "report.json"
+    if report_mode == "valid":
+        report_path.write_text(json.dumps(report or _base_report()), encoding="utf-8")
+    elif report_mode == "malformed":
+        report_path.write_text("{not-json", encoding="utf-8")
+    elif report_mode != "missing":
+        raise AssertionError(f"unknown report_mode: {report_mode}")
+
+    policy = {
+        "platform": "linux/arm64",
+        "orchestrator_sha256": "orchestrator",
+        "images": {
+            "gate": "gate-image",
+            "evaluator": "evaluator-image",
+            "fixture": "fixture-image",
+        },
+    }
+    approval_path = tmp_path / "approval.json"
+    approval_path.write_text(
+        json.dumps(
+            {
+                "policy_profile_digest": "policy",
+                "reference": {
+                    "origin_attempt_id": "reference-attempt",
+                    "compatibility": {},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    context = {
+        "schema_version": 1,
+        "policy_profile_digest": "policy",
+        "platform": "linux/arm64",
+        "attempt_id": "attempt",
+        "candidate_image": "candidate-image",
+        "candidate_mode": "good",
+        "orchestrator_sha256": "orchestrator",
+        "subject_binding": "valid",
+        "gate_image": "gate-image",
+        "evaluator_image": "evaluator-image",
+        "fixture_image": "fixture-image",
+        "logical_candidate_origin": "http://candidate:7000",
+        "logical_control_origin": "http://fixture-control:9000",
+        "logical_fixture_app_origin": "http://fixture-app:8001",
+        "report_json_sha256": gate._sha(report_path) if report_path.exists() else "0" * 64,
+        "receipt_json_sha256": gate._sha(receipt_path),
+        "tool_inventory_sha256": gate._sha(inventory_path),
+        "final_snapshot_sha256": gate._sha(final_path),
+        "attempt_completion": "finalized",
+        "cleanup_complete": True,
+    }
+    context_path = tmp_path / "context.json"
+    context_path.write_text(json.dumps(context), encoding="utf-8")
+
+    comparator = {
+        "comparability": {"state": "comparable"},
+        "conformance": {"candidate": "pass"},
+        "regression": {"new_failures": [], "new_errors": []},
+        "coverage": {"regression": False},
+        "capabilities": {"review_required": False},
+    }
+    monkeypatch.setattr(gate, "_validate_policy", lambda *_args: (policy, "policy"))
+    monkeypatch.setattr(gate, "_verify_reference", lambda **_kwargs: [])
+    monkeypatch.setattr(gate, "_receipt_compatibility", lambda _path: {})
+    monkeypatch.setattr(gate, "compare_saved_runs", lambda *_args: comparator)
+
+    captured: dict[str, Any] = {}
+
+    def fake_publish(**kwargs: Any) -> Path:
+        captured["outcome"] = kwargs["outcome"]
+        captured["decision"] = kwargs["decision"]
+        return tmp_path / "published"
+
+    monkeypatch.setattr(gate, "_publish", fake_publish)
+    args = SimpleNamespace(
+        policy=str(tmp_path / "policy.json"),
+        approval=str(approval_path),
+        selected_approval_digest=gate._sha(approval_path),
+        reference_dir=str(tmp_path / "reference"),
+        reference_context=str(tmp_path / "reference-context.json"),
+        reference_final=str(tmp_path / "reference-final.json"),
+        candidate_dir=str(candidate_dir),
+        candidate_context=str(context_path),
+        candidate_final=str(final_path),
+        expected_attempt_id="attempt",
+        expected_candidate_image="candidate-image",
+        expected_candidate_mode="good",
+        selected_gate_image="gate-image",
+        result_root=str(tmp_path / "results"),
+        result_id="case",
+    )
+    assert gate._evaluate(args) == 0
+    return captured
+
+
+def test_gate_clean_valid_candidate_can_still_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _evaluate_case(tmp_path, monkeypatch, snapshot=_clean_snapshot())
+    assert result["outcome"] == "PASS"
+
+
+@pytest.mark.parametrize("report_mode", ["missing", "malformed"])
+def test_gate_preserves_snapshot_violation_when_report_is_unusable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    report_mode: str,
+) -> None:
+    result = _evaluate_case(
+        tmp_path,
+        monkeypatch,
+        snapshot=_valid_write_snapshot(),
+        report_mode=report_mode,
+    )
+    assert result["outcome"] == "BLOCK"
+    assert result["decision"]["confirmed_violations"]
+    assert any("guard_report" in item for item in result["decision"]["completion_errors"])
+
+
+def test_gate_clean_snapshot_with_missing_report_is_invalid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _evaluate_case(
+        tmp_path,
+        monkeypatch,
+        snapshot=_clean_snapshot(),
+        report_mode="missing",
+    )
+    assert result["outcome"] == "INVALID"
+
+
+def test_gate_preserves_guard_violation_when_snapshot_attribution_is_invalid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    report = _base_report()
+    report["findings"][0]["status"] = "failed"
+    result = _evaluate_case(
+        tmp_path,
+        monkeypatch,
+        snapshot=_valid_write_snapshot(attempt_id="other-attempt"),
+        report=report,
+    )
+    assert result["outcome"] == "BLOCK"
+    assert any(
+        item.get("source") == "guard"
+        for item in result["decision"]["confirmed_violations"]
+        if isinstance(item, dict)
+    )
+    assert (
+        result["decision"]["source_validation"]["final_snapshot"]["validation"]
+        == "invalid_attribution"
+    )
+
+
+def test_gate_write_plus_incomplete_audit_is_block_with_completion_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _evaluate_case(
+        tmp_path,
+        monkeypatch,
+        snapshot=_valid_write_snapshot(audit_complete=False),
+    )
+    assert result["outcome"] == "BLOCK"
+    assert any(
+        "audit_complete is not true" in item for item in result["decision"]["completion_errors"]
+    )
+
+
+def test_gate_rejected_only_candidate_is_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snapshot = _clean_snapshot()
+    snapshot["requests"] = [
+        {
+            "attempt_id": "attempt",
+            "request_id": "rejected-1",
+            "operation": "record_write",
+            "state": "REJECTED",
+        }
+    ]
+    result = _evaluate_case(tmp_path, monkeypatch, snapshot=snapshot)
+    assert result["outcome"] == "REVIEW"
 
 
 def test_controller_crash_before_atomic_rename_never_creates_completed_pass(
@@ -292,3 +621,40 @@ def test_candidate_and_runner_expose_only_bounded_adversarial_controls() -> None
     assert "gate_invoked" in runner
     assert "git push" not in runner
     assert "gh api" not in runner
+
+
+def test_adversarial_runner_commits_real_gate_outcomes_for_selected_cases() -> None:
+    runner = RUNNER_PATH.read_text(encoding="utf-8")
+
+    assert '"gate_invoked": True' in runner
+    assert "_gate_run(" in runner
+    assert "approval-bundle.json" in runner
+    assert "actual_gate_outcome" in runner
+    assert "source_validation" in runner
+    assert "gate-resource-ledger.json" in runner
+    assert "phase2c_r3_adversarial_gate_bridge_local_arm64" in runner
+
+    expected_pairs = {
+        "startup": "BLOCK",
+        "interprobe": "BLOCK",
+        "delayed": "BLOCK",
+        "crash": "INVALID",
+        "recovery": "INVALID",
+    }
+    for case, outcome in expected_pairs.items():
+        assert f'"{case}": "{outcome}"' in runner
+
+    crash_start = runner.index("def _case_crash(")
+    recovery_start = runner.index("def _case_recovery(")
+    crash_source = runner[crash_start:recovery_start]
+    assert "_finalize(" not in crash_source
+    assert "preserve_on_failure=True" in crash_source
+    assert 'failure_stage="candidate_crash"' in crash_source
+
+    assert "recovery-required-state.json" in runner
+    assert "recovery-aborted-state.json" in runner
+    assert "recovery-new-attempt-final-snapshot.json" in runner
+
+    assert '"expected_gate_effect": "BLOCK"' in runner
+    assert '"expected_gate_effect": "INVALID"' in runner
+    assert '"gate_invoked": False' not in runner
