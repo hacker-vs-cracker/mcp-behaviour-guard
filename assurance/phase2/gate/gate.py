@@ -19,6 +19,10 @@ RULES_PATH = HERE / "gate-rules.json"
 GATE_PATH = HERE / "gate.py"
 
 OUTCOMES = {"PASS", "BLOCK", "REVIEW", "INVALID"}
+POLICY_SCOPE_BY_PLATFORM = {
+    "linux/arm64": "phase2b4_local_synthetic_gate_only",
+    "linux/amd64": "phase2c_trusted_ci_gate_only",
+}
 
 
 class GateError(RuntimeError):
@@ -101,8 +105,12 @@ def _validate_policy(policy_path: Path, selected_gate_image: str) -> tuple[dict[
     if policy.get("schema_version") != 1:
         raise GateError("policy profile schema_version must be 1")
     digest = _sha(policy_path)
-    if policy.get("platform") != "linux/arm64":
-        raise GateError("policy platform must be linux/arm64")
+    platform = policy.get("platform")
+    if not isinstance(platform, str) or platform not in POLICY_SCOPE_BY_PLATFORM:
+        raise GateError("policy platform is unsupported")
+    expected_scope = POLICY_SCOPE_BY_PLATFORM[platform]
+    if policy.get("decision_scope") != expected_scope:
+        raise GateError("policy decision scope does not match selected platform")
     images = policy.get("images")
     if not isinstance(images, dict):
         raise GateError("policy images mapping missing")
@@ -968,7 +976,7 @@ def _evaluate(args: argparse.Namespace) -> int:
         "freshness_basis": (
             "trusted current-attempt execution context; comparator freshness remains explicit unknown"
         ),
-        "scope": "phase2b4_local_synthetic_gate_only",
+        "scope": policy.get("decision_scope") or "unavailable",
     }
     published = _publish(
         result_root=result_root,

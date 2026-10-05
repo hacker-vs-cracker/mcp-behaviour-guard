@@ -22,6 +22,7 @@ from run_approval_demo import (
     _make_policy,
     _prepare_gate_volumes,
     _read_gate_json,
+    _selected_platform_scope,
     _sha,
     _write,
 )
@@ -1008,6 +1009,7 @@ def _write_gate_context(
     candidate_image: str,
     gate_image: str,
     policy_digest: str,
+    platform: str,
     guard_exit_code: int | None,
 ) -> dict[str, Any]:
     run_dir = case_dir / "run"
@@ -1056,7 +1058,7 @@ def _write_gate_context(
         "subject_binding": "valid",
         "attempt_completion": attempt_completion,
         "cleanup_complete": _cleanup_complete(case_dir),
-        "platform": "linux/arm64",
+        "platform": platform,
         "physical_runtime": metadata["physical_runtime"],
         "guard_exit_code": guard_exit_code,
         "receipt_logical_target": receipt_context.get("logical_target"),
@@ -1320,6 +1322,8 @@ def main() -> None:
     args.output.mkdir(parents=True, exist_ok=True)
     evidence = args.output / "evidence"
     evidence.mkdir(parents=True, exist_ok=True)
+    runtime = json.loads(args.runtime_profile.read_text(encoding="utf-8"))
+    platform, decision_scope = _selected_platform_scope(runtime)
     policy_path = args.output / "policy-profile.json"
     policy_digest = _make_policy(
         output=policy_path,
@@ -1330,6 +1334,8 @@ def main() -> None:
         orchestrator=Path(__file__).resolve(),
         runtime_profile=args.runtime_profile,
         fixture_profile=args.fixture_profile,
+        platform=platform,
+        decision_scope=decision_scope,
         evaluator_image=args.evaluator_image,
         fixture_image=args.fixture_image,
         gate_image=args.gate_image,
@@ -1354,6 +1360,7 @@ def main() -> None:
         candidate_image=args.candidate_image,
         gate_image=args.gate_image,
         policy_digest=policy_digest,
+        platform=platform,
         guard_exit_code=int(reference["guard_exit_code"]),
     )
 
@@ -1425,6 +1432,7 @@ def main() -> None:
                 candidate_image=args.candidate_image,
                 gate_image=args.gate_image,
                 policy_digest=policy_digest,
+                platform=platform,
                 guard_exit_code=guard_exit_value,
             )
             outcome = _gate_case(
@@ -1467,7 +1475,13 @@ def main() -> None:
         published_validation = _validate_published_results(args.output, expected_outcomes)
         summary = {
             "schema_version": 2,
-            "scope": "phase2c_r3_adversarial_gate_bridge_local_arm64",
+            "scope": (
+                "phase2c_r3_adversarial_gate_bridge_local_arm64"
+                if platform == "linux/arm64"
+                else "phase2c_trusted_ci_adversarial_gate_amd64"
+            ),
+            "decision_scope": decision_scope,
+            "platform": platform,
             "images": {
                 "evaluator": args.evaluator_image,
                 "fixture": args.fixture_image,
@@ -1488,7 +1502,12 @@ def main() -> None:
             ),
         }
         _write(args.output / "adversarial-summary.json", summary)
-        print(json.dumps(summary, indent=2, sort_keys=True))
+        print(
+            json.dumps(
+                {"status": "complete", "summary_file": "adversarial-summary.json"},
+                sort_keys=True,
+            )
+        )
     finally:
         active_error = sys.exc_info()[1]
         gate_cleanup = _cleanup_gate_volumes(

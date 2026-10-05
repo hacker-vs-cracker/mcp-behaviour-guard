@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "profile_id": "phase2c-ci-amd64-v1",
+  "status": "P1B_SPEC_FROZEN",
+  "platform": "linux/amd64",
+  "decision_scope": "phase2c_trusted_ci_gate_only",
+  "runtime_execution_enabled": false,
+  "promotion_enabled": false,
+  "evaluator_build_context": {
+    "dockerfile_source": "assurance/phase2/evaluator/Dockerfile",
+    "dockerfile_output_name": "Dockerfile",
+    "dependency_lock_source": "assurance/phase2/ci/evaluator-requirements-amd64.lock",
+    "dependency_lock_sha256": "a18436b0d48f7eacf5b8f4142685a12b11eed3105039e4d3a0eab2b42a3ec22b",
+    "dependency_lock_output_name": "requirements.lock",
+    "named_wheelhouse_context": "wheelhouse",
+    "live_dependency_resolution_fallback": false,
+    "required_pip_flags": [
+      "--no-index",
+      "--find-links=/wheelhouse",
+      "--only-binary=:all:",
+      "--require-hashes"
+    ]
+  },
+  "historical_evidence": {
+    "arm64_runtime_profile": "assurance/phase2/runtime-profile.json",
+    "arm64_runtime_profile_sha256": "1d5ed99b583ad85a1465a7fa8a84a2bb41515410371a94870a18a8066e03933e",
+    "arm64_dependency_lock": "assurance/phase2/evaluator/requirements.lock",
+    "arm64_dependency_lock_sha256": "7f135a827bad87dc89e5a359824d0abe727f376f213865330b4da8c14cead267",
+    "arm64_lock_reuse_allowed": false,
+    "arm64_decision_scope": "phase2b4_local_synthetic_gate_only"
+  },
+  "base_image": {
+    "reference": "python:3.11.14-slim",
+    "platform": "linux/amd64",
+    "immutable_platform_manifest_required_before_build": true,
+    "moving_tag_execution_allowed": false,
+    "characterized_platform_manifest_digest": "sha256:fa7a862d74b4decf68fb7d3a85147efc14dbcd3779c0abd56c071d27a1ffee04",
+    "runtime_profile_binding_status": "UNPROMOTED_UNTIL_P2_P3_EVIDENCE"
+  },
+  "wheelhouse": {
+    "manifest_schema_version": 1,
+    "platform": "linux/amd64",
+    "exact_file_set_required": true,
+    "hash_each_wheel": true,
+    "manifest_required_before_build": true,
+    "live_download_fallback": false,
+    "status": "UNSTAGED"
+  },
+  "image_distribution": {
+    "registry": "ghcr.io",
+    "namespace": "hacker-vs-cracker",
+    "repository_prefix": "mcp-behaviour-guard-phase2-",
+    "execution_reference_requires_digest": true,
+    "moving_tag_fallback_allowed": false,
+    "package_visibility": "UNRESOLVED_BEFORE_P2",
+    "retained_oci_layout_role": "secondary_evidence_and_recovery_only",
+    "publication_credentials_available_to_candidate_execution": false,
+    "decision_status": "P1B_LEADING_OPTION_NOT_FROZEN",
+    "leading_option": "ghcr_immutable_digest",
+    "alternatives_reviewed": [
+      "ghcr_immutable_digest",
+      "retained_oci_layout"
+    ],
+    "retrieval_credentials_available_to_candidate_execution": false,
+    "trusted_controller_pull_auth": "UNRESOLVED_WITH_PACKAGE_VISIBILITY_BEFORE_P2",
+    "digest_retrievable_through_promoted_authority_lifetime": true,
+    "retained_oci_layout_recovery_requires_digest_match": true
+  },
+  "p2_entry_requirements": [
+    "sealed wheelhouse manifest with exact wheel hashes",
+    "immutable linux/amd64 base platform manifest",
+    "freeze durable image-distribution choice from evaluated options",
+    "resolved image identities",
+    "native AMD64 runtime/isolation proof"
+  ]
+}
