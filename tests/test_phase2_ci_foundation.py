@@ -166,11 +166,19 @@ def test_amd64_evaluator_lock_is_separate_exact_and_bound() -> None:
 
     boundary = json.loads(BOUNDARY.read_text(encoding="utf-8"))
     assert boundary["evaluator_lock"] == expected_binding
-    assert boundary["trusted_inputs"].count("assurance/phase2/evaluator/requirements.lock") == 1
+    assert boundary["retained_historical_evidence"] == [
+        "assurance/phase2/runtime-profile.json",
+        "assurance/phase2/evaluator/requirements.lock",
+    ]
+    assert "assurance/phase2/evaluator/requirements.lock" not in boundary["consumed_trusted_inputs"]
     assert (
-        boundary["trusted_inputs"].count("assurance/phase2/ci/evaluator-requirements-amd64.lock")
+        boundary["consumed_trusted_inputs"].count(
+            "assurance/phase2/ci/evaluator-requirements-amd64.lock"
+        )
         == 1
     )
+    assert "assurance/phase2/ci/build-adapter.json" in boundary["consumed_trusted_inputs"]
+    assert "assurance/phase2/ci/build_adapter.py" in boundary["consumed_trusted_inputs"]
 
     profile = json.loads(PROFILE.read_text(encoding="utf-8"))
     assert profile["status"] == "UNPROMOTED"

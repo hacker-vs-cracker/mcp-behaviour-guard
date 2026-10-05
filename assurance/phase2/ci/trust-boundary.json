@@ -76,21 +76,6 @@
   },
   "schema_version": 1,
   "status": "DESIGN_FROZEN",
-  "trusted_inputs": [
-    "assurance/phase2/evaluator/Dockerfile",
-    "assurance/phase2/evaluator/requirements.lock",
-    "assurance/phase2/ci/evaluator-requirements-amd64.lock",
-    "assurance/phase2/fixture/Dockerfile",
-    "assurance/phase2/fixture/store.py",
-    "assurance/phase2/fixture/app_service.py",
-    "assurance/phase2/fixture/control_service.py",
-    "assurance/phase2/gate/Dockerfile",
-    "assurance/phase2/gate/gate.py",
-    "assurance/phase2/gate/gate-rules.json",
-    "assurance/phase2/gate/expected-checks.json",
-    "assurance/phase2/vertical/Dockerfile",
-    "assurance/phase2/vertical/contract.yaml"
-  ],
   "verdict": {
     "bind_base_sha": true,
     "bind_head_sha": true,
@@ -105,5 +90,42 @@
       "REVIEW",
       "INVALID"
     ]
-  }
+  },
+  "runtime_adapter": {
+    "profile_id": "phase2c-ci-amd64-v1",
+    "spec_path": "assurance/phase2/ci/build-adapter.json",
+    "platform": "linux/amd64",
+    "decision_scope": "phase2c_trusted_ci_gate_only",
+    "status": "P1B_SPEC_FROZEN",
+    "runtime_execution_enabled": false,
+    "promotion_enabled": false
+  },
+  "consumed_trusted_inputs": [
+    "assurance/phase2/ci/trust-boundary.json",
+    "assurance/phase2/ci/runtime-profile-template.json",
+    "assurance/phase2/ci/build-adapter.json",
+    "assurance/phase2/ci/build_adapter.py",
+    "assurance/phase2/ci/evaluator-requirements-amd64.lock",
+    "assurance/phase2/ci/extract_candidate_context.py",
+    "assurance/phase2/evaluator/Dockerfile",
+    "assurance/phase2/fixture/Dockerfile",
+    "assurance/phase2/fixture/store.py",
+    "assurance/phase2/fixture/app_service.py",
+    "assurance/phase2/fixture/control_service.py",
+    "assurance/phase2/fixture-profile.json",
+    "assurance/phase2/gate/Dockerfile",
+    "assurance/phase2/gate/gate.py",
+    "assurance/phase2/gate/gate-rules.json",
+    "assurance/phase2/gate/expected-checks.json",
+    "assurance/phase2/run_approval_demo.py",
+    "assurance/phase2/run_adversarial_closure.py",
+    "assurance/phase2/run_isolation_check.py",
+    "assurance/phase2/failure_evidence.py",
+    "assurance/phase2/vertical/Dockerfile",
+    "assurance/phase2/vertical/contract.yaml"
+  ],
+  "retained_historical_evidence": [
+    "assurance/phase2/runtime-profile.json",
+    "assurance/phase2/evaluator/requirements.lock"
+  ]
 }

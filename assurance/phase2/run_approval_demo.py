@@ -45,6 +45,26 @@ def _write(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+HISTORICAL_PLATFORM = "linux/arm64"
+HISTORICAL_DECISION_SCOPE = "phase2b4_local_synthetic_gate_only"
+TRUSTED_CI_PLATFORM = "linux/amd64"
+TRUSTED_CI_DECISION_SCOPE = "phase2c_trusted_ci_gate_only"
+
+
+def _selected_platform_scope(runtime: dict[str, Any]) -> tuple[str, str]:
+    platform = runtime.get("platform")
+    if platform == HISTORICAL_PLATFORM:
+        return HISTORICAL_PLATFORM, HISTORICAL_DECISION_SCOPE
+    if platform == TRUSTED_CI_PLATFORM:
+        scope = runtime.get("decision_scope")
+        if scope != TRUSTED_CI_DECISION_SCOPE:
+            raise IsolationError(
+                "linux/amd64 runtime profile must select phase2c_trusted_ci_gate_only"
+            )
+        return TRUSTED_CI_PLATFORM, TRUSTED_CI_DECISION_SCOPE
+    raise IsolationError(f"unsupported runtime platform: {platform!r}")
+
+
 def _control(
     evaluator: str,
     method: str,
@@ -452,6 +472,7 @@ def _run_attempt(
     candidate_image: str,
     gate_image: str,
     policy_digest: str,
+    platform: str,
     contract: Path,
     evidence_root: Path,
 ) -> dict[str, Any]:
@@ -776,7 +797,7 @@ else:
             "subject_binding": "valid",
             "attempt_completion": "finalized",
             "cleanup_complete": False,
-            "platform": "linux/arm64",
+            "platform": platform,
             "started_at": started,
             "finished_at": None,
             "physical_runtime": physical,
@@ -852,6 +873,8 @@ def _make_policy(
     orchestrator: Path,
     runtime_profile: Path,
     fixture_profile: Path,
+    platform: str,
+    decision_scope: str,
     evaluator_image: str,
     fixture_image: str,
     gate_image: str,
@@ -859,7 +882,8 @@ def _make_policy(
 ) -> str:
     profile = {
         "schema_version": 1,
-        "platform": "linux/arm64",
+        "platform": platform,
+        "decision_scope": decision_scope,
         "contract_sha256": _sha(contract),
         "expected_checks_sha256": _sha(expected_checks),
         "gate_rules_sha256": _sha(rules),
@@ -914,6 +938,10 @@ def main() -> None:
     evidence = args.output / "evidence"
     evidence.mkdir(parents=True, exist_ok=True)
     policy_path = args.output / "policy-profile.json"
+    runtime = json.loads(args.runtime_profile.read_text(encoding="utf-8"))
+    platform, decision_scope = _selected_platform_scope(runtime)
+    evaluator_image = str(runtime["images"]["evaluator"]["oci_index_digest"])
+    fixture_image = str(runtime["images"]["fixture"]["oci_index_digest"])
     policy_digest = _make_policy(
         output=policy_path,
         contract=args.contract,
@@ -923,18 +951,13 @@ def main() -> None:
         orchestrator=Path(__file__).resolve(),
         runtime_profile=args.runtime_profile,
         fixture_profile=args.fixture_profile,
-        evaluator_image=json.loads(args.runtime_profile.read_text(encoding="utf-8"))["images"][
-            "evaluator"
-        ]["oci_index_digest"],
-        fixture_image=json.loads(args.runtime_profile.read_text(encoding="utf-8"))["images"][
-            "fixture"
-        ]["oci_index_digest"],
+        platform=platform,
+        decision_scope=decision_scope,
+        evaluator_image=evaluator_image,
+        fixture_image=fixture_image,
         gate_image=args.gate_image,
         guard_wheel_sha=args.guard_wheel_sha,
     )
-    runtime = json.loads(args.runtime_profile.read_text(encoding="utf-8"))
-    evaluator_image = str(runtime["images"]["evaluator"]["oci_index_digest"])
-    fixture_image = str(runtime["images"]["fixture"]["oci_index_digest"])
 
     reference = _run_attempt(
         label="reference",
@@ -946,6 +969,7 @@ def main() -> None:
         candidate_image=args.candidate_image,
         gate_image=args.gate_image,
         policy_digest=policy_digest,
+        platform=platform,
         contract=args.contract,
         evidence_root=evidence,
     )
@@ -1022,6 +1046,7 @@ def main() -> None:
                 candidate_image=args.candidate_image,
                 gate_image=args.gate_image,
                 policy_digest=policy_digest,
+                platform=platform,
                 contract=args.contract,
                 evidence_root=evidence,
             )
