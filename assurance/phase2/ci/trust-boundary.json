@@ -126,7 +126,10 @@
     ".github/workflows/phase2-native-amd64-proof.yml",
     "assurance/phase2/ci/p2_native_proof.py",
     "assurance/phase2/candidate-probe/Dockerfile",
-    "assurance/phase2/candidate-probe/probe.py"
+    "assurance/phase2/candidate-probe/probe.py",
+    ".github/workflows/phase2-p3-reference-candidate.yml",
+    "assurance/phase2/ci/p3-runtime-candidate.json",
+    "assurance/phase2/ci/p3_reference_candidate.py"
   ],
   "retained_historical_evidence": [
     "assurance/phase2/runtime-profile.json",
@@ -145,5 +148,23 @@
     "candidate_receives_registry_credentials": false,
     "reference_promotion_enabled": false,
     "publisher_bootstrap_enabled": false
+  },
+  "p3_reference_candidate": {
+    "stage": "REFERENCE_CONSTRUCTION_ONLY",
+    "workflow_path": ".github/workflows/phase2-p3-reference-candidate.yml",
+    "trigger": "workflow_dispatch",
+    "runner": "ubuntu-24.04",
+    "platform": "linux/amd64",
+    "packages_permission": "read",
+    "accepted_p2_run_id": 37284672075,
+    "accepted_p2_source_commit": "f21f4ef7afc5704eee36df888d7d7fc98e9677b9",
+    "accepted_p2_source_tree": "644285bab85478ef44d609f2f278fee4f335f572",
+    "promotion_enabled": false,
+    "publisher_bootstrap_enabled": false,
+    "ruleset_mutation_enabled": false,
+    "requires_distinct_reference_attempt": true,
+    "requires_actual_gate_pass": true,
+    "requires_whole_attempt_audit": true,
+    "requires_fence_drain_finalize": true
   }
 }

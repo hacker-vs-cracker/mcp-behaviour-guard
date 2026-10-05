@@ -65,6 +65,19 @@ def _selected_platform_scope(runtime: dict[str, Any]) -> tuple[str, str]:
     raise IsolationError(f"unsupported runtime platform: {platform!r}")
 
 
+def _image_ref(images: dict[str, Any], key: str) -> str:
+    identity = images.get(key)
+    if not isinstance(identity, dict):
+        raise IsolationError(f"missing image identity: {key}")
+    execution_ref = identity.get("execution_ref")
+    if isinstance(execution_ref, str) and execution_ref:
+        return execution_ref
+    legacy = identity.get("oci_index_digest")
+    if isinstance(legacy, str) and legacy:
+        return legacy
+    raise IsolationError(f"image identity has no executable reference: {key}")
+
+
 def _control(
     evaluator: str,
     method: str,
@@ -940,8 +953,17 @@ def main() -> None:
     policy_path = args.output / "policy-profile.json"
     runtime = json.loads(args.runtime_profile.read_text(encoding="utf-8"))
     platform, decision_scope = _selected_platform_scope(runtime)
-    evaluator_image = str(runtime["images"]["evaluator"]["oci_index_digest"])
-    fixture_image = str(runtime["images"]["fixture"]["oci_index_digest"])
+    images = runtime.get("images")
+    if not isinstance(images, dict):
+        raise IsolationError("runtime profile images mapping missing")
+    evaluator_image = _image_ref(images, "evaluator")
+    fixture_image = _image_ref(images, "fixture")
+    expected_gate_image = _image_ref(images, "gate")
+    expected_candidate_image = _image_ref(images, "vertical_candidate")
+    if args.gate_image != expected_gate_image:
+        raise IsolationError("selected gate image differs from runtime profile")
+    if args.candidate_image != expected_candidate_image:
+        raise IsolationError("selected candidate image differs from runtime profile")
     policy_digest = _make_policy(
         output=policy_path,
         contract=args.contract,
@@ -1226,9 +1248,17 @@ def main() -> None:
         _copy_volume(args.gate_image, authority_volume, "/authority", args.output / "authority")
         _copy_volume(args.gate_image, results_volume, "/results", args.output / "results")
 
+        approval_scope = (
+            "phase2c_reference_candidate_only"
+            if platform == TRUSTED_CI_PLATFORM
+            else "phase2b4_reference_gate_local_only"
+        )
         summary = {
             "schema_version": 1,
-            "scope": "phase2b4_reference_gate_local_only",
+            "scope": approval_scope,
+            "platform": platform,
+            "decision_scope": decision_scope,
+            "runtime_profile_sha256": _sha(args.runtime_profile),
             "policy_profile_digest": policy_digest,
             "approval_bundle_digest": approval_digest,
             "reference_attempt_id": reference["attempt_id"],
