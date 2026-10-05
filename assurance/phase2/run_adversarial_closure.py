@@ -8,16 +8,19 @@ import subprocess
 import sys
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from failure_evidence import cleanup_resources
 from run_approval_demo import (
+    _cleanup_gate_volumes,
     _copy_volume,
     _gate_run,
-    _init_gate_volume,
+    _gate_volume_plans,
     _make_policy,
+    _prepare_gate_volumes,
     _read_gate_json,
     _sha,
     _write,
@@ -76,6 +79,9 @@ class Runtime:
     containers: list[str]
     networks: list[str]
     volumes: list[str]
+
+
+CleanupCapture = Callable[[Runtime, Path], None]
 
 
 def _control(
@@ -150,6 +156,7 @@ def _start_runtime(
     fixture_image: str,
     candidate_image: str,
     contract: Path,
+    output: Path,
 ) -> Runtime:
     suffix = uuid.uuid4().hex[:10]
     runtime = Runtime(
@@ -164,165 +171,179 @@ def _start_runtime(
         evaluator=f"p2b5-evaluator-{label}-{suffix}",
         candidate=f"p2b5-candidate-{label}-{suffix}",
         attempt_id=f"{label}-{suffix}",
-        cleanup_attempt_id=f"{label}-{suffix}",
+        cleanup_attempt_id="",
         token="",
         containers=[],
         networks=[],
         volumes=[],
     )
+    runtime.networks = [runtime.net_ca, runtime.net_ec, runtime.net_ctrl]
+    runtime.volumes = [runtime.state_volume, runtime.output_volume]
+    runtime.containers = [runtime.app, runtime.control, runtime.evaluator, runtime.candidate]
     common = _resource_args()
 
-    for network in (runtime.net_ca, runtime.net_ec, runtime.net_ctrl):
+    try:
+        for network in (runtime.net_ca, runtime.net_ec, runtime.net_ctrl):
+            _run(
+                "docker",
+                "network",
+                "create",
+                "--internal",
+                "--opt",
+                "com.docker.network.bridge.gateway_mode_ipv4=isolated",
+                network,
+            )
+        for volume in (runtime.state_volume, runtime.output_volume):
+            _run("docker", "volume", "create", volume)
+
+        _run(
+            "docker",
+            "run",
+            "-d",
+            "--name",
+            runtime.app,
+            "--network",
+            runtime.net_ca,
+            "--network-alias",
+            "fixture-app",
+            *common,
+            "-v",
+            f"{runtime.state_volume}:/state",
+            fixture_image,
+            "python",
+            "app_service.py",
+            "--db",
+            "/state/fixture.db",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "8001",
+        )
+
+        _run(
+            "docker",
+            "run",
+            "-d",
+            "--name",
+            runtime.control,
+            "--network",
+            runtime.net_ctrl,
+            "--network-alias",
+            "fixture-control",
+            *common,
+            "-v",
+            f"{runtime.state_volume}:/state",
+            fixture_image,
+            "python",
+            "control_service.py",
+            "--db",
+            "/state/fixture.db",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "9000",
+        )
+
+        _run(
+            "docker",
+            "run",
+            "-d",
+            "--name",
+            runtime.evaluator,
+            "--network",
+            runtime.net_ec,
+            "--network-alias",
+            "evaluator",
+            *common,
+            "-v",
+            f"{runtime.output_volume}:/trusted-output",
+            "-v",
+            f"{contract.resolve()}:/trusted-contract/contract.yaml:ro",
+            "--entrypoint",
+            "python",
+            evaluator_image,
+            "-c",
+            "import time; time.sleep(300)",
+        )
         _run(
             "docker",
             "network",
-            "create",
-            "--internal",
-            "--opt",
-            "com.docker.network.bridge.gateway_mode_ipv4=isolated",
-            network,
+            "connect",
+            "--alias",
+            "evaluator",
+            runtime.net_ctrl,
+            runtime.evaluator,
         )
-        runtime.networks.append(network)
-    for volume in (runtime.state_volume, runtime.output_volume):
-        _run("docker", "volume", "create", volume)
-        runtime.volumes.append(volume)
+        _wait_exec(
+            runtime.evaluator,
+            "import urllib.request; urllib.request.urlopen('http://fixture-control:9000/health', timeout=1).read()",
+        )
+        _wait_exec(
+            runtime.app,
+            "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=1).read()",
+        )
 
-    _run(
-        "docker",
-        "run",
-        "-d",
-        "--name",
-        runtime.app,
-        "--network",
-        runtime.net_ca,
-        "--network-alias",
-        "fixture-app",
-        *common,
-        "-v",
-        f"{runtime.state_volume}:/state",
-        fixture_image,
-        "python",
-        "app_service.py",
-        "--db",
-        "/state/fixture.db",
-        "--host",
-        "0.0.0.0",
-        "--port",
-        "8001",
-    )
-    runtime.containers.append(runtime.app)
+        runtime.cleanup_attempt_id = runtime.attempt_id
+        created = _control(runtime, "POST", "/attempts", {"attempt_id": runtime.attempt_id})
+        runtime.token = str(created.get("token") or "")
+        if not runtime.token:
+            raise IsolationError(f"{label}: no attempt credential")
+        _control(runtime, "POST", f"/attempts/{runtime.attempt_id}/open")
 
-    _run(
-        "docker",
-        "run",
-        "-d",
-        "--name",
-        runtime.control,
-        "--network",
-        runtime.net_ctrl,
-        "--network-alias",
-        "fixture-control",
-        *common,
-        "-v",
-        f"{runtime.state_volume}:/state",
-        fixture_image,
-        "python",
-        "control_service.py",
-        "--db",
-        "/state/fixture.db",
-        "--host",
-        "0.0.0.0",
-        "--port",
-        "9000",
-    )
-    runtime.containers.append(runtime.control)
+        _run(
+            "docker",
+            "run",
+            "-d",
+            "--name",
+            runtime.candidate,
+            "--network",
+            runtime.net_ca,
+            "--network-alias",
+            "candidate",
+            *common,
+            "-e",
+            f"PHASE2_CANDIDATE_MODE={mode}",
+            "-e",
+            f"PHASE2_ATTEMPT_TOKEN={runtime.token}",
+            "-e",
+            "PHASE2_REVIEWER_TOKEN=synthetic-phase2-reviewer-token",
+            "-e",
+            "PHASE2_FIXTURE_APP=http://fixture-app:8001",
+            candidate_image,
+        )
+        _run(
+            "docker",
+            "network",
+            "connect",
+            "--alias",
+            "candidate",
+            runtime.net_ec,
+            runtime.candidate,
+        )
 
-    _run(
-        "docker",
-        "run",
-        "-d",
-        "--name",
-        runtime.evaluator,
-        "--network",
-        runtime.net_ec,
-        "--network-alias",
-        "evaluator",
-        *common,
-        "-v",
-        f"{runtime.output_volume}:/trusted-output",
-        "-v",
-        f"{contract.resolve()}:/trusted-contract/contract.yaml:ro",
-        "--entrypoint",
-        "python",
-        evaluator_image,
-        "-c",
-        "import time; time.sleep(300)",
-    )
-    runtime.containers.append(runtime.evaluator)
-    _run(
-        "docker",
-        "network",
-        "connect",
-        "--alias",
-        "evaluator",
-        runtime.net_ctrl,
-        runtime.evaluator,
-    )
-    _wait_exec(
-        runtime.evaluator,
-        "import urllib.request; urllib.request.urlopen('http://fixture-control:9000/health', timeout=1).read()",
-    )
-    _wait_exec(
-        runtime.app,
-        "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=1).read()",
-    )
+        _wait_exec(
+            runtime.evaluator,
+            "import urllib.request; urllib.request.urlopen('http://candidate:7000/healthz', timeout=1).read()",
+        )
+        _wait_exec(
+            runtime.evaluator,
+            "import urllib.request; urllib.request.urlopen('http://fixture-control:9000/health', timeout=1).read()",
+        )
+    except BaseException as exc:
+        primary_tb = exc.__traceback__
+        try:
+            _cleanup(
+                runtime,
+                output / label,
+                fixture_image=fixture_image,
+                evaluator_image=evaluator_image,
+                preserve_on_failure=True,
+                failure_stage="runtime_setup",
+            )
+        except BaseException as cleanup_exc:
+            raise exc.with_traceback(primary_tb) from cleanup_exc
+        raise
 
-    created = _control(runtime, "POST", "/attempts", {"attempt_id": runtime.attempt_id})
-    runtime.token = str(created.get("token") or "")
-    if not runtime.token:
-        raise IsolationError(f"{label}: no attempt credential")
-    _control(runtime, "POST", f"/attempts/{runtime.attempt_id}/open")
-
-    _run(
-        "docker",
-        "run",
-        "-d",
-        "--name",
-        runtime.candidate,
-        "--network",
-        runtime.net_ca,
-        "--network-alias",
-        "candidate",
-        *common,
-        "-e",
-        f"PHASE2_CANDIDATE_MODE={mode}",
-        "-e",
-        f"PHASE2_ATTEMPT_TOKEN={runtime.token}",
-        "-e",
-        "PHASE2_REVIEWER_TOKEN=synthetic-phase2-reviewer-token",
-        "-e",
-        "PHASE2_FIXTURE_APP=http://fixture-app:8001",
-        candidate_image,
-    )
-    runtime.containers.append(runtime.candidate)
-    _run(
-        "docker",
-        "network",
-        "connect",
-        "--alias",
-        "candidate",
-        runtime.net_ec,
-        runtime.candidate,
-    )
-
-    _wait_exec(
-        runtime.evaluator,
-        "import urllib.request; urllib.request.urlopen('http://candidate:7000/healthz', timeout=1).read()",
-    )
-    _wait_exec(
-        runtime.evaluator,
-        "import urllib.request; urllib.request.urlopen('http://fixture-control:9000/health', timeout=1).read()",
-    )
     return runtime
 
 
@@ -334,7 +355,37 @@ def _cleanup(
     evaluator_image: str,
     preserve_on_failure: bool,
     failure_stage: str | None,
+    before_cleanup_capture: CleanupCapture | None = None,
 ) -> None:
+    had_primary_error = preserve_on_failure and failure_stage is not None
+    capture_error: BaseException | None = None
+    capture_tb = None
+    if before_cleanup_capture is not None:
+        try:
+            before_cleanup_capture(runtime, output)
+        except BaseException as exc:
+            capture_error = exc
+            capture_tb = exc.__traceback__
+            preserve_on_failure = True
+            if failure_stage is None:
+                failure_stage = "capture_export"
+            output.mkdir(parents=True, exist_ok=True)
+            (output / "capture-error.json").write_text(
+                json.dumps(
+                    {
+                        "failure_stage": failure_stage,
+                        "capture_error_type": type(exc).__name__,
+                        "capture_error": "optional capture failed; raw error text omitted",
+                        "finish_only_recovery_required": True,
+                        "committed_pass_permitted": False,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
     try:
         result = cleanup_resources(
             run=_run,
@@ -373,6 +424,8 @@ def _cleanup(
             + "\n",
             encoding="utf-8",
         )
+        if capture_error is not None and not had_primary_error:
+            raise capture_error.with_traceback(capture_tb) from exc
         if preserve_on_failure:
             return
         raise
@@ -381,6 +434,8 @@ def _cleanup(
         raise IsolationError(
             f"{runtime.label}: cleanup incomplete; finish-only recovery required: {result!r}"
         )
+    if capture_error is not None and not had_primary_error:
+        raise capture_error.with_traceback(capture_tb)
 
 
 def _guard_command(runtime: Runtime) -> list[str]:
@@ -483,6 +538,7 @@ def _case_startup(
     candidate_image: str,
     contract: Path,
     output: Path,
+    before_cleanup_capture: CleanupCapture | None = None,
 ) -> dict[str, Any]:
     runtime = _start_runtime(
         label="startup",
@@ -491,6 +547,7 @@ def _case_startup(
         fixture_image=fixture_image,
         candidate_image=candidate_image,
         contract=contract,
+        output=output,
     )
     case_dir = output / "startup"
     stage = {"value": "case_execution"}
@@ -514,6 +571,7 @@ def _case_startup(
             evaluator_image=evaluator_image,
             preserve_on_failure=sys.exc_info()[0] is not None,
             failure_stage=(stage["value"] if sys.exc_info()[0] is not None else None),
+            before_cleanup_capture=before_cleanup_capture,
         )
 
 
@@ -524,6 +582,7 @@ def _case_interprobe(
     candidate_image: str,
     contract: Path,
     output: Path,
+    before_cleanup_capture: CleanupCapture | None = None,
 ) -> dict[str, Any]:
     runtime = _start_runtime(
         label="interprobe",
@@ -532,6 +591,7 @@ def _case_interprobe(
         fixture_image=fixture_image,
         candidate_image=candidate_image,
         contract=contract,
+        output=output,
     )
     case_dir = output / "interprobe"
     stage = {"value": "case_execution"}
@@ -602,6 +662,7 @@ def _case_interprobe(
             evaluator_image=evaluator_image,
             preserve_on_failure=preserve_on_failure,
             failure_stage=cleanup_failure_stage,
+            before_cleanup_capture=before_cleanup_capture,
         )
         if active_error is None and process_cleanup_error is not None:
             raise process_cleanup_error
@@ -614,6 +675,7 @@ def _case_delayed(
     candidate_image: str,
     contract: Path,
     output: Path,
+    before_cleanup_capture: CleanupCapture | None = None,
 ) -> dict[str, Any]:
     runtime = _start_runtime(
         label="delayed",
@@ -622,6 +684,7 @@ def _case_delayed(
         fixture_image=fixture_image,
         candidate_image=candidate_image,
         contract=contract,
+        output=output,
     )
     case_dir = output / "delayed"
     stage = {"value": "case_execution"}
@@ -656,6 +719,7 @@ def _case_delayed(
             evaluator_image=evaluator_image,
             preserve_on_failure=sys.exc_info()[0] is not None,
             failure_stage=(stage["value"] if sys.exc_info()[0] is not None else None),
+            before_cleanup_capture=before_cleanup_capture,
         )
 
 
@@ -666,6 +730,7 @@ def _case_crash(
     candidate_image: str,
     contract: Path,
     output: Path,
+    before_cleanup_capture: CleanupCapture | None = None,
 ) -> dict[str, Any]:
     runtime = _start_runtime(
         label="crash",
@@ -674,6 +739,7 @@ def _case_crash(
         fixture_image=fixture_image,
         candidate_image=candidate_image,
         contract=contract,
+        output=output,
     )
     case_dir = output / "crash"
     try:
@@ -694,6 +760,7 @@ def _case_crash(
             evaluator_image=evaluator_image,
             preserve_on_failure=True,
             failure_stage="candidate_crash",
+            before_cleanup_capture=before_cleanup_capture,
         )
 
 
@@ -704,6 +771,7 @@ def _case_recovery(
     candidate_image: str,
     contract: Path,
     output: Path,
+    before_cleanup_capture: CleanupCapture | None = None,
 ) -> dict[str, Any]:
     runtime = _start_runtime(
         label="recovery",
@@ -712,6 +780,7 @@ def _case_recovery(
         fixture_image=fixture_image,
         candidate_image=candidate_image,
         contract=contract,
+        output=output,
     )
     case_dir = output / "recovery"
     stage = {"value": "case_execution"}
@@ -720,9 +789,6 @@ def _case_recovery(
         old_token = runtime.token
         _run("docker", "rm", "-f", runtime.app)
         _run("docker", "rm", "-f", runtime.control)
-        runtime.containers = [
-            item for item in runtime.containers if item not in {runtime.app, runtime.control}
-        ]
 
         common = _resource_args()
         _run(
@@ -748,7 +814,6 @@ def _case_recovery(
             "--port",
             "8001",
         )
-        runtime.containers.append(runtime.app)
         _run(
             "docker",
             "run",
@@ -772,7 +837,6 @@ def _case_recovery(
             "--port",
             "9000",
         )
-        runtime.containers.append(runtime.control)
         _wait_exec(
             runtime.evaluator,
             "import urllib.request; urllib.request.urlopen('http://fixture-control:9000/health', timeout=1).read()",
@@ -872,6 +936,7 @@ def _case_recovery(
             evaluator_image=evaluator_image,
             preserve_on_failure=sys.exc_info()[0] is not None,
             failure_stage=(stage["value"] if sys.exc_info()[0] is not None else None),
+            before_cleanup_capture=before_cleanup_capture,
         )
 
 
@@ -1015,6 +1080,7 @@ def _run_reference(
         fixture_image=fixture_image,
         candidate_image=candidate_image,
         contract=contract,
+        output=output,
     )
     case_dir = output / "reference"
     stage = {"value": "case_execution"}
@@ -1061,42 +1127,20 @@ def _run_case_with_capture(
     contract: Path,
     output: Path,
 ) -> dict[str, Any]:
-    global _cleanup
-
-    original_cleanup = _cleanup
     captured: dict[str, Any] = {}
 
-    def capture_cleanup(
-        runtime: Runtime,
-        output: Path,
-        *,
-        fixture_image: str,
-        evaluator_image: str,
-        preserve_on_failure: bool,
-        failure_stage: str | None,
-    ) -> None:
-        run_captured = _capture_saved_run(runtime, output)
+    def capture(runtime: Runtime, case_dir: Path) -> None:
+        run_captured = _capture_saved_run(runtime, case_dir)
         captured.update(_runtime_capture(runtime, run_captured=run_captured))
-        original_cleanup(
-            runtime,
-            output,
-            fixture_image=fixture_image,
-            evaluator_image=evaluator_image,
-            preserve_on_failure=preserve_on_failure,
-            failure_stage=failure_stage,
-        )
 
-    _cleanup = capture_cleanup
-    try:
-        result = function(
-            evaluator_image=evaluator_image,
-            fixture_image=fixture_image,
-            candidate_image=candidate_image,
-            contract=contract,
-            output=output,
-        )
-    finally:
-        _cleanup = original_cleanup
+    result = function(
+        evaluator_image=evaluator_image,
+        fixture_image=fixture_image,
+        candidate_image=candidate_image,
+        contract=contract,
+        output=output,
+        before_cleanup_capture=capture,
+    )
 
     if not captured:
         raise IsolationError(f"{name}: runtime capture did not execute")
@@ -1315,13 +1359,13 @@ def main() -> None:
 
     authority_volume = f"p2r3-authority-{uuid.uuid4().hex[:10]}"
     results_volume = f"p2r3-results-{uuid.uuid4().hex[:10]}"
-    _run("docker", "volume", "create", authority_volume)
-    _run("docker", "volume", "create", results_volume)
-    _init_gate_volume(args.gate_image, authority_volume, "/authority")
-    _init_gate_volume(args.gate_image, results_volume, "/results")
-
-    gate_volume_errors: list[str] = []
+    gate_plans = _gate_volume_plans(
+        authority_volume=authority_volume,
+        results_volume=results_volume,
+        output=args.output,
+    )
     try:
+        _prepare_gate_volumes(args.gate_image, gate_plans)
         promoted = _gate_run(
             gate_image=args.gate_image,
             policy=policy_path,
@@ -1446,33 +1490,16 @@ def main() -> None:
         _write(args.output / "adversarial-summary.json", summary)
         print(json.dumps(summary, indent=2, sort_keys=True))
     finally:
-        for volume, mount, destination in (
-            (authority_volume, "/authority", args.output / "authority-final"),
-            (results_volume, "/results", args.output / "results-final"),
-        ):
-            error = _copy_gate_volume_best_effort(
-                gate_image=args.gate_image,
-                volume=volume,
-                mount=mount,
-                destination=destination,
-            )
-            if error is not None:
-                gate_volume_errors.append(f"{volume}: evidence copy: {error}")
-            removed = _run("docker", "volume", "rm", volume, check=False)
-            if removed.returncode != 0:
-                gate_volume_errors.append(f"{volume}: remove: {removed.stderr.strip()}")
-
-        _write(
-            args.output / "gate-resource-ledger.json",
-            {
-                "authority_volume": authority_volume,
-                "results_volume": results_volume,
-                "cleanup_errors": gate_volume_errors,
-                "cleanup_complete": not gate_volume_errors,
-            },
+        active_error = sys.exc_info()[1]
+        gate_cleanup = _cleanup_gate_volumes(
+            gate_image=args.gate_image,
+            plans=gate_plans,
+            output=args.output,
         )
-        if gate_volume_errors and sys.exc_info()[0] is None:
-            raise IsolationError(f"gate resource cleanup failed: {gate_volume_errors}")
+        if active_error is None and not gate_cleanup["cleanup_complete"]:
+            raise IsolationError(
+                f"gate resource cleanup incomplete; finish-only recovery required: {gate_cleanup!r}"
+            )
 
 
 if __name__ == "__main__":

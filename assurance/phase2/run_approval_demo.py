@@ -3,12 +3,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import sys
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from failure_evidence import cleanup_resources
+from failure_evidence import cleanup_resources, resource_presence
 from run_isolation_check import (
     IsolationError,
     _assert_security,
@@ -90,24 +91,282 @@ def _find_run_dir(evaluator: str) -> str:
     return _run("docker", "exec", evaluator, "python", "-c", code).stdout.strip()
 
 
+def _safe_presence(kind: str, name: str) -> tuple[str, str | None]:
+    try:
+        return resource_presence(_run, kind, name)
+    except Exception as exc:
+        return "UNKNOWN", f"{type(exc).__name__}: {exc}"
+
+
 def _copy_volume(image: str, volume: str, source: str, destination: Path) -> None:
     destination.mkdir(parents=True, exist_ok=True)
     name = f"p2b4-copy-{uuid.uuid4().hex[:10]}"
-    _run(
-        "docker",
-        "create",
-        "--name",
-        name,
-        "-v",
-        f"{volume}:{source}:ro",
-        "--entrypoint",
-        "/bin/true",
-        image,
-    )
+    primary_error: BaseException | None = None
+    primary_tb = None
+    cleanup_error: str | None = None
     try:
+        _run(
+            "docker",
+            "create",
+            "--name",
+            name,
+            "-v",
+            f"{volume}:{source}:ro",
+            "--entrypoint",
+            "/bin/true",
+            image,
+        )
         _run("docker", "cp", f"{name}:{source}/.", str(destination))
+    except BaseException as exc:
+        primary_error = exc
+        primary_tb = exc.__traceback__
     finally:
-        _run("docker", "rm", "-f", name, check=False)
+        try:
+            _run("docker", "rm", "-f", name, check=False)
+        except Exception as exc:
+            cleanup_error = f"temporary copy container removal failed: {type(exc).__name__}: {exc}"
+        presence, presence_error = _safe_presence("container", name)
+        if presence != "ABSENT":
+            cleanup_error = cleanup_error or (
+                presence_error
+                or f"temporary copy container {name} presence after cleanup is {presence}"
+            )
+    if primary_error is not None:
+        if cleanup_error:
+            raise primary_error.with_traceback(primary_tb) from IsolationError(cleanup_error)
+        raise primary_error.with_traceback(primary_tb)
+    if cleanup_error:
+        raise IsolationError(cleanup_error)
+
+
+def _directory_manifest(root: Path) -> dict[str, str]:
+    manifest: dict[str, str] = {}
+    if not root.exists():
+        return manifest
+    for path in sorted(item for item in root.rglob("*") if item.is_file()):
+        manifest[str(path.relative_to(root))] = _sha(path)
+    return manifest
+
+
+_VOLUME_MANIFEST_SCRIPT = r"""
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+manifest = {}
+for path in sorted(item for item in root.rglob("*") if item.is_file()):
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    manifest[str(path.relative_to(root))] = digest.hexdigest()
+print(json.dumps(manifest, sort_keys=True))
+"""
+
+
+def _volume_manifest(image: str, volume: str, mount: str) -> dict[str, str]:
+    name = f"p2-gate-manifest-{uuid.uuid4().hex[:10]}"
+    primary_error: BaseException | None = None
+    primary_tb = None
+    cleanup_error: str | None = None
+    result = None
+    try:
+        _run(
+            "docker",
+            "create",
+            "--name",
+            name,
+            "--network",
+            "none",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "-v",
+            f"{volume}:{mount}:ro",
+            "--entrypoint",
+            "python",
+            image,
+            "-c",
+            _VOLUME_MANIFEST_SCRIPT,
+            mount,
+        )
+        result = _run("docker", "start", "-a", name)
+    except BaseException as exc:
+        primary_error = exc
+        primary_tb = exc.__traceback__
+    finally:
+        try:
+            _run("docker", "rm", "-f", name, check=False)
+        except Exception as exc:
+            cleanup_error = f"manifest container removal failed: {type(exc).__name__}: {exc}"
+        presence, presence_error = _safe_presence("container", name)
+        if presence != "ABSENT":
+            cleanup_error = cleanup_error or (
+                presence_error or f"manifest container {name} presence after cleanup is {presence}"
+            )
+    if primary_error is not None:
+        if cleanup_error:
+            raise primary_error.with_traceback(primary_tb) from IsolationError(cleanup_error)
+        raise primary_error.with_traceback(primary_tb)
+    if cleanup_error:
+        raise IsolationError(cleanup_error)
+    if result is None:
+        raise IsolationError("manifest container did not produce a result")
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    if not lines:
+        raise IsolationError("gate volume manifest was empty")
+    value = json.loads(lines[-1])
+    if not isinstance(value, dict) or not all(
+        isinstance(key, str) and isinstance(item, str) for key, item in value.items()
+    ):
+        raise IsolationError("gate volume manifest was not a string mapping")
+    return {str(key): str(item) for key, item in value.items()}
+
+
+def _copy_gate_volume_verified(
+    *,
+    gate_image: str,
+    volume: str,
+    mount: str,
+    destination: Path,
+) -> dict[str, str]:
+    source_manifest = _volume_manifest(gate_image, volume, mount)
+    if destination.exists():
+        raise IsolationError(
+            f"refusing to overwrite existing gate preservation destination: {destination}"
+        )
+    destination.mkdir(parents=True, exist_ok=False)
+    _copy_volume(gate_image, volume, mount, destination)
+    copied_manifest = _directory_manifest(destination)
+    if copied_manifest != source_manifest:
+        raise IsolationError(
+            f"gate volume preservation manifest mismatch for {volume}: "
+            f"source={source_manifest!r} copied={copied_manifest!r}"
+        )
+    return copied_manifest
+
+
+def _gate_volume_plans(
+    *, authority_volume: str, results_volume: str, output: Path
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "role": "authority",
+            "name": authority_volume,
+            "mount": "/authority",
+            "destination": output / "authority-final",
+        },
+        {
+            "role": "results",
+            "name": results_volume,
+            "mount": "/results",
+            "destination": output / "results-final",
+        },
+    ]
+
+
+def _prepare_gate_volumes(gate_image: str, plans: list[dict[str, Any]]) -> None:
+    for plan in plans:
+        name = str(plan["name"])
+        mount = str(plan["mount"])
+        _run("docker", "volume", "create", name)
+        _init_gate_volume(gate_image, name, mount)
+
+
+def _cleanup_gate_volumes(
+    *, gate_image: str, plans: list[dict[str, Any]], output: Path
+) -> dict[str, Any]:
+    records: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for plan in plans:
+        name = str(plan["name"])
+        role = str(plan["role"])
+        mount = str(plan["mount"])
+        destination = Path(plan["destination"])
+        before, presence_error = _safe_presence("volume", name)
+        record: dict[str, Any] = {
+            "role": role,
+            "name": name,
+            "mount": mount,
+            "destination": str(destination),
+            "presence_before_cleanup": before,
+            "preservation": "not_attempted",
+            "preserved_manifest": {},
+            "presence_after_cleanup": before,
+            "disposition": "UNKNOWN_REQUIRES_RECOVERY" if before == "UNKNOWN" else "NOT_CREATED",
+        }
+        if presence_error:
+            record["presence_error"] = presence_error
+        if before == "PRESENT":
+            try:
+                manifest = _copy_gate_volume_verified(
+                    gate_image=gate_image,
+                    volume=name,
+                    mount=mount,
+                    destination=destination,
+                )
+            except Exception as exc:
+                record["preservation"] = "preservation_failed"
+                record["preservation_error"] = f"{type(exc).__name__}: {exc}"
+                record["disposition"] = "QUARANTINED_FAILURE"
+                errors.append(f"{name}: preservation failed: {type(exc).__name__}: {exc}")
+            else:
+                record["preservation"] = "preserved_verified"
+                record["preserved_manifest"] = manifest
+                try:
+                    removed = _run("docker", "volume", "rm", name, check=False)
+                except Exception as exc:
+                    errors.append(f"{name}: remove failed: {type(exc).__name__}: {exc}")
+                else:
+                    if removed.returncode != 0:
+                        errors.append(f"{name}: remove failed: {removed.stderr.strip()}")
+                after, after_error = _safe_presence("volume", name)
+                record["presence_after_cleanup"] = after
+                if after_error:
+                    record["presence_error_after_cleanup"] = after_error
+                if after == "ABSENT":
+                    record["disposition"] = "DELETED"
+                elif after == "PRESENT":
+                    record["disposition"] = "QUARANTINED_FAILURE"
+                    errors.append(f"{name}: volume remains after verified preservation and removal")
+                else:
+                    record["disposition"] = "UNKNOWN_REQUIRES_RECOVERY"
+                    errors.append(f"{name}: volume presence is UNKNOWN after removal")
+        elif before == "ABSENT":
+            record["presence_after_cleanup"] = "ABSENT"
+            record["disposition"] = "NOT_CREATED"
+        else:
+            errors.append(f"{name}: volume presence is UNKNOWN; retained for finish-only recovery")
+        records.append(record)
+
+    finish_only = any(
+        item["disposition"] in {"QUARANTINED_FAILURE", "UNKNOWN_REQUIRES_RECOVERY"}
+        for item in records
+    )
+    result = {
+        "schema_version": 2,
+        "resources": records,
+        "cleanup_errors": errors,
+        "cleanup_complete": not errors and not finish_only,
+        "finish_only_recovery_required": finish_only,
+        "committed_pass_permitted": not finish_only,
+    }
+    _write(output / "gate-resource-ledger.json", result)
+    if finish_only:
+        _write(
+            output / "gate-recovery.json",
+            {
+                "schema_version": 2,
+                "finish_only_recovery_required": True,
+                "resources": records,
+                "committed_pass_permitted": False,
+            },
+        )
+    return result
 
 
 def _init_gate_volume(image: str, volume: str, mount: str) -> None:
@@ -206,9 +465,9 @@ def _run_attempt(
     evaluator = f"p2b4-evaluator-{label}-{suffix}"
     state_volume = f"p2b4-state-{label}-{suffix}"
     output_volume = f"p2b4-output-{label}-{suffix}"
-    created_containers: list[str] = []
-    created_networks: list[str] = []
-    created_volumes: list[str] = []
+    created_containers: list[str] = [app, control, evaluator, candidate]
+    created_networks: list[str] = [net_ca, net_ec, net_ctrl]
+    created_volumes: list[str] = [state_volume, output_volume]
     evaluator_control_connected = True
     attempt_dir = evidence_root / label
     attempt_dir.mkdir(parents=True, exist_ok=True)
@@ -257,11 +516,8 @@ def _run_attempt(
                 "com.docker.network.bridge.gateway_mode_ipv4=isolated",
                 network,
             )
-            created_networks.append(network)
         _run("docker", "volume", "create", state_volume)
-        created_volumes.append(state_volume)
         _run("docker", "volume", "create", output_volume)
-        created_volumes.append(output_volume)
 
         common = _resource_args()
         _run(
@@ -287,7 +543,6 @@ def _run_attempt(
             "--port",
             "8001",
         )
-        created_containers.append(app)
 
         _run(
             "docker",
@@ -312,7 +567,6 @@ def _run_attempt(
             "--port",
             "9000",
         )
-        created_containers.append(control)
 
         _run(
             "docker",
@@ -335,7 +589,6 @@ def _run_attempt(
             "-c",
             "import time; time.sleep(240)",
         )
-        created_containers.append(evaluator)
         _run("docker", "network", "connect", "--alias", "evaluator", net_ctrl, evaluator)
         _wait_exec(
             evaluator,
@@ -370,7 +623,6 @@ def _run_attempt(
             "PHASE2_FIXTURE_APP=http://fixture-app:8001",
             candidate_image,
         )
-        created_containers.append(candidate)
         _run("docker", "network", "connect", "--alias", "candidate", net_ec, candidate)
 
         _wait_exec(
@@ -700,12 +952,14 @@ def main() -> None:
 
     authority_volume = f"p2b4-authority-{uuid.uuid4().hex[:10]}"
     results_volume = f"p2b4-results-{uuid.uuid4().hex[:10]}"
-    _run("docker", "volume", "create", authority_volume)
-    _run("docker", "volume", "create", results_volume)
-    _init_gate_volume(args.gate_image, authority_volume, "/authority")
-    _init_gate_volume(args.gate_image, results_volume, "/results")
+    gate_plans = _gate_volume_plans(
+        authority_volume=authority_volume,
+        results_volume=results_volume,
+        output=args.output,
+    )
 
     try:
+        _prepare_gate_volumes(args.gate_image, gate_plans)
         promoted = _gate_run(
             gate_image=args.gate_image,
             policy=policy_path,
@@ -963,21 +1217,17 @@ def main() -> None:
         }
         _write(args.output / "approval-summary.json", summary)
         print(json.dumps(summary, indent=2, sort_keys=True))
-    except Exception:
-        _write(
-            args.output / "gate-recovery.json",
-            {
-                "authority_volume": authority_volume,
-                "results_volume": results_volume,
-                "preserved_for_finish_only_recovery": True,
-            },
+    finally:
+        active_error = sys.exc_info()[1]
+        gate_cleanup = _cleanup_gate_volumes(
+            gate_image=args.gate_image,
+            plans=gate_plans,
+            output=args.output,
         )
-        raise
-    else:
-        for volume in (authority_volume, results_volume):
-            _run("docker", "volume", "rm", volume, check=False)
-            if _run("docker", "volume", "inspect", volume, check=False).returncode == 0:
-                raise IsolationError(f"gate volume still present after cleanup: {volume}")
+        if active_error is None and not gate_cleanup["cleanup_complete"]:
+            raise IsolationError(
+                f"gate resource cleanup incomplete; finish-only recovery required: {gate_cleanup!r}"
+            )
 
 
 if __name__ == "__main__":

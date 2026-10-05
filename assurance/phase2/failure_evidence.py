@@ -12,15 +12,18 @@ Fence = Callable[[], None]
 
 _SQLITE_BACKUP_SCRIPT = r"""\
 import json
+import os
 import sqlite3
 from pathlib import Path
 
-source = Path("/state/fixture.db")
-destination = Path("/preserved/fixture.db")
+state_root = Path(os.environ.get("MCP_GUARD_PHASE2_STATE_DIR", "/state"))
+preserved_root = Path(os.environ.get("MCP_GUARD_PHASE2_PRESERVED_DIR", "/preserved"))
+source = state_root / "fixture.db"
+destination = preserved_root / "fixture.db"
 if not source.is_file():
     raise SystemExit("fixture.db missing")
 destination.parent.mkdir(parents=True, exist_ok=True)
-src = sqlite3.connect("file:/state/fixture.db?mode=ro", uri=True)
+src = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
 dst = sqlite3.connect(str(destination))
 try:
     src.backup(dst)
@@ -31,8 +34,8 @@ try:
 finally:
     dst.close()
     src.close()
-Path("/preserved/sqlite-integrity.json").write_text(
-    json.dumps({"integrity_check": "ok"}, sort_keys=True) + "\\n",
+(preserved_root / "sqlite-integrity.json").write_text(
+    json.dumps({"integrity_check": "ok"}, sort_keys=True) + "\n",
     encoding="utf-8",
 )
 """
@@ -121,6 +124,11 @@ def _presence(run: Run, kind: str, name: str) -> tuple[Presence, str | None]:
     )
 
 
+def resource_presence(run: Run, kind: str, name: str) -> tuple[Presence, str | None]:
+    """Return Docker resource presence without collapsing transport failure into absence."""
+    return _presence(run, kind, name)
+
+
 def _preserve_state(
     *,
     run: Run,
@@ -159,6 +167,15 @@ def _preserve_state(
     integrity = destination / "sqlite-integrity.json"
     if not db.is_file() or not integrity.is_file():
         return False, "state preservation did not produce fixture.db + integrity evidence"
+    try:
+        integrity_value = json.loads(integrity.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return (
+            False,
+            f"state preservation integrity sidecar is invalid: {type(exc).__name__}: {exc}",
+        )
+    if not isinstance(integrity_value, dict) or integrity_value.get("integrity_check") != "ok":
+        return False, "state preservation integrity sidecar did not confirm integrity_check=ok"
     return True, None
 
 
@@ -259,10 +276,28 @@ def cleanup_resources(
             + ", ".join(uncertain_container_presence)
         )
 
-    state_created = state_volume in volumes
-    output_created = output_volume in volumes
-    state_ok = not state_created
-    output_ok = not output_created
+    state_planned = state_volume in volumes
+    output_planned = output_volume in volumes
+    state_presence: Presence = "ABSENT"
+    output_presence: Presence = "ABSENT"
+    state_presence_error: str | None = None
+    output_presence_error: str | None = None
+    if state_planned:
+        state_presence, state_presence_error = _presence(run, "volume", state_volume)
+    if output_planned:
+        output_presence, output_presence_error = _presence(run, "volume", output_volume)
+    state_created = state_presence == "PRESENT"
+    output_created = output_presence == "PRESENT"
+    state_ok = state_presence == "ABSENT"
+    output_ok = output_presence == "ABSENT"
+    if state_presence == "UNKNOWN":
+        preservation_errors.append(
+            state_presence_error or f"state volume presence is unknown: {state_volume}"
+        )
+    if output_presence == "UNKNOWN":
+        preservation_errors.append(
+            output_presence_error or f"output volume presence is unknown: {output_volume}"
+        )
     preserved_root = evidence_dir / "preserved-failure"
     preserved: dict[str, Any] = {
         "requested": preserve_on_failure,
@@ -276,20 +311,26 @@ def cleanup_resources(
         "uncertain_container_presence": list(uncertain_container_presence),
         "state": "not_requested",
         "output": "not_requested",
+        "state_presence_before_preservation": state_presence,
+        "output_presence_before_preservation": output_presence,
         "state_manifest": {},
         "output_manifest": {},
     }
 
     if preserve_on_failure:
         if not writers_stopped:
-            if state_created:
+            if state_presence == "UNKNOWN":
+                preserved["state"] = "unknown_requires_recovery"
+            elif state_created:
                 preserved["state"] = "quarantined_unstopped_writer"
                 preservation_errors.append(
                     "state preservation skipped because writer termination was not verified"
                 )
             else:
                 preserved["state"] = "not_created"
-            if output_created:
+            if output_presence == "UNKNOWN":
+                preserved["output"] = "unknown_requires_recovery"
+            elif output_created:
                 preserved["output"] = "quarantined_unstopped_writer"
                 preservation_errors.append(
                     "output preservation skipped because writer termination was not verified"
@@ -297,7 +338,9 @@ def cleanup_resources(
             else:
                 preserved["output"] = "not_created"
         else:
-            if state_created:
+            if state_presence == "UNKNOWN":
+                preserved["state"] = "unknown_requires_recovery"
+            elif state_created:
                 state_ok, error = _preserve_state(
                     run=run,
                     fixture_image=fixture_image,
@@ -310,7 +353,9 @@ def cleanup_resources(
             else:
                 preserved["state"] = "not_created"
 
-            if output_created:
+            if output_presence == "UNKNOWN":
+                preserved["output"] = "unknown_requires_recovery"
+            elif output_created:
                 output_ok, error = _preserve_output(
                     run=run,
                     evaluator_image=evaluator_image,

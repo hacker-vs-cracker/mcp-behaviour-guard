@@ -53,9 +53,19 @@ def _sha(path: Path) -> str:
 
 def _load(path: Path, label: str) -> dict[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise GateError(f"{label} is unreadable/invalid: {exc}") from exc
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise GateError(f"{label} is unreadable/invalid: {type(exc).__name__}: {exc}") from exc
+    try:
+        text = raw.decode("utf-8", errors="strict")
+    except UnicodeError as exc:
+        raise GateError(
+            f"{label} is unreadable/invalid UTF-8: {type(exc).__name__}: {exc}"
+        ) from exc
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise GateError(f"{label} is unreadable/invalid JSON: {exc}") from exc
     if not isinstance(value, dict):
         raise GateError(f"{label} must be a JSON object")
     return value
