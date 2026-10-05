@@ -179,6 +179,19 @@ def _resource_args() -> list[str]:
     ]
 
 
+def _image_ref(images: dict[str, Any], key: str) -> str:
+    identity = images.get(key)
+    if not isinstance(identity, dict):
+        raise IsolationError(f"missing image identity: {key}")
+    execution_ref = identity.get("execution_ref")
+    if isinstance(execution_ref, str) and execution_ref:
+        return execution_ref
+    legacy = identity.get("oci_index_digest")
+    if isinstance(legacy, str) and legacy:
+        return legacy
+    raise IsolationError(f"image identity has no executable reference: {key}")
+
+
 def _inspect_security(name: str) -> dict[str, Any]:
     data = _json_run("docker", "inspect", name)[0]
     host = data["HostConfig"]
@@ -264,6 +277,7 @@ def main() -> None:
     app = f"p2b2-app-{suffix}"
     control = f"p2b2-control-{suffix}"
     evaluator = f"p2b2-evaluator-{suffix}"
+    positive = f"p2b2-positive-{suffix}"
     state_volume = f"p2b2-state-{suffix}"
     output_volume = f"p2b2-output-{suffix}"
     created_containers: list[str] = []
@@ -304,7 +318,7 @@ def main() -> None:
                 "--network",
                 net_ca,
                 *common,
-                images["candidate_probe"]["oci_index_digest"],
+                _image_ref(images, "candidate_probe"),
                 "server",
                 "--port",
                 "7000",
@@ -323,7 +337,7 @@ def main() -> None:
                 *common,
                 "-v",
                 f"{state_volume}:/state",
-                images["fixture"]["oci_index_digest"],
+                _image_ref(images, "fixture"),
                 "python",
                 "app_service.py",
                 "--db",
@@ -346,7 +360,7 @@ def main() -> None:
                 *common,
                 "-v",
                 f"{state_volume}:/state",
-                images["fixture"]["oci_index_digest"],
+                _image_ref(images, "fixture"),
                 "python",
                 "control_service.py",
                 "--db",
@@ -371,7 +385,7 @@ def main() -> None:
                 f"{output_volume}:/trusted-output",
                 "--entrypoint",
                 "python",
-                images["evaluator"]["oci_index_digest"],
+                _image_ref(images, "evaluator"),
                 "-c",
                 "import time; time.sleep(120)",
             )
@@ -397,6 +411,88 @@ def main() -> None:
                     "fixture-control", control
                 ),
             )
+
+            # A separate trusted positive-control actor intentionally reaches both
+            # fixture planes. This proves that "no candidate write" is not a
+            # vacuous result caused by a dead or unreachable fixture.
+            _run(
+                "docker",
+                "run",
+                "-d",
+                "--name",
+                positive,
+                "--network",
+                net_ca,
+                *common,
+                "--entrypoint",
+                "python",
+                _image_ref(images, "evaluator"),
+                "-c",
+                "import time; time.sleep(120)",
+            )
+            created_containers.append(positive)
+            _run("docker", "network", "connect", net_ctrl, positive)
+
+            positive_code = f"""
+import json
+import urllib.request
+
+
+def call(method, url, payload=None, headers=None):
+    data = None if payload is None else json.dumps(payload).encode("utf-8")
+    combined = {{"Content-Type": "application/json"}}
+    combined.update(headers or {{}})
+    request = urllib.request.Request(url, data=data, headers=combined, method=method)
+    with urllib.request.urlopen(request, timeout=2) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+created = call("POST", "http://{control}:9000/attempts", {{"attempt_id": "p2-positive-{suffix}"}})
+attempt_id = created["attempt_id"]
+token = created["token"]
+call("POST", f"http://{control}:9000/attempts/{{attempt_id}}/open")
+write = call(
+    "POST",
+    "http://{app}:8001/records/write",
+    {{
+        "record_id": "p2-positive-record",
+        "value": "p2-positive-value",
+        "request_id": "p2-positive-request",
+    }},
+    {{"Authorization": f"Bearer {{token}}"}},
+)
+snapshot = call("GET", f"http://{control}:9000/attempts/{{attempt_id}}")
+call("POST", f"http://{control}:9000/attempts/{{attempt_id}}/close")
+final = call("POST", f"http://{control}:9000/attempts/{{attempt_id}}/final-snapshot")
+call("POST", f"http://{control}:9000/attempts/{{attempt_id}}/finalize")
+audit = [row for row in snapshot["audit"] if row.get("operation") == "record_write"]
+requests = [row for row in snapshot["requests"] if row.get("request_id") == "p2-positive-request"]
+print(json.dumps(
+    {{
+        "write_state": write["state"],
+        "committed": write["committed"],
+        "audit_count": len(audit),
+        "request_state": requests[0]["state"] if len(requests) == 1 else "INVALID",
+        "final_audit_complete": final["audit_complete"],
+    }},
+    sort_keys=True,
+))
+"""
+            positive_result = json.loads(
+                _run("docker", "exec", positive, "python", "-c", positive_code).stdout
+            )
+            expected_positive = {
+                "write_state": "COMMITTED",
+                "committed": True,
+                "audit_count": 1,
+                "request_state": "COMMITTED",
+                "final_audit_complete": True,
+            }
+            if positive_result != expected_positive:
+                raise IsolationError(
+                    f"positive control differs: expected={expected_positive!r} "
+                    f"actual={positive_result!r}"
+                )
 
             control_ip = _container_ip(control, net_ctrl)
             app_ip = _container_ip(app, net_ca)
@@ -494,6 +590,7 @@ print(p.read_text(encoding="utf-8"))
                 app: _assert_security(app, [net_ca], expected_uid=10001),
                 control: _assert_security(control, [net_ctrl], expected_uid=10001),
                 evaluator: _assert_security(evaluator, [net_ctrl, net_ec], expected_uid=10003),
+                positive: _assert_security(positive, [net_ca, net_ctrl], expected_uid=10003),
             }
 
             # Network objects themselves must be internal with isolated IPv4 gateway mode.
@@ -516,6 +613,7 @@ print(p.read_text(encoding="utf-8"))
                     "status": "passed",
                     "candidate_checks": candidate_checks,
                     "evaluator_checks": evaluator_checks,
+                    "positive_control": positive_result,
                     "security": security,
                     "networks": network_inspect,
                     "host_sentinel_port": host_port,

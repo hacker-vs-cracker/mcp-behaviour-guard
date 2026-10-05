@@ -44,15 +44,15 @@ def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def test_p1b_spec_freezes_platform_scope_authority_split_and_no_runtime() -> None:
+def test_current_adapter_preserves_p1b_authority_split_for_p2_proof() -> None:
     spec = json.loads(BUILD_SPEC.read_text(encoding="utf-8"))
     boundary = json.loads(TRUST_BOUNDARY.read_text(encoding="utf-8"))
     template = json.loads(RUNTIME_TEMPLATE.read_text(encoding="utf-8"))
 
-    assert spec["status"] == "P1B_SPEC_FROZEN"
+    assert spec["status"] == "P2_PROOF_PREP_FROZEN"
     assert spec["platform"] == "linux/amd64"
     assert spec["decision_scope"] == "phase2c_trusted_ci_gate_only"
-    assert spec["runtime_execution_enabled"] is False
+    assert spec["runtime_execution_enabled"] is True
     assert spec["promotion_enabled"] is False
 
     assert boundary["runtime_adapter"] == {
@@ -60,8 +60,8 @@ def test_p1b_spec_freezes_platform_scope_authority_split_and_no_runtime() -> Non
         "spec_path": "assurance/phase2/ci/build-adapter.json",
         "platform": "linux/amd64",
         "decision_scope": "phase2c_trusted_ci_gate_only",
-        "status": "P1B_SPEC_FROZEN",
-        "runtime_execution_enabled": False,
+        "status": "P2_PROOF_PREP_FROZEN",
+        "runtime_execution_enabled": True,
         "promotion_enabled": False,
     }
     assert "trusted_inputs" not in boundary
@@ -82,13 +82,13 @@ def test_p1b_spec_freezes_platform_scope_authority_split_and_no_runtime() -> Non
     assert spec["base_image"]["runtime_profile_binding_status"] == (
         "UNPROMOTED_UNTIL_P2_P3_EVIDENCE"
     )
-    assert spec["image_distribution"]["decision_status"] == ("P1B_LEADING_OPTION_NOT_FROZEN")
-    assert spec["image_distribution"]["leading_option"] == "ghcr_immutable_digest"
+    assert spec["image_distribution"]["decision_status"] == "P2_FROZEN"
+    assert spec["image_distribution"]["primary"] == "ghcr_immutable_digest"
+    assert spec["image_distribution"]["package_visibility"] == "repository_inherited"
     assert spec["image_distribution"]["alternatives_reviewed"] == [
         "ghcr_immutable_digest",
         "retained_oci_layout",
     ]
-    assert "primary" not in spec["image_distribution"]
     assert all(value is None for value in template["images"].values())
 
 
@@ -108,7 +108,7 @@ def test_build_adapter_stages_amd64_lock_under_evaluator_expected_filename(
     assert _sha(context / "requirements.lock") == AMD64_LOCK_SHA
     assert manifest["platform"] == "linux/amd64"
     assert manifest["decision_scope"] == "phase2c_trusted_ci_gate_only"
-    assert manifest["runtime_execution_enabled"] is False
+    assert manifest["runtime_execution_enabled"] is True
     assert manifest["promotion_enabled"] is False
     assert manifest["named_contexts"]["wheelhouse"]["manifest_required"] is True
 
@@ -204,9 +204,9 @@ def test_build_adapter_refuses_characterized_base_binding_drift(
         ),
         (
             lambda payload: payload["image_distribution"].__setitem__(
-                "primary", "ghcr_immutable_digest"
+                "primary", "retained_oci_layout"
             ),
-            "must not freeze a primary",
+            "primary image distribution",
         ),
         (
             lambda payload: payload["image_distribution"].__setitem__(

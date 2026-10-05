@@ -58,21 +58,25 @@
   "build_adapter": {
     "profile_id": "phase2c-ci-amd64-v1",
     "path": "assurance/phase2/ci/build-adapter.json",
-    "status": "P1B_SPEC_FROZEN"
+    "status": "P2_PROOF_PREP_FROZEN"
   },
   "image_distribution": {
     "moving_tag_fallback_allowed": false,
-    "retained_oci_layout_role": "secondary_evidence_and_recovery_only",
-    "package_visibility": "UNRESOLVED_BEFORE_P2",
-    "decision_status": "P1B_LEADING_OPTION_NOT_FROZEN",
-    "leading_option": "ghcr_immutable_digest",
+    "retained_oci_layout_role": "reviewed_alternative_not_selected",
+    "package_visibility": "repository_inherited",
+    "decision_status": "P2_FROZEN",
     "alternatives_reviewed": [
       "ghcr_immutable_digest",
       "retained_oci_layout"
     ],
     "retrieval_credentials_available_to_candidate_execution": false,
-    "trusted_controller_pull_auth": "UNRESOLVED_WITH_PACKAGE_VISIBILITY_BEFORE_P2",
+    "trusted_controller_pull_auth": "github_token_packages_read_pull_step_only",
     "digest_retrievable_through_promoted_authority_lifetime": true,
-    "retained_oci_layout_recovery_requires_digest_match": true
+    "retained_oci_layout_recovery_requires_digest_match": true,
+    "primary": "ghcr_immutable_digest",
+    "trusted_image_publication_auth": "github_token_packages_write_build_job_only",
+    "credentials_removed_before_candidate_runtime": true,
+    "retained_oci_layout_generated": false,
+    "retained_oci_layout_recovery_available": false
   }
 }

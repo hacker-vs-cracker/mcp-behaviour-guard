@@ -86,14 +86,14 @@ def validate_spec(repo: Path, spec_path: Path | None = None) -> dict[str, Any]:
         raise BuildAdapterError("build adapter schema_version must be 1")
     if spec.get("profile_id") != PROFILE_ID:
         raise BuildAdapterError("build adapter profile_id mismatch")
-    if spec.get("status") != "P1B_SPEC_FROZEN":
-        raise BuildAdapterError("build adapter status is not P1B_SPEC_FROZEN")
+    if spec.get("status") != "P2_PROOF_PREP_FROZEN":
+        raise BuildAdapterError("build adapter status is not P2_PROOF_PREP_FROZEN")
     if spec.get("platform") != PLATFORM:
         raise BuildAdapterError("build adapter platform must be linux/amd64")
     if spec.get("decision_scope") != DECISION_SCOPE:
         raise BuildAdapterError("build adapter decision_scope mismatch")
-    if spec.get("runtime_execution_enabled") is not False:
-        raise BuildAdapterError("P1B must not enable runtime execution")
+    if spec.get("runtime_execution_enabled") is not True:
+        raise BuildAdapterError("P2 proof preparation must enable bounded runtime execution")
     if spec.get("promotion_enabled") is not False:
         raise BuildAdapterError("P1B must not enable promotion")
 
@@ -176,17 +176,15 @@ def validate_spec(repo: Path, spec_path: Path | None = None) -> dict[str, Any]:
     distribution = spec.get("image_distribution")
     if not isinstance(distribution, dict):
         raise BuildAdapterError("image_distribution mapping missing")
-    if distribution.get("decision_status") != "P1B_LEADING_OPTION_NOT_FROZEN":
+    if distribution.get("decision_status") != "P2_FROZEN":
         raise BuildAdapterError("image distribution decision status mismatch")
-    if distribution.get("leading_option") != "ghcr_immutable_digest":
-        raise BuildAdapterError("GHCR must remain the P1B leading option")
+    if distribution.get("primary") != "ghcr_immutable_digest":
+        raise BuildAdapterError("P2 primary image distribution must be GHCR immutable digest")
     if distribution.get("alternatives_reviewed") != [
         "ghcr_immutable_digest",
         "retained_oci_layout",
     ]:
         raise BuildAdapterError("image distribution alternatives mismatch")
-    if "primary" in distribution:
-        raise BuildAdapterError("P1B must not freeze a primary image distribution")
     if distribution.get("registry") != "ghcr.io":
         raise BuildAdapterError("image registry must be ghcr.io")
     if distribution.get("namespace") != "hacker-vs-cracker":
@@ -201,19 +199,34 @@ def validate_spec(repo: Path, spec_path: Path | None = None) -> dict[str, Any]:
         raise BuildAdapterError("candidate execution must not receive publication credentials")
     if distribution.get("retrieval_credentials_available_to_candidate_execution") is not False:
         raise BuildAdapterError("candidate execution must not receive image retrieval credentials")
-    if (
-        distribution.get("trusted_controller_pull_auth")
-        != "UNRESOLVED_WITH_PACKAGE_VISIBILITY_BEFORE_P2"
+    if distribution.get("package_visibility") != "repository_inherited":
+        raise BuildAdapterError("GHCR package visibility policy mismatch")
+    if distribution.get("trusted_image_publication_auth") != (
+        "github_token_packages_write_build_job_only"
+    ):
+        raise BuildAdapterError("trusted image-publication auth policy mismatch")
+    if distribution.get("trusted_controller_pull_auth") != (
+        "github_token_packages_read_pull_step_only"
     ):
         raise BuildAdapterError("trusted controller pull-auth policy mismatch")
+    if distribution.get("credentials_removed_before_candidate_runtime") is not True:
+        raise BuildAdapterError("registry credentials must be removed before candidate runtime")
     if distribution.get("digest_retrievable_through_promoted_authority_lifetime") is not True:
         raise BuildAdapterError("promoted digest retention requirement missing")
+    if distribution.get("retained_oci_layout_role") != "reviewed_alternative_not_selected":
+        raise BuildAdapterError("retained OCI layout role mismatch")
+    if distribution.get("retained_oci_layout_generated") is not False:
+        raise BuildAdapterError("P2 must not claim an OCI layout that was not generated")
+    if distribution.get("retained_oci_layout_recovery_available") is not False:
+        raise BuildAdapterError("P2 must not claim OCI recovery availability")
     if distribution.get("retained_oci_layout_recovery_requires_digest_match") is not True:
-        raise BuildAdapterError("OCI recovery must require exact digest identity")
+        raise BuildAdapterError("OCI recovery must require exact digest identity if later used")
 
     wheelhouse = spec.get("wheelhouse")
     if not isinstance(wheelhouse, dict):
         raise BuildAdapterError("wheelhouse mapping missing")
+    if wheelhouse.get("status") != "SEALED_AT_PROOF_RUNTIME":
+        raise BuildAdapterError("wheelhouse must be sealed during the P2 proof")
     if wheelhouse.get("manifest_required_before_build") is not True:
         raise BuildAdapterError("wheelhouse manifest must be required before build")
     if wheelhouse.get("exact_file_set_required") is not True:
@@ -264,8 +277,8 @@ def materialize_evaluator_context(
             },
         },
         "named_contexts": {"wheelhouse": {"required": True, "manifest_required": True}},
-        "runtime_execution_enabled": False,
-        "promotion_enabled": False,
+        "runtime_execution_enabled": bool(spec["runtime_execution_enabled"]),
+        "promotion_enabled": bool(spec["promotion_enabled"]),
     }
     (output_dir / "context-manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n",

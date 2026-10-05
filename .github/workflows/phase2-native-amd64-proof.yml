@@ -1,0 +1,428 @@
+name: phase2-native-amd64-proof
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_commit:
+        description: Exact protected-main commit SHA approved for the P2 proof
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase2-native-amd64-proof-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-freeze:
+    if: ${{ github.repository == 'hacker-vs-cracker/mcp-behaviour-guard' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out protected main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up pinned Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.11.14'
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Verify trusted source and native AMD64
+        env:
+          EXPECTED_COMMIT: ${{ inputs.expected_commit }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          test "$GITHUB_SHA" = "$EXPECTED_COMMIT"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          mkdir -p p2-work/build p2-work/identities p2-work/evidence p2-work/wheelhouse
+          python assurance/phase2/ci/build_adapter.py validate-spec --repo "$GITHUB_WORKSPACE"
+          python assurance/phase2/ci/p2_native_proof.py assert-native \
+            --output p2-work/evidence/native-architecture.json
+          python assurance/phase2/ci/p2_native_proof.py consumed-inputs \
+            --repo "$GITHUB_WORKSPACE" \
+            --output p2-work/evidence/consumed-inputs.json
+          {
+            echo "github_repository=$GITHUB_REPOSITORY"
+            echo "github_sha=$GITHUB_SHA"
+            echo "expected_commit=$EXPECTED_COMMIT"
+            echo "github_run_id=$GITHUB_RUN_ID"
+            echo "github_run_attempt=$GITHUB_RUN_ATTEMPT"
+            python --version
+            python -m pip --version
+            docker version
+            docker buildx version
+          } > p2-work/evidence/toolchain.txt
+
+      - name: Build exact AMD64 wheelhouse from accepted lock
+        id: wheelhouse
+        run: |
+          set -euo pipefail
+          python -m pip download \
+            --disable-pip-version-check \
+            --no-deps \
+            --only-binary=:all: \
+            --require-hashes \
+            --requirement assurance/phase2/ci/evaluator-requirements-amd64.lock \
+            --dest p2-work/wheelhouse
+          python assurance/phase2/ci/p2_native_proof.py seal-wheelhouse \
+            --repo "$GITHUB_WORKSPACE" \
+            --wheelhouse p2-work/wheelhouse \
+            --output p2-work/evidence/wheelhouse-manifest.json
+          python assurance/phase2/ci/build_adapter.py materialize-evaluator-context \
+            --repo "$GITHUB_WORKSPACE" \
+            --output p2-work/build/evaluator-context
+
+      - name: Authenticate trusted image-publication job to GHCR
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Build, publish, and record exact AMD64 images
+        id: publish
+        env:
+          REGISTRY: ghcr.io/hacker-vs-cracker
+          BASE_IMAGE: python:3.11.14-slim@sha256:fa7a862d74b4decf68fb7d3a85147efc14dbcd3779c0abd56c071d27a1ffee04
+        run: |
+          set -euo pipefail
+
+          suffix="p2-${GITHUB_SHA:0:12}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          source_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+
+          evaluator_tag="$REGISTRY/mcp-behaviour-guard-phase2-evaluator:$suffix"
+          fixture_tag="$REGISTRY/mcp-behaviour-guard-phase2-fixture:$suffix"
+          probe_tag="$REGISTRY/mcp-behaviour-guard-phase2-candidate-probe:$suffix"
+          vertical_tag="$REGISTRY/mcp-behaviour-guard-phase2-vertical-candidate:$suffix"
+          gate_tag="$REGISTRY/mcp-behaviour-guard-phase2-gate:$suffix"
+
+          docker pull "$BASE_IMAGE"
+
+          push_and_ref() {
+            local tag="$1"
+            local log="$2"
+            docker push "$tag" >"$log" 2>&1
+            cat "$log" >&2
+            local digest
+            digest="$(sed -n 's/.*digest: \(sha256:[0-9a-f]\{64\}\).*/\1/p' "$log" | tail -n 1)"
+            test -n "$digest"
+            printf '%s@%s\n' "${tag%:*}" "$digest"
+          }
+
+          docker buildx build \
+            --load \
+            --platform linux/amd64 \
+            --provenance=false \
+            --sbom=false \
+            --label "org.opencontainers.image.source=$source_url" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --build-arg "BASE_IMAGE=$BASE_IMAGE" \
+            --build-context wheelhouse=p2-work/wheelhouse \
+            -f p2-work/build/evaluator-context/Dockerfile \
+            -t "$evaluator_tag" \
+            p2-work/build/evaluator-context
+          evaluator_ref="$(push_and_ref "$evaluator_tag" "p2-work/evidence/push-evaluator.log")"
+          python assurance/phase2/ci/p2_native_proof.py image-identity \
+            --name evaluator \
+            --local-ref "$evaluator_tag" \
+            --registry-ref "$evaluator_ref" \
+            --output p2-work/identities/evaluator.json
+
+          docker buildx build \
+            --load \
+            --platform linux/amd64 \
+            --provenance=false \
+            --sbom=false \
+            --label "org.opencontainers.image.source=$source_url" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --build-arg "BASE_IMAGE=$BASE_IMAGE" \
+            -f assurance/phase2/fixture/Dockerfile \
+            -t "$fixture_tag" \
+            assurance/phase2/fixture
+          fixture_ref="$(push_and_ref "$fixture_tag" "p2-work/evidence/push-fixture.log")"
+          python assurance/phase2/ci/p2_native_proof.py image-identity \
+            --name fixture \
+            --local-ref "$fixture_tag" \
+            --registry-ref "$fixture_ref" \
+            --output p2-work/identities/fixture.json
+
+          docker buildx build \
+            --load \
+            --platform linux/amd64 \
+            --provenance=false \
+            --sbom=false \
+            --label "org.opencontainers.image.source=$source_url" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --build-arg "BASE_IMAGE=$BASE_IMAGE" \
+            -f assurance/phase2/candidate-probe/Dockerfile \
+            -t "$probe_tag" \
+            assurance/phase2/candidate-probe
+          probe_ref="$(push_and_ref "$probe_tag" "p2-work/evidence/push-probe.log")"
+          python assurance/phase2/ci/p2_native_proof.py image-identity \
+            --name candidate_probe \
+            --local-ref "$probe_tag" \
+            --registry-ref "$probe_ref" \
+            --output p2-work/identities/candidate_probe.json
+
+          docker buildx build \
+            --load \
+            --platform linux/amd64 \
+            --provenance=false \
+            --sbom=false \
+            --label "org.opencontainers.image.source=$source_url" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --build-arg "BASE_IMAGE=$evaluator_ref" \
+            -f assurance/phase2/vertical/Dockerfile \
+            -t "$vertical_tag" \
+            assurance/phase2/vertical
+          vertical_ref="$(push_and_ref "$vertical_tag" "p2-work/evidence/push-vertical.log")"
+          python assurance/phase2/ci/p2_native_proof.py image-identity \
+            --name vertical_candidate \
+            --local-ref "$vertical_tag" \
+            --registry-ref "$vertical_ref" \
+            --output p2-work/identities/vertical_candidate.json
+
+          docker buildx build \
+            --load \
+            --platform linux/amd64 \
+            --provenance=false \
+            --sbom=false \
+            --label "org.opencontainers.image.source=$source_url" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --build-arg "BASE_IMAGE=$evaluator_ref" \
+            -f assurance/phase2/gate/Dockerfile \
+            -t "$gate_tag" \
+            assurance/phase2/gate
+          gate_ref="$(push_and_ref "$gate_tag" "p2-work/evidence/push-gate.log")"
+          python assurance/phase2/ci/p2_native_proof.py image-identity \
+            --name gate \
+            --local-ref "$gate_tag" \
+            --registry-ref "$gate_ref" \
+            --output p2-work/identities/gate.json
+
+          printf '%s\n' \
+            "$evaluator_ref" \
+            "$fixture_ref" \
+            "$probe_ref" \
+            "$vertical_ref" \
+            "$gate_ref" \
+            > p2-work/evidence/published-digest-refs.txt
+
+          python assurance/phase2/ci/p2_native_proof.py compose-profile \
+            --repo "$GITHUB_WORKSPACE" \
+            --identities-dir p2-work/identities \
+            --wheelhouse-manifest p2-work/evidence/wheelhouse-manifest.json \
+            --consumed-inputs p2-work/evidence/consumed-inputs.json \
+            --output p2-work/runtime-profile.json
+
+      - name: Remove image-publication credentials
+        if: always()
+        run: |
+          set -euo pipefail
+          docker logout ghcr.io || true
+          rm -f "$HOME/.docker/config.json"
+
+      - name: Classify P2 build/freeze outcome
+        if: always()
+        env:
+          WHEELHOUSE_OUTCOME: ${{ steps.wheelhouse.outcome }}
+          PUBLISH_OUTCOME: ${{ steps.publish.outcome }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          evidence = Path("p2-work/evidence")
+          evidence.mkdir(parents=True, exist_ok=True)
+          push_logs = sorted(path.name for path in evidence.glob("push-*.log"))
+          identities = sorted(path.name for path in Path("p2-work/identities").glob("*.json"))
+          publish = os.environ.get("PUBLISH_OUTCOME", "")
+          wheelhouse = os.environ.get("WHEELHOUSE_OUTCOME", "")
+          possible_remote = bool(push_logs)
+
+          if publish == "success":
+              classification = 0
+              validation_passed = True
+              persistent = "yes_expected_ghcr_images"
+              finish_only = False
+              reason = "p2_build_and_image_freeze_complete"
+          elif possible_remote:
+              classification = 50
+              validation_passed = False
+              persistent = "yes_or_unknown_partial_ghcr_publication"
+              finish_only = True
+              reason = "partial_ghcr_publication_requires_review"
+          else:
+              classification = 0
+              validation_passed = False
+              persistent = "no_confirmed_remote_publication"
+              finish_only = False
+              reason = "pre_publication_failure"
+
+          payload = {
+              "classification": classification,
+              "validation_passed": validation_passed,
+              "wheelhouse_outcome": wheelhouse,
+              "publish_outcome": publish,
+              "push_logs": push_logs,
+              "confirmed_image_identities": identities,
+              "persistent_mutation_remaining": persistent,
+              "persistent_mutation_expected_on_success": True,
+              "finish_only_recovery_required": finish_only,
+              "automatic_ghcr_deletion_permitted": False,
+              "final_reason": reason,
+          }
+          (evidence / "build-classification.json").write_text(
+              json.dumps(payload, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Upload P2 build/freeze evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: phase2-p2-build-${{ github.run_id }}-${{ github.run_attempt }}
+          path: p2-work
+          if-no-files-found: warn
+          retention-days: 30
+
+  native-proof:
+    needs: build-and-freeze
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Check out exact protected source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up pinned Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.11.14'
+
+      - name: Download exact P2 build evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: phase2-p2-build-${{ github.run_id }}-${{ github.run_attempt }}
+          path: p2-work
+
+      - name: Verify native proof runner and profile
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          mkdir -p p2-proof
+          python assurance/phase2/ci/p2_native_proof.py assert-native \
+            --output p2-proof/native-architecture.json
+          python assurance/phase2/ci/p2_native_proof.py validate-profile \
+            --profile p2-work/runtime-profile.json
+
+      - name: Pull only digest-pinned trusted images
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cleanup_registry_auth() {
+            docker logout ghcr.io >/dev/null 2>&1 || true
+            rm -f "$HOME/.docker/config.json"
+          }
+          trap cleanup_registry_auth EXIT
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          python assurance/phase2/ci/p2_native_proof.py execution-refs \
+            --profile p2-work/runtime-profile.json \
+            > p2-proof/execution-refs.txt
+          while IFS= read -r ref; do
+            test -n "$ref"
+            case "$ref" in
+              ghcr.io/hacker-vs-cracker/mcp-behaviour-guard-phase2-*@sha256:*) ;;
+              *) echo "unexpected non-digest execution reference: $ref" >&2; exit 1 ;;
+            esac
+            docker pull "$ref"
+          done < p2-proof/execution-refs.txt
+          cleanup_registry_auth
+          trap - EXIT
+
+      - name: Record Docker baseline
+        run: |
+          set -euo pipefail
+          docker ps -aq | sort > p2-proof/docker-containers-before.txt
+          docker network ls -q | sort > p2-proof/docker-networks-before.txt
+          docker volume ls -q | sort > p2-proof/docker-volumes-before.txt
+
+      - name: Run native isolation and positive control
+        run: |
+          set -euo pipefail
+          python assurance/phase2/run_isolation_check.py \
+            --profile p2-work/runtime-profile.json \
+            --output p2-proof/isolation.json
+
+      - name: Run known-good candidate smoke
+        run: |
+          set -euo pipefail
+          python assurance/phase2/ci/p2_native_proof.py candidate-smoke \
+            --profile p2-work/runtime-profile.json \
+            --output p2-proof/vertical-candidate-smoke.json
+
+      - name: Run bounded negative controls
+        run: |
+          set -euo pipefail
+          python assurance/phase2/ci/p2_native_proof.py negative-controls \
+            --profile p2-work/runtime-profile.json \
+            --output p2-proof/negative-controls.json
+
+      - name: Verify runtime cleanup against baseline
+        if: always()
+        run: |
+          set -euo pipefail
+          docker ps -aq | sort > p2-proof/docker-containers-after.txt
+          docker network ls -q | sort > p2-proof/docker-networks-after.txt
+          docker volume ls -q | sort > p2-proof/docker-volumes-after.txt
+          diff -u p2-proof/docker-containers-before.txt p2-proof/docker-containers-after.txt
+          diff -u p2-proof/docker-networks-before.txt p2-proof/docker-networks-after.txt
+          diff -u p2-proof/docker-volumes-before.txt p2-proof/docker-volumes-after.txt
+
+      - name: Hash P2 evidence
+        if: always()
+        run: |
+          set -euo pipefail
+          find p2-work p2-proof -type f \
+            ! -path 'p2-proof/evidence-sha256.txt' \
+            -print0 \
+            | sort -z \
+            | xargs -0 shasum -a 256 \
+            > p2-proof/evidence-sha256.txt
+
+      - name: Upload native AMD64 proof
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: phase2-p2-native-proof-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            p2-work/evidence
+            p2-work/identities
+            p2-work/runtime-profile.json
+            p2-proof
+          if-no-files-found: error
+          retention-days: 30
