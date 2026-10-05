@@ -713,3 +713,12 @@ def test_non_utf8_final_snapshot_preserves_independent_guard_violation(
         if isinstance(item, dict)
     )
     assert result["decision"]["source_validation"]["final_snapshot"]["validation"] == "invalid"
+
+
+def test_adversarial_runner_stdout_does_not_serialize_full_summary() -> None:
+    runner = RUNNER_PATH.read_text(encoding="utf-8")
+
+    assert "print(json.dumps(summary" not in runner
+    assert '"status": "complete"' in runner
+    assert '"summary_file": "adversarial-summary.json"' in runner
+    assert '_write(args.output / "adversarial-summary.json", summary)' in runner

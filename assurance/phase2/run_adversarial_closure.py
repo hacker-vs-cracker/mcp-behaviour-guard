@@ -1502,7 +1502,12 @@ def main() -> None:
             ),
         }
         _write(args.output / "adversarial-summary.json", summary)
-        print(json.dumps(summary, indent=2, sort_keys=True))
+        print(
+            json.dumps(
+                {"status": "complete", "summary_file": "adversarial-summary.json"},
+                sort_keys=True,
+            )
+        )
     finally:
         active_error = sys.exc_info()[1]
         gate_cleanup = _cleanup_gate_volumes(
