@@ -96,8 +96,8 @@
     "spec_path": "assurance/phase2/ci/build-adapter.json",
     "platform": "linux/amd64",
     "decision_scope": "phase2c_trusted_ci_gate_only",
-    "status": "P1B_SPEC_FROZEN",
-    "runtime_execution_enabled": false,
+    "status": "P2_PROOF_PREP_FROZEN",
+    "runtime_execution_enabled": true,
     "promotion_enabled": false
   },
   "consumed_trusted_inputs": [
@@ -122,10 +122,28 @@
     "assurance/phase2/run_isolation_check.py",
     "assurance/phase2/failure_evidence.py",
     "assurance/phase2/vertical/Dockerfile",
-    "assurance/phase2/vertical/contract.yaml"
+    "assurance/phase2/vertical/contract.yaml",
+    ".github/workflows/phase2-native-amd64-proof.yml",
+    "assurance/phase2/ci/p2_native_proof.py",
+    "assurance/phase2/candidate-probe/Dockerfile",
+    "assurance/phase2/candidate-probe/probe.py"
   ],
   "retained_historical_evidence": [
     "assurance/phase2/runtime-profile.json",
     "assurance/phase2/evaluator/requirements.lock"
-  ]
+  ],
+  "p2_proof": {
+    "stage": "NATIVE_AMD64_PROOF_ONLY",
+    "workflow_path": ".github/workflows/phase2-native-amd64-proof.yml",
+    "trigger": "workflow_dispatch",
+    "runner": "ubuntu-24.04",
+    "platform": "linux/amd64",
+    "image_distribution": "ghcr_immutable_digest",
+    "package_visibility": "repository_inherited",
+    "build_job_packages_permission": "write",
+    "proof_job_packages_permission": "read",
+    "candidate_receives_registry_credentials": false,
+    "reference_promotion_enabled": false,
+    "publisher_bootstrap_enabled": false
+  }
 }
