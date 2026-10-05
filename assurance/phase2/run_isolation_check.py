@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
+import os
+import re
+import signal
 import socketserver
 import subprocess
 import tempfile
@@ -16,12 +20,116 @@ class IsolationError(RuntimeError):
     pass
 
 
-def _run(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(args, text=True, capture_output=True, check=False)
+_COMMAND_TIMEOUT_SECONDS = 120.0
+_CAPTURE_LIMIT_BYTES = 128 * 1024
+_REDACTION_PATTERNS = (
+    re.compile(r"(?i)(bearer\s+)([^\s'\"]+)"),
+    re.compile(
+        r"(?i)([\"']?(?:PHASE2_)?(?:ATTEMPT_)?(?:TOKEN|SECRET|PASSWORD|CREDENTIAL)[\"']?\s*[=:]\s*[\"']?)([^\"'\s,}]+)"
+    ),
+)
+
+
+def _decode_capture(data: bytes, limit: int) -> str:
+    truncated = len(data) > limit
+    value = data[:limit].decode("utf-8", errors="replace")
+    if truncated:
+        value += f"\n[truncated after {limit} bytes]"
+    return value
+
+
+def _terminate_process_group(process: subprocess.Popen[bytes], grace: float = 2.0) -> None:
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(process.pid, signal.SIGTERM)
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        process.wait(timeout=grace)
+    # Kill the whole process group even if the parent exited during the grace period.
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(process.pid, signal.SIGKILL)
+    if process.poll() is None:
+        try:
+            process.wait(timeout=grace)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+
+
+def _secret_values(args: tuple[str, ...]) -> tuple[str, ...]:
+    values: set[str] = set()
+    for arg in args:
+        for pattern in _REDACTION_PATTERNS:
+            for match in pattern.finditer(arg):
+                value = match.group(2)
+                if len(value) >= 6:
+                    values.add(value)
+    return tuple(sorted(values, key=len, reverse=True))
+
+
+def _redact(value: str, args: tuple[str, ...]) -> str:
+    redacted = value
+    for secret in _secret_values(args):
+        redacted = redacted.replace(secret, "[REDACTED]")
+    for pattern in _REDACTION_PATTERNS:
+        redacted = pattern.sub(r"\1[REDACTED]", redacted)
+    return redacted
+
+
+def _run(
+    *args: str,
+    check: bool = True,
+    timeout: float = _COMMAND_TIMEOUT_SECONDS,
+    capture_limit: int = _CAPTURE_LIMIT_BYTES,
+) -> subprocess.CompletedProcess[str]:
+    if timeout <= 0:
+        raise ValueError("timeout must be positive")
+    if capture_limit <= 0:
+        raise ValueError("capture_limit must be positive")
+
+    with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
+        process = subprocess.Popen(
+            args,
+            stdout=stdout_file,
+            stderr=stderr_file,
+            start_new_session=True,
+        )
+        timed_out = False
+        try:
+            returncode = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired as timeout_exc:
+            timed_out = True
+            _terminate_process_group(process)
+            polled = process.poll()
+            if polled is None:
+                raise IsolationError(
+                    "command process did not terminate after timeout"
+                ) from timeout_exc
+            returncode = polled
+        except BaseException as exc:
+            primary_tb = exc.__traceback__
+            try:
+                _terminate_process_group(process)
+            except Exception as termination_exc:
+                raise exc.with_traceback(primary_tb) from termination_exc
+            raise
+
+        stdout_file.seek(0)
+        stderr_file.seek(0)
+        stdout = _decode_capture(stdout_file.read(capture_limit + 1), capture_limit)
+        stderr = _decode_capture(stderr_file.read(capture_limit + 1), capture_limit)
+
+    result = subprocess.CompletedProcess(args, returncode, stdout, stderr)
+    safe_command = _redact(" ".join(args), args)
+    safe_stdout = _redact(stdout, args)
+    safe_stderr = _redact(stderr, args)
+    if timed_out:
+        raise IsolationError(
+            f"command timed out after {timeout:.1f}s: {safe_command}\n"
+            f"stdout={safe_stdout}\nstderr={safe_stderr}"
+        )
     if check and result.returncode != 0:
         raise IsolationError(
-            f"command failed ({result.returncode}): {' '.join(args)}\n"
-            f"stdout={result.stdout}\nstderr={result.stderr}"
+            f"command failed ({result.returncode}): {safe_command}\n"
+            f"stdout={safe_stdout}\nstderr={safe_stderr}"
         )
     return result
 

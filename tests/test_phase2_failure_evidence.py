@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sqlite3
+import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -435,3 +436,92 @@ def test_cleanup_json_compatibility_is_retained(tmp_path: Path) -> None:
     assert cleanup["cleanup_errors"] == []
     assert cleanup["uncertain_resources"] == []
     assert not (tmp_path / "failure-recovery.json").exists()
+
+
+def test_actual_embedded_sqlite_backup_producer_writes_valid_sidecar_and_copy(
+    tmp_path: Path,
+) -> None:
+    module = _module()
+    state = tmp_path / "state"
+    preserved = tmp_path / "preserved"
+    state.mkdir()
+    preserved.mkdir()
+    db = state / "fixture.db"
+    connection = sqlite3.connect(db)
+    try:
+        connection.execute("CREATE TABLE evidence(value TEXT)")
+        connection.execute("INSERT INTO evidence(value) VALUES ('actual-producer')")
+        connection.commit()
+    finally:
+        connection.close()
+
+    env = dict(__import__("os").environ)
+    env["MCP_GUARD_PHASE2_STATE_DIR"] = str(state)
+    env["MCP_GUARD_PHASE2_PRESERVED_DIR"] = str(preserved)
+    result = subprocess.run(
+        [sys.executable, "-c", module._SQLITE_BACKUP_SCRIPT],
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+    )
+    assert result.returncode == 0, result.stderr
+    sidecar = json.loads((preserved / "sqlite-integrity.json").read_text(encoding="utf-8"))
+    assert sidecar == {"integrity_check": "ok"}
+    copied = sqlite3.connect(preserved / "fixture.db")
+    try:
+        assert copied.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        assert copied.execute("SELECT value FROM evidence").fetchone() == ("actual-producer",)
+    finally:
+        copied.close()
+
+
+def test_planned_but_absent_failure_volumes_are_not_materialized_for_preservation(
+    tmp_path: Path,
+) -> None:
+    module = _module()
+    docker = FakeDocker()
+    docker.volumes.clear()
+    result = module.cleanup_resources(
+        run=docker,
+        evidence_dir=tmp_path,
+        containers=["app", "control", "evaluator", "candidate"],
+        networks=["net-ca", "net-ec", "net-ctrl"],
+        volumes=["state-vol", "output-vol"],
+        state_volume="state-vol",
+        output_volume="output-vol",
+        fixture_image="fixture-image",
+        evaluator_image="evaluator-image",
+        preserve_on_failure=True,
+        failure_stage="runtime_setup",
+    )
+    assert not any(call[:2] == ("docker", "run") for call in docker.calls)
+    ledger = json.loads((tmp_path / "resource-ledger.json").read_text(encoding="utf-8"))
+    assert ledger["preservation"]["state"] == "not_created"
+    assert ledger["preservation"]["output"] == "not_created"
+    assert result.preservation_complete is True
+
+
+def test_unknown_planned_failure_volume_requires_recovery_without_preservation(
+    tmp_path: Path,
+) -> None:
+    module = _module()
+    docker = FakeDocker(fail_inspect=("volume", "state-vol"))
+    docker.volumes.discard("state-vol")
+    result = module.cleanup_resources(
+        run=docker,
+        evidence_dir=tmp_path,
+        containers=["app", "control", "evaluator", "candidate"],
+        networks=["net-ca", "net-ec", "net-ctrl"],
+        volumes=["state-vol", "output-vol"],
+        state_volume="state-vol",
+        output_volume="output-vol",
+        fixture_image="fixture-image",
+        evaluator_image="evaluator-image",
+        preserve_on_failure=True,
+        failure_stage="runtime_setup",
+    )
+    assert result.finish_only_recovery_required is True
+    assert "volume:state-vol" in result.uncertain_resources
+    ledger = json.loads((tmp_path / "resource-ledger.json").read_text(encoding="utf-8"))
+    assert ledger["preservation"]["state"] == "unknown_requires_recovery"

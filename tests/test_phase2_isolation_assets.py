@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import ast
+import importlib.util
 import json
 import re
+import sys
 from pathlib import Path
+
+import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PHASE2 = PROJECT_ROOT / "assurance/phase2"
@@ -129,3 +133,94 @@ def test_isolation_runner_requires_internal_isolated_gateway_and_resource_contro
         '"volume", "inspect"',
     ):
         assert value in source
+
+
+def _isolation_module():
+    spec = importlib.util.spec_from_file_location("phase2_isolation_p1a_test", ISOLATION)
+    if spec is None or spec.loader is None:
+        raise AssertionError("could not load run_isolation_check.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_shared_runner_times_out_and_terminates_subprocess() -> None:
+    module = _isolation_module()
+    try:
+        module._run(sys.executable, "-c", "import time; time.sleep(5)", timeout=0.05)
+    except module.IsolationError as exc:
+        assert "timed out" in str(exc)
+    else:
+        raise AssertionError("expected bounded subprocess timeout")
+
+
+def test_shared_runner_redacts_sensitive_arguments_and_output() -> None:
+    module = _isolation_module()
+    secret = "phase2-realistic-secret-value"
+    try:
+        module._run(
+            sys.executable,
+            "-c",
+            "import sys; print(sys.argv[1], file=sys.stderr); raise SystemExit(7)",
+            f"PHASE2_ATTEMPT_TOKEN={secret}",
+        )
+    except module.IsolationError as exc:
+        message = str(exc)
+        assert secret not in message
+        assert "[REDACTED]" in message
+    else:
+        raise AssertionError("expected command failure")
+
+    json_message = module._redact('{"token":"' + secret + '"}', ())
+    assert secret not in json_message
+    assert "[REDACTED]" in json_message
+
+
+def test_shared_runner_bounds_success_capture() -> None:
+    module = _isolation_module()
+    result = module._run(
+        sys.executable,
+        "-c",
+        "print('x' * 20000)",
+        capture_limit=1024,
+    )
+    assert "[truncated after 1024 bytes]" in result.stdout
+    assert len(result.stdout) < 1200
+
+
+def test_shared_runner_terminates_process_group_on_base_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _isolation_module()
+    signals: list[tuple[int, int]] = []
+
+    class FakeProcess:
+        pid = 4242
+
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.wait_calls = 0
+
+        def wait(self, timeout: float | None = None) -> int:
+            self.wait_calls += 1
+            if self.wait_calls == 1:
+                raise KeyboardInterrupt()
+            self.returncode = -15
+            return self.returncode
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+    fake = FakeProcess()
+    monkeypatch.setattr(module.subprocess, "Popen", lambda *_args, **_kwargs: fake)
+    monkeypatch.setattr(module.os, "killpg", lambda pid, sig: signals.append((pid, sig)))
+
+    with pytest.raises(KeyboardInterrupt):
+        module._run("synthetic-command")
+
+    assert (fake.pid, module.signal.SIGTERM) in signals
+    assert (fake.pid, module.signal.SIGKILL) in signals

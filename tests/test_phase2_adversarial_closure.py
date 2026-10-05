@@ -380,13 +380,19 @@ def _evaluate_case(
     *,
     snapshot: dict[str, Any],
     report_mode: str = "valid",
+    snapshot_mode: str = "valid",
     report: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     gate = _gate_module()
     candidate_dir = tmp_path / "candidate"
     candidate_dir.mkdir()
     final_path = tmp_path / "final.json"
-    final_path.write_text(json.dumps(snapshot), encoding="utf-8")
+    if snapshot_mode == "valid":
+        final_path.write_text(json.dumps(snapshot), encoding="utf-8")
+    elif snapshot_mode == "non_utf8":
+        final_path.write_bytes(b"{\xff}")
+    else:
+        raise AssertionError(f"unknown snapshot_mode: {snapshot_mode}")
 
     receipt_path = candidate_dir / "receipt.json"
     inventory_path = candidate_dir / "tool-inventory.json"
@@ -398,6 +404,8 @@ def _evaluate_case(
         report_path.write_text(json.dumps(report or _base_report()), encoding="utf-8")
     elif report_mode == "malformed":
         report_path.write_text("{not-json", encoding="utf-8")
+    elif report_mode == "non_utf8":
+        report_path.write_bytes(b"{\xff}")
     elif report_mode != "missing":
         raise AssertionError(f"unknown report_mode: {report_mode}")
 
@@ -631,7 +639,7 @@ def test_adversarial_runner_commits_real_gate_outcomes_for_selected_cases() -> N
     assert "approval-bundle.json" in runner
     assert "actual_gate_outcome" in runner
     assert "source_validation" in runner
-    assert "gate-resource-ledger.json" in runner
+    assert "_cleanup_gate_volumes(" in runner
     assert "phase2c_r3_adversarial_gate_bridge_local_arm64" in runner
 
     expected_pairs = {
@@ -658,3 +666,50 @@ def test_adversarial_runner_commits_real_gate_outcomes_for_selected_cases() -> N
     assert '"expected_gate_effect": "BLOCK"' in runner
     assert '"expected_gate_effect": "INVALID"' in runner
     assert '"gate_invoked": False' not in runner
+
+
+def test_non_utf8_report_preserves_independent_snapshot_violation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _evaluate_case(
+        tmp_path,
+        monkeypatch,
+        snapshot=_valid_write_snapshot(),
+        report_mode="non_utf8",
+    )
+    assert result["outcome"] == "BLOCK"
+    assert result["decision"]["confirmed_violations"]
+    assert result["decision"]["source_validation"]["guard_report"]["validation"] == "invalid"
+
+
+def test_non_utf8_report_without_independent_adverse_source_is_invalid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _evaluate_case(
+        tmp_path,
+        monkeypatch,
+        snapshot=_clean_snapshot(),
+        report_mode="non_utf8",
+    )
+    assert result["outcome"] == "INVALID"
+
+
+def test_non_utf8_final_snapshot_preserves_independent_guard_violation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    report = _base_report()
+    report["findings"][0]["status"] = "failed"
+    result = _evaluate_case(
+        tmp_path,
+        monkeypatch,
+        snapshot=_clean_snapshot(),
+        snapshot_mode="non_utf8",
+        report=report,
+    )
+    assert result["outcome"] == "BLOCK"
+    assert any(
+        item.get("source") == "guard"
+        for item in result["decision"]["confirmed_violations"]
+        if isinstance(item, dict)
+    )
+    assert result["decision"]["source_validation"]["final_snapshot"]["validation"] == "invalid"
