@@ -1187,6 +1187,8 @@ def main() -> None:
                     expected_attempt,
                     "--expected-candidate-image",
                     args.candidate_image,
+                    "--expected-candidate-mode",
+                    "good",
                     "--selected-gate-image",
                     args.gate_image,
                     "--result-root",
