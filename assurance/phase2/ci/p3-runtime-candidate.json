@@ -1,0 +1,199 @@
+{
+  "authority": {
+    "contract_sha256": "63a9c0fe9035c6b7c56451aefc1840ea92a8fdd9668c5aba4f8767e1bc63a35b",
+    "expected_checks_sha256": "0f3af25ff38e4e01fdd06e947bcb12ec3b99d8bdc276d1237db7590ed4c69776",
+    "gate_rules_sha256": "c7ff6fe7227f683ac81e33a6fa07bafc5b5624f28d39309bc1ee49986b3af7b0"
+  },
+  "base_image": {
+    "platform_manifest_digest": "sha256:fa7a862d74b4decf68fb7d3a85147efc14dbcd3779c0abd56c071d27a1ffee04",
+    "reference": "python:3.11.14-slim",
+    "selection_rule": "accepted-characterized-linux-amd64-manifest"
+  },
+  "build_adapter": {
+    "path": "assurance/phase2/ci/build-adapter.json",
+    "profile_id": "phase2c-ci-amd64-v1",
+    "status": "P2_PROOF_PREP_FROZEN"
+  },
+  "consumable": false,
+  "decision_scope": "phase2c_trusted_ci_gate_only",
+  "evaluator_lock": {
+    "historical_arm64_path": "assurance/phase2/evaluator/requirements.lock",
+    "historical_arm64_requirements_sha256": "7f135a827bad87dc89e5a359824d0abe727f376f213865330b4da8c14cead267",
+    "historical_arm64_reuse_allowed": false,
+    "path": "assurance/phase2/ci/evaluator-requirements-amd64.lock",
+    "requirements_sha256": "a18436b0d48f7eacf5b8f4142685a12b11eed3105039e4d3a0eab2b42a3ec22b",
+    "target_platform": "linux/amd64"
+  },
+  "fixture_profile": {
+    "profile_id": "phase2-fixture-v2",
+    "sha256": "3dd6b7a3a290d6b9c483c0e5b9ca200e7387361c67a4fd1cdd6583cc8f18fe09"
+  },
+  "guard": {
+    "version": "0.6.2",
+    "wheel_sha256": "d27b68638f7896999e22e0a74b0a82cb16c47994e9b98b7940eb9aa7eb9818af"
+  },
+  "image_distribution": {
+    "alternatives_reviewed": [
+      "ghcr_immutable_digest",
+      "retained_oci_layout"
+    ],
+    "credentials_removed_before_candidate_runtime": true,
+    "decision_status": "P2_FROZEN",
+    "digest_retrievable_through_promoted_authority_lifetime": true,
+    "moving_tag_fallback_allowed": false,
+    "package_visibility": "repository_inherited",
+    "primary": "ghcr_immutable_digest",
+    "retained_oci_layout_generated": false,
+    "retained_oci_layout_recovery_available": false,
+    "retained_oci_layout_recovery_requires_digest_match": true,
+    "retained_oci_layout_role": "reviewed_alternative_not_selected",
+    "retrieval_credentials_available_to_candidate_execution": false,
+    "trusted_controller_pull_auth": "github_token_packages_read_pull_step_only",
+    "trusted_image_publication_auth": "github_token_packages_write_build_job_only"
+  },
+  "images": {
+    "candidate_probe": {
+      "architecture": "amd64",
+      "config_digest": "sha256:3d43e3a4c0ac05bc5651353cff423ccf206eec07be1ebc4f104033d98634fe65",
+      "execution_ref": "ghcr.io/hacker-vs-cracker/mcp-behaviour-guard-phase2-candidate-probe@sha256:9ae3fb2a981faf42f296054a79971f0e561ffbaa456601d2231903f4a60a3fea",
+      "local_build_ref": "ghcr.io/hacker-vs-cracker/mcp-behaviour-guard-phase2-candidate-probe:p2-f21f4ef7afc5-37284672075-1",
+      "name": "candidate_probe",
+      "oci_index_digest": null,
+      "os": "linux",
+      "platform_manifest_digest": "sha256:9ae3fb2a981faf42f296054a79971f0e561ffbaa456601d2231903f4a60a3fea",
+      "registry_digest": "sha256:9ae3fb2a981faf42f296054a79971f0e561ffbaa456601d2231903f4a60a3fea",
+      "registry_media_type": "application/vnd.docker.distribution.manifest.v2+json"
+    },
+    "evaluator": {
+      "architecture": "amd64",
+      "config_digest": "sha256:2ffb45c217d8949c71443acbac5c215d70d9edfec9b37c2b01d137911655b7b6",
+      "execution_ref": "ghcr.io/hacker-vs-cracker/mcp-behaviour-guard-phase2-evaluator@sha256:5213453d138ad38aca8169b398c1f7a9c5e70f25eadaadf88e675e883e6bd8a1",
+      "local_build_ref": "ghcr.io/hacker-vs-cracker/mcp-behaviour-guard-phase2-evaluator:p2-f21f4ef7afc5-37284672075-1",
+      "name": "evaluator",
+      "oci_index_digest": null,
+      "os": "linux",
+      "platform_manifest_digest": "sha256:5213453d138ad38aca8169b398c1f7a9c5e70f25eadaadf88e675e883e6bd8a1",
+      "registry_digest": "sha256:5213453d138ad38aca8169b398c1f7a9c5e70f25eadaadf88e675e883e6bd8a1",
+      "registry_media_type": "application/vnd.docker.distribution.manifest.v2+json"
+    },
+    "fixture": {
+      "architecture": "amd64",
+      "config_digest": "sha256:cf3a757ebf2ddf7ae99824132c7eef4f296d02e5d80aa2b671ac73d8e3695b8c",
+      "execution_ref": "ghcr.io/hacker-vs-cracker/mcp-behaviour-guard-phase2-fixture@sha256:96177277baa5f5d17577b2afe68e774bb7ef671e11611ae937f2c40b780071ae",
+      "local_build_ref": "ghcr.io/hacker-vs-cracker/mcp-behaviour-guard-phase2-fixture:p2-f21f4ef7afc5-37284672075-1",
+      "name": "fixture",
+      "oci_index_digest": null,
+      "os": "linux",
+      "platform_manifest_digest": "sha256:96177277baa5f5d17577b2afe68e774bb7ef671e11611ae937f2c40b780071ae",
+      "registry_digest": "sha256:96177277baa5f5d17577b2afe68e774bb7ef671e11611ae937f2c40b780071ae",
+      "registry_media_type": "application/vnd.docker.distribution.manifest.v2+json"
+    },
+    "gate": {
+      "architecture": "amd64",
+      "config_digest": "sha256:3d3bd06affbd07a478f742aa6ea88459a69dd6c82a5b509313ce5f19ad004bdb",
+      "execution_ref": "ghcr.io/hacker-vs-cracker/mcp-behaviour-guard-phase2-gate@sha256:bd2006e0fff43d8c63c21b51a850adf313c60efd170b0c2ce0f2dde0a35f1f76",
+      "local_build_ref": "ghcr.io/hacker-vs-cracker/mcp-behaviour-guard-phase2-gate:p2-f21f4ef7afc5-37284672075-1",
+      "name": "gate",
+      "oci_index_digest": null,
+      "os": "linux",
+      "platform_manifest_digest": "sha256:bd2006e0fff43d8c63c21b51a850adf313c60efd170b0c2ce0f2dde0a35f1f76",
+      "registry_digest": "sha256:bd2006e0fff43d8c63c21b51a850adf313c60efd170b0c2ce0f2dde0a35f1f76",
+      "registry_media_type": "application/vnd.docker.distribution.manifest.v2+json"
+    },
+    "vertical_candidate": {
+      "architecture": "amd64",
+      "config_digest": "sha256:bec785d23018361423917b383e4e7b6c257543fec5b56670b423c61b47caad12",
+      "execution_ref": "ghcr.io/hacker-vs-cracker/mcp-behaviour-guard-phase2-vertical-candidate@sha256:249f8866745437db1790527966732f54b1701de93026c54f6962309b2f247d5d",
+      "local_build_ref": "ghcr.io/hacker-vs-cracker/mcp-behaviour-guard-phase2-vertical-candidate:p2-f21f4ef7afc5-37284672075-1",
+      "name": "vertical_candidate",
+      "oci_index_digest": null,
+      "os": "linux",
+      "platform_manifest_digest": "sha256:249f8866745437db1790527966732f54b1701de93026c54f6962309b2f247d5d",
+      "registry_digest": "sha256:249f8866745437db1790527966732f54b1701de93026c54f6962309b2f247d5d",
+      "registry_media_type": "application/vnd.docker.distribution.manifest.v2+json"
+    }
+  },
+  "p2_acceptance": {
+    "build_artifact_digest": "sha256:d7b44b16ba4d75a2137da1afa65763329a23577349086b2712c57006a288a549",
+    "build_artifact_name": "phase2-p2-build-37284672075-1",
+    "local_adjudication_sha256": "16fc0bf7fb1e639f7084adef48853abc0f0492189cfe03d65a25e7905a95dd1b",
+    "native_proof_artifact_digest": "sha256:cea14adbf611041fea5f20057402796b6ac5c9a8d9b35c7362e00a792cd7c13e",
+    "native_proof_artifact_name": "phase2-p2-native-proof-37284672075-1",
+    "native_proof_run_attempt": 1,
+    "native_proof_run_conclusion": "success",
+    "native_proof_run_id": 37284672075,
+    "native_run_archive_sha256": "390e4f1650b5c70bfdcba1592151243456ba7dde198ba7f29dc6df69c97c9876",
+    "runtime_profile_sha256": "297e93331c7b92cf2f3e8f4c34ab03da4f33b48cb17c9a8ef22de3df32f98ad1"
+  },
+  "p3_reference_construction": {
+    "promotion_enabled": false,
+    "publisher_enabled": false,
+    "renewal_rule": "new-reference-requires-new-reviewed-construction-and-promotion",
+    "required_actual_gate_pass": true,
+    "required_distinct_reference_attempt": true,
+    "required_fence_drain_finalize": true,
+    "required_whole_attempt_audit": true,
+    "ruleset_mutation_enabled": false,
+    "stage": "REFERENCE_CONSTRUCTION_ONLY",
+    "supersession_rule": "authority-generation-changes-only-through-reviewed-source-promotion"
+  },
+  "platform": "linux/amd64",
+  "profile_id": "phase2c-ci-amd64-v1",
+  "promotion_requirements": [
+    "immutable-linux-amd64-base-manifest",
+    "exact-trusted-source-commit",
+    "source-image-byte-bindings",
+    "isolated-good-reference-attempt",
+    "trusted-final-ledger-clean",
+    "gate-pass",
+    "approval-bundle-digest",
+    "sealed-amd64-wheelhouse-manifest",
+    "durable-image-distribution-choice-frozen",
+    "explicit-platform-and-decision-scope"
+  ],
+  "proof": {
+    "consumed_input_count": 26,
+    "consumed_inputs_manifest_sha256": "c33053112ffa0428c3974cc5bdad4f366a0a1cf7f7c42e4839f09a379626558a",
+    "image_distribution": {
+      "alternatives_reviewed": [
+        "ghcr_immutable_digest",
+        "retained_oci_layout"
+      ],
+      "credentials_removed_before_candidate_runtime": true,
+      "decision_status": "P2_FROZEN",
+      "digest_retrievable_through_promoted_authority_lifetime": true,
+      "execution_reference_requires_digest": true,
+      "moving_tag_fallback_allowed": false,
+      "namespace": "hacker-vs-cracker",
+      "package_visibility": "repository_inherited",
+      "primary": "ghcr_immutable_digest",
+      "publication_credentials_available_to_candidate_execution": false,
+      "registry": "ghcr.io",
+      "repository_prefix": "mcp-behaviour-guard-phase2-",
+      "retained_oci_layout_generated": false,
+      "retained_oci_layout_recovery_available": false,
+      "retained_oci_layout_recovery_requires_digest_match": true,
+      "retained_oci_layout_role": "reviewed_alternative_not_selected",
+      "retrieval_credentials_available_to_candidate_execution": false,
+      "trusted_controller_pull_auth": "github_token_packages_read_pull_step_only",
+      "trusted_image_publication_auth": "github_token_packages_write_build_job_only"
+    },
+    "promotion_enabled": false,
+    "source_commit": "f21f4ef7afc5704eee36df888d7d7fc98e9677b9",
+    "source_tree": "644285bab85478ef44d609f2f278fee4f335f572",
+    "wheel_count": 41,
+    "wheelhouse_manifest_sha256": "3e241aaf45698c5e35a325897718a865ca6eaa2edf903efd39db8227a1c19838"
+  },
+  "publisher": {
+    "integration_id": null,
+    "status": "UNBOOTSTRAPPED",
+    "status_context": "mcp-guard-phase2/trusted-verdict"
+  },
+  "reference": {
+    "approval_bundle_digest": null,
+    "origin_attempt_id": null,
+    "status": "UNPROMOTED"
+  },
+  "schema_version": 1,
+  "status": "P3_REFERENCE_CONSTRUCTION_INPUT"
+}

@@ -1,0 +1,211 @@
+name: phase2-p3-reference-candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_commit:
+        description: Exact protected-main commit SHA approved for P3 reference construction
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase2-p3-reference-candidate-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  reference-candidate:
+    if: ${{ github.repository == 'hacker-vs-cracker/mcp-behaviour-guard' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Check out exact protected source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up pinned Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.11.14'
+
+      - name: Verify source, P2 authority input, and native AMD64
+        env:
+          EXPECTED_COMMIT: ${{ inputs.expected_commit }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          test "$GITHUB_SHA" = "$EXPECTED_COMMIT"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          mkdir -p p3-output p3-proof
+          python assurance/phase2/ci/p3_reference_candidate.py validate-input \
+            --profile assurance/phase2/ci/p3-runtime-candidate.json
+          python assurance/phase2/ci/p2_native_proof.py assert-native \
+            --output p3-proof/native-architecture.json
+
+      - name: Pull exact accepted P2 runtime images
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cleanup_registry_auth() {
+            docker logout ghcr.io >/dev/null 2>&1 || true
+            rm -f "$HOME/.docker/config.json"
+          }
+          trap cleanup_registry_auth EXIT
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          python assurance/phase2/ci/p3_reference_candidate.py execution-refs \
+            --profile assurance/phase2/ci/p3-runtime-candidate.json \
+            > p3-proof/execution-refs.txt
+          while IFS= read -r ref; do
+            test -n "$ref"
+            case "$ref" in
+              ghcr.io/hacker-vs-cracker/mcp-behaviour-guard-phase2-*@sha256:*) ;;
+              *) echo "unexpected non-digest P3 image: $ref" >&2; exit 1 ;;
+            esac
+            docker pull "$ref"
+          done < p3-proof/execution-refs.txt
+          cleanup_registry_auth
+          trap - EXIT
+
+      - name: Record Docker baseline
+        run: |
+          set -euo pipefail
+          docker ps -aq | sort > p3-proof/docker-containers-before.txt
+          docker network ls -q | sort > p3-proof/docker-networks-before.txt
+          docker volume ls -q | sort > p3-proof/docker-volumes-before.txt
+
+      - name: Construct distinct AMD64 reference and gate results
+        id: reference
+        run: |
+          set -euo pipefail
+          GATE_REF="$(python assurance/phase2/ci/p3_reference_candidate.py image-ref \
+            --profile assurance/phase2/ci/p3-runtime-candidate.json --name gate)"
+          CANDIDATE_REF="$(python assurance/phase2/ci/p3_reference_candidate.py image-ref \
+            --profile assurance/phase2/ci/p3-runtime-candidate.json --name vertical_candidate)"
+          python assurance/phase2/run_approval_demo.py \
+            --runtime-profile assurance/phase2/ci/p3-runtime-candidate.json \
+            --fixture-profile assurance/phase2/fixture-profile.json \
+            --contract assurance/phase2/vertical/contract.yaml \
+            --gate-dir assurance/phase2/gate \
+            --gate-image "$GATE_REF" \
+            --candidate-image "$CANDIDATE_REF" \
+            --guard-wheel-sha d27b68638f7896999e22e0a74b0a82cb16c47994e9b98b7940eb9aa7eb9818af \
+            --output p3-output
+
+      - name: Adjudicate P3 reference candidate
+        id: adjudicate
+        run: |
+          set -euo pipefail
+          python assurance/phase2/ci/p3_reference_candidate.py adjudicate \
+            --repo "$GITHUB_WORKSPACE" \
+            --profile assurance/phase2/ci/p3-runtime-candidate.json \
+            --output-dir p3-output \
+            --result p3-proof/p3-adjudication.json
+
+      - name: Verify runtime cleanup against baseline
+        id: cleanup
+        if: always()
+        run: |
+          set -euo pipefail
+          docker ps -aq | sort > p3-proof/docker-containers-after.txt
+          docker network ls -q | sort > p3-proof/docker-networks-after.txt
+          docker volume ls -q | sort > p3-proof/docker-volumes-after.txt
+          diff -u p3-proof/docker-containers-before.txt p3-proof/docker-containers-after.txt
+          diff -u p3-proof/docker-networks-before.txt p3-proof/docker-networks-after.txt
+          diff -u p3-proof/docker-volumes-before.txt p3-proof/docker-volumes-after.txt
+
+      - name: Classify P3 construction outcome
+        if: always()
+        env:
+          REFERENCE_OUTCOME: ${{ steps.reference.outcome }}
+          ADJUDICATE_OUTCOME: ${{ steps.adjudicate.outcome }}
+          CLEANUP_OUTCOME: ${{ steps.cleanup.outcome }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          out=Path("p3-proof")
+          out.mkdir(parents=True,exist_ok=True)
+          reference=os.environ.get("REFERENCE_OUTCOME","")
+          adjudicate=os.environ.get("ADJUDICATE_OUTCOME","")
+          cleanup=os.environ.get("CLEANUP_OUTCOME","")
+          evidence_json=list(Path("p3-output").rglob("*.json"))
+          finish_only=False
+          finish_only_evidence=[]
+          for path in evidence_json:
+              try:
+                  value=json.loads(path.read_text(encoding="utf-8"))
+              except Exception:
+                  continue
+              if (
+                  isinstance(value, dict)
+                  and value.get("finish_only_recovery_required") is True
+              ):
+                  finish_only=True
+                  finish_only_evidence.append(str(path))
+          runtime_attempted=reference in {"success","failure","cancelled"}
+          cleanup_problem=runtime_attempted and cleanup!="success"
+          if cleanup_problem:
+              finish_only=True
+              finish_only_evidence.append(
+                  f"docker-baseline-cleanup:{cleanup or 'missing'}"
+              )
+          success=(
+              reference=="success"
+              and adjudicate=="success"
+              and cleanup=="success"
+              and not finish_only
+          )
+          payload={
+              "classification": 0 if not finish_only else 50,
+              "validation_passed": success,
+              "reference_outcome": reference,
+              "adjudicate_outcome": adjudicate,
+              "cleanup_outcome": cleanup,
+              "runtime_attempted": runtime_attempted,
+              "cleanup_problem": cleanup_problem,
+              "finish_only_recovery_required": finish_only,
+              "finish_only_evidence": sorted(finish_only_evidence),
+              "promotion_performed": False,
+              "publisher_bootstrapped": False,
+              "ruleset_mutated": False,
+              "final_reason": (
+                  "p3_reference_candidate_constructed_for_review"
+                  if success else
+                  "p3_reference_candidate_failed_requires_review"
+              ),
+          }
+          (out/"p3-classification.json").write_text(
+              json.dumps(payload,indent=2,sort_keys=True)+"\n",encoding="utf-8"
+          )
+          PY
+
+      - name: Hash P3 evidence
+        if: always()
+        run: |
+          set -euo pipefail
+          find p3-output p3-proof -type f \
+            ! -path 'p3-proof/evidence-sha256.txt' \
+            -print0 | sort -z | xargs -0 shasum -a 256 \
+            > p3-proof/evidence-sha256.txt
+
+      - name: Upload P3 reference-candidate evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: phase2-p3-reference-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            p3-output
+            p3-proof
+          if-no-files-found: error
+          retention-days: 30
