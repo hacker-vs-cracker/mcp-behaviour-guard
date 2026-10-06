@@ -1,0 +1,101 @@
+{
+  "activation": "effective_only_after_protected_main_merge",
+  "authority_type": "phase2c_promoted_runtime_reference_approval",
+  "construction": {
+    "adjudicator_blob_oid": "b7a638f0d0a08bcf5ac683db0f1ccd637dd638ed",
+    "adjudicator_path": "assurance/phase2/ci/p3_reference_candidate.py",
+    "artifact_digest": "sha256:4cecd66755094546c2db096623a8e024f2243669176d97015c5a0805f27c38ae",
+    "artifact_id": 11388250431,
+    "artifact_name": "phase2-p3-reference-candidate-37407853746-1",
+    "gate_blob_oid": "de05aff564c367dc59daeede09018adf5554551f",
+    "gate_path": "assurance/phase2/gate/gate.py",
+    "run_attempt": 1,
+    "run_conclusion": "success",
+    "run_id": 37407853746,
+    "runner_blob_oid": "62bc1e362fb506493f27530516b9446a0900fa84",
+    "runner_path": "assurance/phase2/run_approval_demo.py",
+    "source_commit": "cd1561d833b4918c3d2b082f2992a53a675481f8",
+    "source_tree": "aa7b6d1997da9d0ffdcaa9ad481966f44b6a5570",
+    "workflow_blob_oid": "26f877a82348f6ee0db5c2eace0f38bfe4578cca",
+    "workflow_path": ".github/workflows/phase2-p3-reference-candidate.yml"
+  },
+  "consumable": true,
+  "decision_scope": "phase2c_trusted_ci_gate_only",
+  "evidence": {
+    "actual_gate_pass": true,
+    "adjudication_sha256": "28091e71d76bac586953f55decaa0f758c419536f725b1664365fb5808350d27",
+    "classification_sha256": "27caa95cc2de100cd2798b439b40d9e25675a951c46a719168f9e90026dfc5b1",
+    "cleanup_complete": true,
+    "finish_only_recovery_required": false,
+    "gate_resource_ledger_sha256": "bbd071e110fc551ca6f15cbb515895fb92706b1400aedc80c447f8aaa259ad1b",
+    "outcomes": {
+      "candidate-good": "PASS",
+      "candidate-missing": "INVALID",
+      "candidate-review": "REVIEW",
+      "candidate-write": "BLOCK",
+      "stale-attempt": "INVALID",
+      "swapped-run": "INVALID",
+      "tampered-approval": "INVALID",
+      "tampered-context": "INVALID"
+    },
+    "positive_control_audit_event_count": 2,
+    "positive_control_committed_write_count": 2,
+    "reference_distinct_from_candidates": true,
+    "reference_fenced": true,
+    "reference_finalized": true,
+    "whole_attempt_audit_complete": true
+  },
+  "generation": {
+    "number": 1,
+    "renewal_rule": "new-reference-requires-new-reviewed-construction-and-promotion",
+    "supersedes": null
+  },
+  "platform": "linux/amd64",
+  "policy": {
+    "contract_sha256": "63a9c0fe9035c6b7c56451aefc1840ea92a8fdd9668c5aba4f8767e1bc63a35b",
+    "expected_checks_sha256": "0f3af25ff38e4e01fdd06e947bcb12ec3b99d8bdc276d1237db7590ed4c69776",
+    "gate_rules_sha256": "c7ff6fe7227f683ac81e33a6fa07bafc5b5624f28d39309bc1ee49986b3af7b0",
+    "policy_profile_digest": "c30e6cd7d80b382ee479f178c77b3ff3e117be6f822e6af3e2eac0a3084f0d2b"
+  },
+  "profile_id": "phase2c-ci-amd64-v1",
+  "publisher": {
+    "integration_id": null,
+    "status": "UNBOOTSTRAPPED"
+  },
+  "reference": {
+    "approval_bundle_digest": "054304a1d9ad728e7a1fc2b656a0be42b8b05acbf26d8164d3f7747d328bdb5c",
+    "approval_summary_sha256": "258158ce49664637337ef9967d363aff33742207d693db06f278bbb3fe90faee",
+    "guard_run_id": "18910f87e23e",
+    "origin_attempt_id": "reference-36eba55f59",
+    "reference_execution_context_sha256": "01370b3385814b006f09cf8ec1202c8185cf383cd00be77a6645d68e71563d3b",
+    "reference_final_snapshot_sha256": "e15326f67e68589292a2a1cb98e3c7a4224cd0d9fc3a5efe7c7309ea1a42050d",
+    "reference_receipt_sha256": "a601abcebfe8493419719dd5a11a790b31d5308fd85ff0c91d10c26043c6a617",
+    "reference_report_sha256": "46648b323c470983306758b2e1460e41f5324c9fbd4d397385948812ec558926",
+    "reference_tool_inventory_sha256": "e5e65a36fa8f9c2da78172eafb5d7953271e635e62c5e4811e831ccda463cbf3"
+  },
+  "retention": {
+    "archive_filename": "keep_mcp_guard_2cp3_p3_construction_after_runner_fix_20261006T031149Z.tar.gz",
+    "archive_sha256": "0a70a9688ef72b47420aab2e2e9d5f3875d94bb722545c65ccbb1ab033750ef4",
+    "github_actions_artifact_expires_at": "2026-11-05T03:13:48Z",
+    "mode": "durable_hashed_local_archive",
+    "retention_requirement": "retain_for_promoted_authority_lifetime",
+    "workflow_evidence_manifest_sha256": "d7d238a92a628adbe5bafe48249e1db6e3135db08a907d56fb49109aedcff339"
+  },
+  "ruleset_mutation_performed": false,
+  "runtime": {
+    "amd64_dependency_lock_path": "assurance/phase2/ci/evaluator-requirements-amd64.lock",
+    "amd64_dependency_lock_sha256": "a18436b0d48f7eacf5b8f4142685a12b11eed3105039e4d3a0eab2b42a3ec22b",
+    "base_manifest_digest": "sha256:fa7a862d74b4decf68fb7d3a85147efc14dbcd3779c0abd56c071d27a1ffee04",
+    "construction_profile_path": "assurance/phase2/ci/p3-runtime-candidate.json",
+    "construction_profile_sha256": "e8a48a406cceb23050a7708338bdde625a9ea21b3e0e707056752eefab279ac4",
+    "images": {
+      "candidate_probe": "ghcr.io/hacker-vs-cracker/mcp-behaviour-guard-phase2-candidate-probe@sha256:9ae3fb2a981faf42f296054a79971f0e561ffbaa456601d2231903f4a60a3fea",
+      "evaluator": "ghcr.io/hacker-vs-cracker/mcp-behaviour-guard-phase2-evaluator@sha256:5213453d138ad38aca8169b398c1f7a9c5e70f25eadaadf88e675e883e6bd8a1",
+      "fixture": "ghcr.io/hacker-vs-cracker/mcp-behaviour-guard-phase2-fixture@sha256:96177277baa5f5d17577b2afe68e774bb7ef671e11611ae937f2c40b780071ae",
+      "gate": "ghcr.io/hacker-vs-cracker/mcp-behaviour-guard-phase2-gate@sha256:bd2006e0fff43d8c63c21b51a850adf313c60efd170b0c2ce0f2dde0a35f1f76",
+      "vertical_candidate": "ghcr.io/hacker-vs-cracker/mcp-behaviour-guard-phase2-vertical-candidate@sha256:249f8866745437db1790527966732f54b1701de93026c54f6962309b2f247d5d"
+    }
+  },
+  "schema_version": 1,
+  "status": "PROMOTED"
+}

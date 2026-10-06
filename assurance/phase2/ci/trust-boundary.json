@@ -61,7 +61,7 @@
     "architecture": "amd64",
     "os": "linux",
     "phase2b_arm64_image_identity_reuse_allowed": false,
-    "runtime_profile_status": "UNPROMOTED"
+    "runtime_profile_status": "PROMOTED"
   },
   "profile_id": "phase2c-trusted-ci-v1",
   "publisher": {
@@ -129,7 +129,9 @@
     "assurance/phase2/candidate-probe/probe.py",
     ".github/workflows/phase2-p3-reference-candidate.yml",
     "assurance/phase2/ci/p3-runtime-candidate.json",
-    "assurance/phase2/ci/p3_reference_candidate.py"
+    "assurance/phase2/ci/p3_reference_candidate.py",
+    "assurance/phase2/ci/p3-promoted-authority.json",
+    "assurance/phase2/ci/p3_promotion.py"
   ],
   "retained_historical_evidence": [
     "assurance/phase2/runtime-profile.json",
@@ -166,5 +168,21 @@
     "requires_actual_gate_pass": true,
     "requires_whole_attempt_audit": true,
     "requires_fence_drain_finalize": true
+  },
+  "p3_promotion": {
+    "status": "PROMOTED",
+    "stage": "REFERENCE_AUTHORITY_PROMOTION",
+    "authority_generation": 1,
+    "supersedes_generation": null,
+    "authority_path": "assurance/phase2/ci/p3-promoted-authority.json",
+    "authority_sha256": "54ddd04418211add290a597b2e775fb05953d7599b4e78014e57b24b105b6f09",
+    "construction_run_id": 37407853746,
+    "construction_run_attempt": 1,
+    "construction_artifact_digest": "sha256:4cecd66755094546c2db096623a8e024f2243669176d97015c5a0805f27c38ae",
+    "retained_archive_sha256": "0a70a9688ef72b47420aab2e2e9d5f3875d94bb722545c65ccbb1ab033750ef4",
+    "reference_origin_attempt_id": "reference-36eba55f59",
+    "approval_bundle_digest": "054304a1d9ad728e7a1fc2b656a0be42b8b05acbf26d8164d3f7747d328bdb5c",
+    "publisher_bootstrap_enabled": false,
+    "ruleset_mutation_enabled": false
   }
 }
