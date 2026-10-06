@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import importlib.util
 import json
@@ -92,6 +93,39 @@ def test_approval_runner_uses_digest_execution_refs_and_binds_selected_images() 
     assert '"platform": platform' in source
     assert '"decision_scope": decision_scope' in source
     assert '"phase2c_reference_candidate_only"' in source
+
+
+def test_every_gate_evaluate_call_binds_expected_candidate_mode() -> None:
+    tree = ast.parse(RUNNER.read_text(encoding="utf-8"))
+    evaluate_argument_lists: list[ast.List] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not isinstance(node.func, ast.Name) or node.func.id != "_gate_run":
+            continue
+        keyword = next((item for item in node.keywords if item.arg == "arguments"), None)
+        if keyword is None or not isinstance(keyword.value, ast.List) or not keyword.value.elts:
+            continue
+        first = keyword.value.elts[0]
+        if isinstance(first, ast.Constant) and first.value == "evaluate":
+            evaluate_argument_lists.append(keyword.value)
+
+    assert len(evaluate_argument_lists) == 3
+    for arguments in evaluate_argument_lists:
+        flag_positions = [
+            index
+            for index, item in enumerate(arguments.elts)
+            if isinstance(item, ast.Constant) and item.value == "--expected-candidate-mode"
+        ]
+        assert len(flag_positions) == 1
+        position = flag_positions[0]
+        assert position + 1 < len(arguments.elts)
+        following = arguments.elts[position + 1]
+        assert not (
+            isinstance(following, ast.Constant)
+            and isinstance(following.value, str)
+            and following.value.startswith("--")
+        )
 
 
 def test_p3_workflow_is_manual_exact_commit_packages_read_only_and_stops_before_promotion() -> None:
