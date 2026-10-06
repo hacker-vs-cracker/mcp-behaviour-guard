@@ -87,7 +87,7 @@ def test_trust_boundary_freezes_candidate_and_publisher_separation() -> None:
         "architecture": "amd64",
         "os": "linux",
         "phase2b_arm64_image_identity_reuse_allowed": False,
-        "runtime_profile_status": "UNPROMOTED",
+        "runtime_profile_status": "PROMOTED",
     }
     assert payload["publisher"]["identity"] == "dedicated-github-app"
     assert payload["publisher"]["integration_id"] is None
