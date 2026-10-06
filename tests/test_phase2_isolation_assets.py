@@ -5,6 +5,7 @@ import importlib.util
 import json
 import re
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -189,23 +190,119 @@ def test_shared_runner_bounds_success_capture() -> None:
     assert len(result.stdout) < 1200
 
 
+def test_shared_runner_uses_bounded_pipes_instead_of_tempfile_spool() -> None:
+    source = ISOLATION.read_text(encoding="utf-8")
+    start = source.index("def _capture_process_output(")
+    end = source.index("\ndef _json_run", start)
+    runner = source[start:end]
+    assert "tempfile.TemporaryFile" not in runner
+    assert "stdout=subprocess.PIPE" in runner
+    assert "stderr=subprocess.PIPE" in runner
+    assert "resource_limit=output_budget_exceeded" in runner
+
+
+def test_shared_runner_enforces_finite_stdout_output_budget() -> None:
+    module = _isolation_module()
+    with pytest.raises(module.IsolationError, match="resource_limit=output_budget_exceeded") as exc:
+        module._run(
+            sys.executable,
+            "-c",
+            "import sys; sys.stdout.write('x' * 200000); sys.stdout.flush()",
+            capture_limit=256,
+            output_budget=4096,
+        )
+    message = str(exc.value)
+    assert "[truncated after 256 bytes]" in message
+    assert len(message) < 1600
+
+
+def test_shared_runner_enforces_finite_stderr_output_budget() -> None:
+    module = _isolation_module()
+    with pytest.raises(module.IsolationError, match="resource_limit=output_budget_exceeded") as exc:
+        module._run(
+            sys.executable,
+            "-c",
+            "import sys; sys.stderr.write('y' * 200000); sys.stderr.flush()",
+            capture_limit=256,
+            output_budget=4096,
+        )
+    message = str(exc.value)
+    assert "[truncated after 256 bytes]" in message
+    assert len(message) < 1600
+
+
+def test_shared_runner_handles_simultaneous_stdout_stderr_pressure() -> None:
+    module = _isolation_module()
+    code = "\n".join(
+        [
+            "import sys",
+            "for _ in range(256):",
+            "    sys.stdout.write('o' * 512)",
+            "    sys.stdout.flush()",
+            "    sys.stderr.write('e' * 512)",
+            "    sys.stderr.flush()",
+        ]
+    )
+    with pytest.raises(module.IsolationError, match="resource_limit=output_budget_exceeded"):
+        module._run(
+            sys.executable,
+            "-c",
+            code,
+            capture_limit=256,
+            output_budget=8192,
+            timeout=3.0,
+        )
+
+
+def test_shared_runner_budget_breach_terminates_descendant_process_group(tmp_path: Path) -> None:
+    module = _isolation_module()
+    marker = tmp_path / "descendant-survived"
+    child = (
+        "import pathlib,time;"
+        "time.sleep(0.8);"
+        f"pathlib.Path({str(marker)!r}).write_text('survived', encoding='utf-8')"
+    )
+    parent = (
+        "import subprocess,sys,time;"
+        f"subprocess.Popen([sys.executable, '-c', {child!r}]);"
+        "sys.stdout.write('z' * 200000);"
+        "sys.stdout.flush();"
+        "time.sleep(5)"
+    )
+    started = time.monotonic()
+    with pytest.raises(module.IsolationError, match="resource_limit=output_budget_exceeded"):
+        module._run(
+            sys.executable,
+            "-c",
+            parent,
+            capture_limit=256,
+            output_budget=4096,
+            timeout=4.0,
+        )
+    assert time.monotonic() - started < 3.0
+    time.sleep(1.0)
+    assert not marker.exists()
+
+
 def test_shared_runner_terminates_process_group_on_base_exception(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = _isolation_module()
     signals: list[tuple[int, int]] = []
 
+    class FakeStream:
+        def close(self) -> None:
+            return None
+
     class FakeProcess:
         pid = 4242
 
         def __init__(self) -> None:
             self.returncode: int | None = None
-            self.wait_calls = 0
+            self.stdout = FakeStream()
+            self.stderr = FakeStream()
 
         def wait(self, timeout: float | None = None) -> int:
-            self.wait_calls += 1
-            if self.wait_calls == 1:
-                raise KeyboardInterrupt()
             self.returncode = -15
             return self.returncode
 
@@ -215,8 +312,12 @@ def test_shared_runner_terminates_process_group_on_base_exception(
         def kill(self) -> None:
             self.returncode = -9
 
+    def interrupt(*_args: object, **_kwargs: object) -> object:
+        raise KeyboardInterrupt()
+
     fake = FakeProcess()
     monkeypatch.setattr(module.subprocess, "Popen", lambda *_args, **_kwargs: fake)
+    monkeypatch.setattr(module, "_capture_process_output", interrupt)
     monkeypatch.setattr(module.os, "killpg", lambda pid, sig: signals.append((pid, sig)))
 
     with pytest.raises(KeyboardInterrupt):

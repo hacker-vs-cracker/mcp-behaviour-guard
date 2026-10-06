@@ -5,6 +5,7 @@ import contextlib
 import json
 import os
 import re
+import selectors
 import signal
 import socketserver
 import subprocess
@@ -22,6 +23,10 @@ class IsolationError(RuntimeError):
 
 _COMMAND_TIMEOUT_SECONDS = 120.0
 _CAPTURE_LIMIT_BYTES = 128 * 1024
+_OUTPUT_BUDGET_BYTES = 1024 * 1024
+_PIPE_READ_CHUNK_BYTES = 64 * 1024
+_PROCESS_POLL_INTERVAL_SECONDS = 0.05
+_PIPE_DRAIN_GRACE_SECONDS = 0.5
 _REDACTION_PATTERNS = (
     re.compile(r"(?i)(bearer\s+)([^\s'\"]+)"),
     re.compile(
@@ -74,53 +79,189 @@ def _redact(value: str, args: tuple[str, ...]) -> str:
     return redacted
 
 
+def _capture_process_output(
+    process: subprocess.Popen[bytes],
+    *,
+    timeout: float,
+    capture_limit: int,
+    output_budget: int,
+) -> tuple[int, bytes, bytes, bool, bool, int]:
+    if process.stdout is None or process.stderr is None:
+        raise IsolationError("command output pipes were not created")
+
+    stdout_capture = bytearray()
+    stderr_capture = bytearray()
+    stdout_fd = process.stdout.fileno()
+    stderr_fd = process.stderr.fileno()
+    os.set_blocking(stdout_fd, False)
+    os.set_blocking(stderr_fd, False)
+
+    selector = selectors.DefaultSelector()
+    selector.register(stdout_fd, selectors.EVENT_READ, stdout_capture)
+    selector.register(stderr_fd, selectors.EVENT_READ, stderr_capture)
+    open_fds = {stdout_fd, stderr_fd}
+    deadline = time.monotonic() + timeout
+    drain_deadline: float | None = None
+    forced_descendant_cleanup = False
+    timed_out = False
+    budget_exceeded = False
+    emitted_bytes = 0
+    returncode: int | None = None
+
+    try:
+        while open_fds or returncode is None:
+            now = time.monotonic()
+            if returncode is None:
+                returncode = process.poll()
+
+            if returncode is None and not budget_exceeded and not timed_out and now >= deadline:
+                timed_out = True
+                _terminate_process_group(process)
+                returncode = process.poll()
+                if returncode is None:
+                    raise IsolationError("command process did not terminate after timeout")
+                drain_deadline = time.monotonic() + _PIPE_DRAIN_GRACE_SECONDS
+
+            if returncode is not None and open_fds and drain_deadline is None:
+                drain_deadline = now + _PIPE_DRAIN_GRACE_SECONDS
+
+            if not open_fds:
+                if returncode is not None:
+                    break
+                time.sleep(_PROCESS_POLL_INTERVAL_SECONDS)
+                continue
+
+            wait_for = _PROCESS_POLL_INTERVAL_SECONDS
+            if returncode is None and not budget_exceeded and not timed_out:
+                wait_for = min(wait_for, max(0.0, deadline - now))
+            if drain_deadline is not None:
+                wait_for = min(wait_for, max(0.0, drain_deadline - now))
+
+            events = selector.select(wait_for)
+            for key, _mask in events:
+                fd = int(key.fd)
+                try:
+                    chunk = os.read(fd, _PIPE_READ_CHUNK_BYTES)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    with contextlib.suppress(Exception):
+                        selector.unregister(fd)
+                    open_fds.discard(fd)
+                    continue
+
+                emitted_bytes += len(chunk)
+                capture = key.data
+                if not isinstance(capture, bytearray):
+                    raise IsolationError("command output capture state is invalid")
+                remaining = capture_limit + 1 - len(capture)
+                if remaining > 0:
+                    capture.extend(chunk[:remaining])
+
+                if emitted_bytes > output_budget and not budget_exceeded:
+                    budget_exceeded = True
+                    _terminate_process_group(process)
+                    returncode = process.poll()
+                    if returncode is None:
+                        raise IsolationError(
+                            "command process did not terminate after output budget breach"
+                        )
+                    drain_deadline = time.monotonic() + _PIPE_DRAIN_GRACE_SECONDS
+
+            if open_fds and drain_deadline is not None and time.monotonic() >= drain_deadline:
+                if budget_exceeded or timed_out:
+                    for fd in tuple(open_fds):
+                        with contextlib.suppress(Exception):
+                            selector.unregister(fd)
+                    open_fds.clear()
+                    break
+                if not forced_descendant_cleanup:
+                    _terminate_process_group(process)
+                    forced_descendant_cleanup = True
+                    drain_deadline = time.monotonic() + _PIPE_DRAIN_GRACE_SECONDS
+                else:
+                    for fd in tuple(open_fds):
+                        with contextlib.suppress(Exception):
+                            selector.unregister(fd)
+                    open_fds.clear()
+                    break
+    finally:
+        selector.close()
+
+    if returncode is None:
+        raise IsolationError("command return code unavailable after output drain")
+    return (
+        returncode,
+        bytes(stdout_capture),
+        bytes(stderr_capture),
+        timed_out,
+        budget_exceeded,
+        emitted_bytes,
+    )
+
+
 def _run(
     *args: str,
     check: bool = True,
     timeout: float = _COMMAND_TIMEOUT_SECONDS,
     capture_limit: int = _CAPTURE_LIMIT_BYTES,
+    output_budget: int = _OUTPUT_BUDGET_BYTES,
 ) -> subprocess.CompletedProcess[str]:
     if timeout <= 0:
         raise ValueError("timeout must be positive")
     if capture_limit <= 0:
         raise ValueError("capture_limit must be positive")
+    if output_budget <= 0:
+        raise ValueError("output_budget must be positive")
 
-    with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
-        process = subprocess.Popen(
-            args,
-            stdout=stdout_file,
-            stderr=stderr_file,
-            start_new_session=True,
+    process = subprocess.Popen(
+        args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        (
+            returncode,
+            stdout_bytes,
+            stderr_bytes,
+            timed_out,
+            budget_exceeded,
+            emitted_bytes,
+        ) = _capture_process_output(
+            process,
+            timeout=timeout,
+            capture_limit=capture_limit,
+            output_budget=output_budget,
         )
-        timed_out = False
+    except BaseException as exc:
+        primary_tb = exc.__traceback__
         try:
-            returncode = process.wait(timeout=timeout)
-        except subprocess.TimeoutExpired as timeout_exc:
-            timed_out = True
             _terminate_process_group(process)
-            polled = process.poll()
-            if polled is None:
-                raise IsolationError(
-                    "command process did not terminate after timeout"
-                ) from timeout_exc
-            returncode = polled
-        except BaseException as exc:
-            primary_tb = exc.__traceback__
-            try:
-                _terminate_process_group(process)
-            except Exception as termination_exc:
-                raise exc.with_traceback(primary_tb) from termination_exc
-            raise
+        except Exception as termination_exc:
+            raise exc.with_traceback(primary_tb) from termination_exc
+        raise
+    finally:
+        if process.stdout is not None:
+            with contextlib.suppress(Exception):
+                process.stdout.close()
+        if process.stderr is not None:
+            with contextlib.suppress(Exception):
+                process.stderr.close()
 
-        stdout_file.seek(0)
-        stderr_file.seek(0)
-        stdout = _decode_capture(stdout_file.read(capture_limit + 1), capture_limit)
-        stderr = _decode_capture(stderr_file.read(capture_limit + 1), capture_limit)
-
+    stdout = _decode_capture(stdout_bytes, capture_limit)
+    stderr = _decode_capture(stderr_bytes, capture_limit)
     result = subprocess.CompletedProcess(args, returncode, stdout, stderr)
     safe_command = _redact(" ".join(args), args)
     safe_stdout = _redact(stdout, args)
     safe_stderr = _redact(stderr, args)
+
+    if budget_exceeded:
+        raise IsolationError(
+            "resource_limit=output_budget_exceeded "
+            f"budget={output_budget} emitted_at_least={emitted_bytes}: {safe_command}\n"
+            f"stdout={safe_stdout}\nstderr={safe_stderr}"
+        )
     if timed_out:
         raise IsolationError(
             f"command timed out after {timeout:.1f}s: {safe_command}\n"
