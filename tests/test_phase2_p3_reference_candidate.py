@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -151,8 +153,6 @@ def test_committed_bundle_manifest_validation_detects_tamper(tmp_path: Path) -> 
     decision.write_text('{"assessed_outcome":"PASS"}\n', encoding="utf-8")
     pointer.write_text('{"approval_bundle_digest":"abc"}\n', encoding="utf-8")
 
-    import hashlib
-
     files = {
         decision.name: hashlib.sha256(decision.read_bytes()).hexdigest(),
         pointer.name: hashlib.sha256(pointer.read_bytes()).hexdigest(),
@@ -172,3 +172,434 @@ def test_committed_bundle_manifest_validation_detects_tamper(tmp_path: Path) -> 
     decision.write_text('{"assessed_outcome":"BLOCK"}\n', encoding="utf-8")
     with pytest.raises(module.P3Error, match="manifest hash mismatch"):
         module._validate_committed_bundle(bundle)
+
+
+def _sha_test(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _write_json_test(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _refresh_manifest_test(bundle: Path) -> None:
+    files = {
+        path.name: _sha_test(path)
+        for path in sorted(bundle.iterdir())
+        if path.is_file() and path.name != "manifest.json"
+    }
+    _write_json_test(
+        bundle / "manifest.json",
+        {"schema_version": 1, "files": files, "manifest_self_hash": None},
+    )
+
+
+def _decision_test(
+    outcome: str,
+    *,
+    authority_binding: str = "valid",
+    subject_binding: str = "valid",
+    evidence_completeness: str = "complete",
+    authority_errors: list[str] | None = None,
+    binding_errors: list[str] | None = None,
+    completion_errors: list[str] | None = None,
+    review_reasons: list[str] | None = None,
+    confirmed_violations: list[dict[str, str]] | None = None,
+    source_validation: dict[str, dict[str, object]] | None = None,
+) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "assessed_outcome": outcome,
+        "authority_binding": authority_binding,
+        "subject_binding": subject_binding,
+        "source_validation": source_validation or {},
+        "confirmed_violations": confirmed_violations or [],
+        "evidence_completeness": evidence_completeness,
+        "attempt_completion": "finalized",
+        "authority_errors": authority_errors or [],
+        "binding_errors": binding_errors or [],
+        "completion_errors": completion_errors or [],
+        "review_reasons": review_reasons or [],
+        "freshness_basis": "test fixture",
+        "scope": "phase2c_trusted_ci_gate_only",
+    }
+
+
+def _build_q2_full_matrix(tmp_path: Path):
+    module = _module()
+    profile = json.loads(PROFILE.read_text(encoding="utf-8"))
+    output = tmp_path / "output"
+    result = tmp_path / "p3-result.json"
+
+    policy_path = output / "policy-profile.json"
+    policy = {
+        "platform": "linux/amd64",
+        "decision_scope": "phase2c_trusted_ci_gate_only",
+        "contract_sha256": _sha_test(ROOT / "assurance/phase2/vertical/contract.yaml"),
+        "expected_checks_sha256": _sha_test(ROOT / "assurance/phase2/gate/expected-checks.json"),
+        "gate_rules_sha256": _sha_test(ROOT / "assurance/phase2/gate/gate-rules.json"),
+        "gate_source_sha256": _sha_test(ROOT / "assurance/phase2/gate/gate.py"),
+        "orchestrator_sha256": _sha_test(RUNNER),
+        "runtime_profile_sha256": _sha_test(PROFILE),
+        "fixture_profile_sha256": _sha_test(ROOT / "assurance/phase2/fixture-profile.json"),
+        "images": {
+            "evaluator": profile["images"]["evaluator"]["execution_ref"],
+            "fixture": profile["images"]["fixture"]["execution_ref"],
+            "gate": profile["images"]["gate"]["execution_ref"],
+        },
+    }
+    _write_json_test(policy_path, policy)
+    policy_digest = _sha_test(policy_path)
+
+    reference_id = "reference-attempt"
+    ref_root = output / "evidence" / "reference"
+    for name, value in {
+        "report.json": {"schema_version": 2},
+        "receipt.json": {"schema_version": 1},
+        "tool-inventory.json": {"tools": []},
+    }.items():
+        _write_json_test(ref_root / "run" / name, value)
+    _write_json_test(
+        ref_root / "execution-context.json",
+        {
+            "attempt_id": reference_id,
+            "candidate_mode": "good",
+            "attempt_completion": "finalized",
+            "cleanup_complete": True,
+            "platform": "linux/amd64",
+            "candidate_image": profile["images"]["vertical_candidate"]["execution_ref"],
+            "evaluator_image": profile["images"]["evaluator"]["execution_ref"],
+            "fixture_image": profile["images"]["fixture"]["execution_ref"],
+            "gate_image": profile["images"]["gate"]["execution_ref"],
+        },
+    )
+    _write_json_test(
+        ref_root / "final-snapshot.json",
+        {
+            "state": "FENCED",
+            "audit_complete": True,
+            "requests": [{"state": "COMMITTED"}],
+        },
+    )
+    _write_json_test(ref_root / "finalize-response.json", {"state": "FINALIZED"})
+
+    authority = output / "authority" / "approval-bundle.json"
+    approval = {
+        "schema_version": 1,
+        "policy_profile_digest": policy_digest,
+        "reference": {
+            "origin_attempt_id": reference_id,
+            "candidate_image": profile["images"]["vertical_candidate"]["execution_ref"],
+            "manifest": {
+                "report_json_sha256": _sha_test(ref_root / "run" / "report.json"),
+                "receipt_json_sha256": _sha_test(ref_root / "run" / "receipt.json"),
+                "tool_inventory_sha256": _sha_test(ref_root / "run" / "tool-inventory.json"),
+                "execution_context_sha256": _sha_test(ref_root / "execution-context.json"),
+                "final_snapshot_sha256": _sha_test(ref_root / "final-snapshot.json"),
+            },
+        },
+    }
+    _write_json_test(authority, approval)
+    approval_digest = _sha_test(authority)
+    _write_json_test(
+        output / "authority" / "approval-bundle.json.meta.json",
+        {"approval_bundle_sha256": approval_digest},
+    )
+
+    candidate_ids = {
+        "candidate-good": "candidate-good-attempt",
+        "candidate-write": "candidate-write-attempt",
+        "candidate-review": "candidate-review-attempt",
+        "candidate-missing": "candidate-missing-attempt",
+    }
+    summary_path = output / "approval-summary.json"
+    _write_json_test(
+        summary_path,
+        {
+            "schema_version": 1,
+            "scope": "phase2c_reference_candidate_only",
+            "platform": "linux/amd64",
+            "decision_scope": "phase2c_trusted_ci_gate_only",
+            "runtime_profile_sha256": _sha_test(PROFILE),
+            "policy_profile_digest": policy_digest,
+            "approval_bundle_digest": approval_digest,
+            "reference_attempt_id": reference_id,
+            "candidate_attempt_ids": candidate_ids,
+            "outcomes": dict(module.EXPECTED_OUTCOMES),
+        },
+    )
+
+    write_final = {
+        "audit_complete": True,
+        "requests": [{"request_id": "write-1", "state": "COMMITTED"}],
+        "audit": [{"request_id": "write-1", "operation": "record_write"}],
+    }
+    _write_json_test(output / "evidence" / "candidate-write" / "final-snapshot.json", write_final)
+
+    decisions = {
+        "candidate-good": _decision_test("PASS"),
+        "candidate-write": _decision_test(
+            "BLOCK", confirmed_violations=[{"operation": "record_write"}]
+        ),
+        "candidate-review": _decision_test(
+            "REVIEW", review_reasons=["structured review condition"]
+        ),
+        "candidate-missing": _decision_test(
+            "INVALID",
+            evidence_completeness="invalid",
+            completion_errors=["structured incomplete evidence"],
+        ),
+        "tampered-context": _decision_test(
+            "INVALID",
+            subject_binding="invalid",
+            binding_errors=["structured binding invalidity"],
+        ),
+        "swapped-run": _decision_test(
+            "INVALID",
+            source_validation={
+                "guard_report": {
+                    "binding": "invalid",
+                    "validation": "invalid",
+                    "errors": ["structured source mismatch"],
+                }
+            },
+        ),
+        "stale-attempt": _decision_test(
+            "INVALID",
+            subject_binding="invalid",
+            binding_errors=["structured stale attempt binding"],
+        ),
+        "tampered-approval": _decision_test(
+            "INVALID",
+            authority_binding="invalid",
+            authority_errors=["structured authority invalidity"],
+        ),
+    }
+
+    completed = output / "results" / "completed"
+    for case, decision in decisions.items():
+        bundle = completed / case
+        bundle.mkdir(parents=True)
+        _write_json_test(bundle / "decision.json", decision)
+        _write_json_test(
+            bundle / "authority-pointer.json",
+            {
+                "approval_bundle_digest": approval_digest,
+                "policy_profile_digest": policy_digest,
+            },
+        )
+        if case in candidate_ids:
+            _write_json_test(
+                bundle / "execution-context.json",
+                {"attempt_id": candidate_ids[case]},
+            )
+        if case == "candidate-write":
+            _write_json_test(bundle / "final-snapshot.json", write_final)
+        _write_json_test(bundle / "comparator.json", {})
+        _refresh_manifest_test(bundle)
+
+    _write_json_test(
+        output / "gate-resource-ledger.json",
+        {
+            "cleanup_complete": True,
+            "finish_only_recovery_required": False,
+            "committed_pass_permitted": True,
+        },
+    )
+    return module, output, result, summary_path, reference_id
+
+
+def _rewrite_bundle_json_test(bundle: Path, name: str, mutate) -> None:
+    path = bundle / name
+    value = json.loads(path.read_text(encoding="utf-8"))
+    mutate(value)
+    _write_json_test(path, value)
+    _refresh_manifest_test(bundle)
+
+
+def test_q2_composed_full_matrix_adjudicates_complete_committed_evidence(tmp_path: Path) -> None:
+    module, output, result, _, _ = _build_q2_full_matrix(tmp_path)
+    adjudicated = module.adjudicate(
+        repo=ROOT,
+        profile_path=PROFILE,
+        output_dir=output,
+        result=result,
+    )
+    assert adjudicated["status"] == "P3_REFERENCE_CANDIDATE_VALID"
+    assert adjudicated["actual_gate_pass"] is True
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("missing-negative-bundle", "case set mismatch"),
+        ("unexpected-extra-bundle", "case set mismatch"),
+        ("changed-negative-decision", "outcome mismatch"),
+        ("corrupted-negative-file", "manifest hash mismatch"),
+        ("wrong-authority-pointer", "wrong approval authority"),
+        ("wrong-policy-pointer", "wrong policy"),
+        ("duplicate-primary-attempt", "not unique"),
+        ("primary-attempt-equals-reference", "not distinct"),
+        ("missing-primary-mapping", "mapping mismatch"),
+        ("extra-primary-mapping", "mapping mismatch"),
+        ("summary-decision-mismatch", "outcome mismatch"),
+        ("missing-review-reason", "structured review cause"),
+        ("missing-candidate-missing-reason", "structured invalid evidence"),
+        ("missing-tampered-context-reason", "subject/binding invalidity"),
+        ("missing-swapped-run-reason", "structural mismatch evidence"),
+        ("missing-stale-attempt-reason", "attempt/binding invalidity"),
+        ("missing-tampered-approval-reason", "authority invalidity"),
+        ("primary-context-mismatch", "attempt binding mismatch"),
+        ("committed-write-positive-control-missing", "committed bundle lacks matching"),
+    ],
+)
+def test_q2_composed_full_matrix_rejects_invalid_committed_evidence(
+    tmp_path: Path, mutation: str, message: str
+) -> None:
+    module, output, result, summary_path, reference_id = _build_q2_full_matrix(tmp_path / mutation)
+    completed = output / "results" / "completed"
+
+    if mutation == "missing-negative-bundle":
+        shutil.rmtree(completed / "candidate-review")
+    elif mutation == "unexpected-extra-bundle":
+        (completed / "unexpected").mkdir()
+    elif mutation == "changed-negative-decision":
+        _rewrite_bundle_json_test(
+            completed / "tampered-context",
+            "decision.json",
+            lambda value: value.__setitem__("assessed_outcome", "PASS"),
+        )
+    elif mutation == "corrupted-negative-file":
+        path = completed / "candidate-review" / "decision.json"
+        value = json.loads(path.read_text(encoding="utf-8"))
+        value["review_reasons"] = ["corrupted without manifest refresh"]
+        _write_json_test(path, value)
+    elif mutation == "wrong-authority-pointer":
+        _rewrite_bundle_json_test(
+            completed / "candidate-review",
+            "authority-pointer.json",
+            lambda value: value.__setitem__("approval_bundle_digest", "0" * 64),
+        )
+    elif mutation == "wrong-policy-pointer":
+        _rewrite_bundle_json_test(
+            completed / "candidate-review",
+            "authority-pointer.json",
+            lambda value: value.__setitem__("policy_profile_digest", "0" * 64),
+        )
+    elif mutation in {
+        "duplicate-primary-attempt",
+        "primary-attempt-equals-reference",
+        "missing-primary-mapping",
+        "extra-primary-mapping",
+    }:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        mapping = summary["candidate_attempt_ids"]
+        if mutation == "duplicate-primary-attempt":
+            mapping["candidate-review"] = mapping["candidate-good"]
+        elif mutation == "primary-attempt-equals-reference":
+            mapping["candidate-review"] = reference_id
+        elif mutation == "missing-primary-mapping":
+            mapping.pop("candidate-review")
+        else:
+            mapping["tampered-context"] = "unexpected-attempt"
+        _write_json_test(summary_path, summary)
+    elif mutation == "summary-decision-mismatch":
+        _rewrite_bundle_json_test(
+            completed / "candidate-review",
+            "decision.json",
+            lambda value: value.__setitem__("assessed_outcome", "BLOCK"),
+        )
+    elif mutation == "missing-review-reason":
+        _rewrite_bundle_json_test(
+            completed / "candidate-review",
+            "decision.json",
+            lambda value: value.__setitem__("review_reasons", []),
+        )
+    elif mutation == "missing-candidate-missing-reason":
+
+        def clear_candidate_missing(value):
+            value["evidence_completeness"] = "complete"
+            value["completion_errors"] = []
+            value["source_validation"] = {}
+
+        _rewrite_bundle_json_test(
+            completed / "candidate-missing",
+            "decision.json",
+            clear_candidate_missing,
+        )
+    elif mutation == "missing-tampered-context-reason":
+
+        def clear_tampered_context(value):
+            value["subject_binding"] = "valid"
+            value["binding_errors"] = []
+
+        _rewrite_bundle_json_test(
+            completed / "tampered-context",
+            "decision.json",
+            clear_tampered_context,
+        )
+    elif mutation == "missing-swapped-run-reason":
+
+        def clear_swapped_run(value):
+            value["subject_binding"] = "valid"
+            value["binding_errors"] = []
+            value["evidence_completeness"] = "complete"
+            value["completion_errors"] = []
+            value["source_validation"] = {}
+
+        _rewrite_bundle_json_test(
+            completed / "swapped-run",
+            "decision.json",
+            clear_swapped_run,
+        )
+    elif mutation == "missing-stale-attempt-reason":
+
+        def clear_stale_attempt(value):
+            value["subject_binding"] = "valid"
+            value["binding_errors"] = []
+
+        _rewrite_bundle_json_test(
+            completed / "stale-attempt",
+            "decision.json",
+            clear_stale_attempt,
+        )
+    elif mutation == "missing-tampered-approval-reason":
+
+        def clear_tampered_approval(value):
+            value["authority_binding"] = "valid"
+            value["authority_errors"] = []
+
+        _rewrite_bundle_json_test(
+            completed / "tampered-approval",
+            "decision.json",
+            clear_tampered_approval,
+        )
+    elif mutation == "primary-context-mismatch":
+        _rewrite_bundle_json_test(
+            completed / "candidate-good",
+            "execution-context.json",
+            lambda value: value.__setitem__("attempt_id", "wrong-attempt"),
+        )
+    elif mutation == "committed-write-positive-control-missing":
+
+        def clear_committed_write(value):
+            value["requests"] = []
+            value["audit"] = []
+            value["audit_complete"] = True
+
+        _rewrite_bundle_json_test(
+            completed / "candidate-write",
+            "final-snapshot.json",
+            clear_committed_write,
+        )
+    else:
+        raise AssertionError(f"unknown mutation: {mutation}")
+
+    with pytest.raises(module.P3Error, match=message):
+        module.adjudicate(
+            repo=ROOT,
+            profile_path=PROFILE,
+            output_dir=output,
+            result=result,
+        )

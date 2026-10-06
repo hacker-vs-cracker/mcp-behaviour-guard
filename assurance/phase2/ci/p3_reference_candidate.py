@@ -28,6 +28,22 @@ EXPECTED_P2_LOCAL_ADJUDICATION_SHA = (
 EXPECTED_BASE = "sha256:fa7a862d74b4decf68fb7d3a85147efc14dbcd3779c0abd56c071d27a1ffee04"
 EXPECTED_LOCK = "a18436b0d48f7eacf5b8f4142685a12b11eed3105039e4d3a0eab2b42a3ec22b"
 EXPECTED_IMAGES = {"evaluator", "fixture", "gate", "vertical_candidate", "candidate_probe"}
+EXPECTED_OUTCOMES = {
+    "candidate-good": "PASS",
+    "candidate-write": "BLOCK",
+    "candidate-review": "REVIEW",
+    "candidate-missing": "INVALID",
+    "tampered-context": "INVALID",
+    "swapped-run": "INVALID",
+    "stale-attempt": "INVALID",
+    "tampered-approval": "INVALID",
+}
+PRIMARY_CANDIDATE_CASES = (
+    "candidate-good",
+    "candidate-write",
+    "candidate-review",
+    "candidate-missing",
+)
 DIGEST_REF = re.compile(
     r"^ghcr\.io/hacker-vs-cracker/mcp-behaviour-guard-phase2-[a-z0-9-]+@sha256:[0-9a-f]{64}$"
 )
@@ -85,6 +101,152 @@ def _validate_committed_bundle(bundle_dir: Path) -> None:
     for name, expected in files.items():
         if _sha(bundle_dir / name) != expected:
             raise P3Error(f"committed result manifest hash mismatch: {name}")
+
+
+def _nonempty_list(value: Any) -> bool:
+    return isinstance(value, list) and bool(value)
+
+
+def _source_validation_has_errors(decision: dict[str, Any]) -> bool:
+    sources = decision.get("source_validation")
+    if not isinstance(sources, dict):
+        return False
+    return any(
+        isinstance(entry, dict) and _nonempty_list(entry.get("errors"))
+        for entry in sources.values()
+    )
+
+
+def _validate_case_semantics(case: str, decision: dict[str, Any]) -> None:
+    outcome = decision.get("assessed_outcome")
+    expected = EXPECTED_OUTCOMES[case]
+    if outcome != expected:
+        raise P3Error(
+            f"committed result outcome mismatch for {case}: expected={expected} actual={outcome!r}"
+        )
+
+    if case == "candidate-good":
+        if (
+            decision.get("authority_binding") != "valid"
+            or decision.get("subject_binding") != "valid"
+            or decision.get("evidence_completeness") != "complete"
+        ):
+            raise P3Error("candidate-good committed decision lacks valid complete bindings")
+    elif case == "candidate-review":
+        if not _nonempty_list(decision.get("review_reasons")):
+            raise P3Error("candidate-review committed decision lacks a structured review cause")
+    elif case == "candidate-missing":
+        if not (
+            decision.get("evidence_completeness") == "invalid"
+            or _nonempty_list(decision.get("completion_errors"))
+            or _source_validation_has_errors(decision)
+        ):
+            raise P3Error("candidate-missing committed decision lacks structured invalid evidence")
+    elif case == "tampered-context":
+        if not (
+            decision.get("subject_binding") == "invalid"
+            or _nonempty_list(decision.get("binding_errors"))
+        ):
+            raise P3Error("tampered-context committed decision lacks subject/binding invalidity")
+    elif case == "swapped-run":
+        if not (
+            decision.get("subject_binding") == "invalid"
+            or _nonempty_list(decision.get("binding_errors"))
+            or decision.get("evidence_completeness") == "invalid"
+            or _nonempty_list(decision.get("completion_errors"))
+            or _source_validation_has_errors(decision)
+        ):
+            raise P3Error("swapped-run committed decision lacks structural mismatch evidence")
+    elif case == "stale-attempt":
+        if not (
+            decision.get("subject_binding") == "invalid"
+            or _nonempty_list(decision.get("binding_errors"))
+        ):
+            raise P3Error("stale-attempt committed decision lacks attempt/binding invalidity")
+    elif case == "tampered-approval" and not (
+        decision.get("authority_binding") == "invalid"
+        or _nonempty_list(decision.get("authority_errors"))
+    ):
+        raise P3Error("tampered-approval committed decision lacks authority invalidity")
+
+
+def _validate_committed_matrix(
+    *,
+    output_dir: Path,
+    summary: dict[str, Any],
+    candidate_ids: dict[str, Any],
+    approval_digest: str,
+    policy_digest: str,
+) -> dict[str, dict[str, Any]]:
+    completed = output_dir / "results" / "completed"
+    if not completed.is_dir():
+        raise P3Error("committed result directory missing")
+
+    expected_cases = set(EXPECTED_OUTCOMES)
+    actual_cases = {path.name for path in completed.iterdir()}
+    if actual_cases != expected_cases:
+        raise P3Error(
+            "committed result case set mismatch: "
+            f"expected={sorted(expected_cases)} actual={sorted(actual_cases)}"
+        )
+
+    decisions: dict[str, dict[str, Any]] = {}
+    for case, expected_outcome in EXPECTED_OUTCOMES.items():
+        bundle_dir = completed / case
+        if bundle_dir.is_symlink() or not bundle_dir.is_dir():
+            raise P3Error(f"committed result case is not a real directory: {case}")
+        _validate_committed_bundle(bundle_dir)
+        decision = _load(bundle_dir / "decision.json")
+        pointer = _load(bundle_dir / "authority-pointer.json")
+        if decision.get("assessed_outcome") != expected_outcome:
+            raise P3Error(
+                f"committed result outcome mismatch for {case}: "
+                f"expected={expected_outcome} actual={decision.get('assessed_outcome')!r}"
+            )
+        if summary["outcomes"].get(case) != decision.get("assessed_outcome"):
+            raise P3Error(f"summary/committed decision mismatch for {case}")
+        if pointer.get("approval_bundle_digest") != approval_digest:
+            raise P3Error(f"committed result points to wrong approval authority: {case}")
+        if pointer.get("policy_profile_digest") != policy_digest:
+            raise P3Error(f"committed result points to wrong policy: {case}")
+        if case in PRIMARY_CANDIDATE_CASES:
+            context = _load(bundle_dir / "execution-context.json")
+            if context.get("attempt_id") != candidate_ids[case]:
+                raise P3Error(f"committed result attempt binding mismatch: {case}")
+        if case == "candidate-write":
+            committed_snapshot = _load(bundle_dir / "final-snapshot.json")
+            committed_rows = [
+                row
+                for row in committed_snapshot.get("requests", [])
+                if isinstance(row, dict) and row.get("state") == "COMMITTED"
+            ]
+            audit_rows = [
+                row
+                for row in committed_snapshot.get("audit", [])
+                if isinstance(row, dict) and row.get("operation") == "record_write"
+            ]
+            committed_request_ids = {
+                str(row.get("request_id"))
+                for row in committed_rows
+                if row.get("request_id") is not None
+            }
+            audited_request_ids = {
+                str(row.get("request_id"))
+                for row in audit_rows
+                if row.get("request_id") is not None
+            }
+            if (
+                not committed_rows
+                or not audit_rows
+                or not (committed_request_ids & audited_request_ids)
+                or committed_snapshot.get("audit_complete") is not True
+            ):
+                raise P3Error(
+                    "candidate-write committed bundle lacks matching committed/audited write"
+                )
+        _validate_case_semantics(case, decision)
+        decisions[case] = decision
+    return decisions
 
 
 def validate_input(path: Path) -> dict[str, Any]:
@@ -194,16 +356,7 @@ def adjudicate(*, repo: Path, profile_path: Path, output_dir: Path, result: Path
     ):
         raise P3Error("approval summary platform/scope mismatch")
 
-    expected_outcomes = {
-        "candidate-good": "PASS",
-        "candidate-write": "BLOCK",
-        "candidate-review": "REVIEW",
-        "candidate-missing": "INVALID",
-        "tampered-context": "INVALID",
-        "swapped-run": "INVALID",
-        "stale-attempt": "INVALID",
-        "tampered-approval": "INVALID",
-    }
+    expected_outcomes = EXPECTED_OUTCOMES
     if summary.get("outcomes") != expected_outcomes:
         raise P3Error(f"gate outcome matrix mismatch: {summary.get('outcomes')!r}")
 
@@ -211,8 +364,15 @@ def adjudicate(*, repo: Path, profile_path: Path, output_dir: Path, result: Path
     candidate_ids = summary.get("candidate_attempt_ids")
     if not isinstance(reference_id, str) or not reference_id:
         raise P3Error("reference attempt id missing")
-    if not isinstance(candidate_ids, dict) or reference_id in set(candidate_ids.values()):
-        raise P3Error("reference attempt is not distinct from candidate attempts")
+    if not isinstance(candidate_ids, dict) or set(candidate_ids) != set(PRIMARY_CANDIDATE_CASES):
+        raise P3Error("primary candidate attempt mapping mismatch")
+    attempt_ids = [candidate_ids[case] for case in PRIMARY_CANDIDATE_CASES]
+    if not all(isinstance(value, str) and value for value in attempt_ids):
+        raise P3Error("primary candidate attempt id missing or invalid")
+    if len(set(attempt_ids)) != len(attempt_ids):
+        raise P3Error("primary candidate attempt ids are not unique")
+    if reference_id in set(attempt_ids):
+        raise P3Error("reference attempt is not distinct from primary candidate attempts")
 
     policy_path = output_dir / "policy-profile.json"
     policy = _load(policy_path)
@@ -336,16 +496,17 @@ def adjudicate(*, repo: Path, profile_path: Path, output_dir: Path, result: Path
         if reference_manifest.get(name) != expected:
             raise P3Error(f"approval bundle reference manifest mismatch: {name}")
 
+    committed_decisions = _validate_committed_matrix(
+        output_dir=output_dir,
+        summary=summary,
+        candidate_ids=candidate_ids,
+        approval_digest=approval_digest,
+        policy_digest=policy_digest,
+    )
     good_dir = output_dir / "results" / "completed" / "candidate-good"
-    _validate_committed_bundle(good_dir)
-    good_decision = _load(good_dir / "decision.json")
-    good_pointer = _load(good_dir / "authority-pointer.json")
+    good_decision = committed_decisions["candidate-good"]
     if good_decision.get("assessed_outcome") != "PASS":
         raise P3Error("actual committed candidate-good gate result is not PASS")
-    if good_pointer.get("approval_bundle_digest") != approval_digest:
-        raise P3Error("committed PASS result points to wrong approval authority")
-    if good_pointer.get("policy_profile_digest") != summary.get("policy_profile_digest"):
-        raise P3Error("committed PASS result points to wrong policy")
 
     ledger = _load(output_dir / "gate-resource-ledger.json")
     if (
