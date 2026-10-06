@@ -131,7 +131,9 @@
     "assurance/phase2/ci/p3-runtime-candidate.json",
     "assurance/phase2/ci/p3_reference_candidate.py",
     "assurance/phase2/ci/p3-promoted-authority.json",
-    "assurance/phase2/ci/p3_promotion.py"
+    "assurance/phase2/ci/p3_promotion.py",
+    "assurance/phase2/ci/p4-resource-policy.json",
+    "assurance/phase2/ci/p4_resource_policy.py"
   ],
   "retained_historical_evidence": [
     "assurance/phase2/runtime-profile.json",
@@ -184,5 +186,14 @@
     "approval_bundle_digest": "054304a1d9ad728e7a1fc2b656a0be42b8b05acbf26d8164d3f7747d328bdb5c",
     "publisher_bootstrap_enabled": false,
     "ruleset_mutation_enabled": false
+  },
+  "p4_resource_policy": {
+    "status": "PRE_P4_RESOURCE_POLICY_FROZEN",
+    "stage": "POLICY_FOUNDATION_ONLY",
+    "policy_path": "assurance/phase2/ci/p4-resource-policy.json",
+    "policy_sha256": "cd321216217fbc11034e0aeb0a4afaca7ae42607142cd9158e31d094f54a707f",
+    "validator_path": "assurance/phase2/ci/p4_resource_policy.py",
+    "candidate_execution_enabled": false,
+    "runtime_enforcement_proven": false
   }
 }

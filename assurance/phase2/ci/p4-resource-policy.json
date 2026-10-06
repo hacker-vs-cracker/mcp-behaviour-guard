@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "profile_id": "phase2c-p4-resource-policy-v1",
+  "status": "PRE_P4_RESOURCE_POLICY_FROZEN",
+  "scope": "phase2c_p4_hostile_candidate",
+  "stage": "POLICY_FOUNDATION_ONLY",
+  "candidate_execution_enabled": false,
+  "runtime_enforcement_proven": false,
+  "limits": {
+    "subprocess": {
+      "aggregate_output_bytes": 1048576,
+      "retained_bytes_per_stream": 131072,
+      "command_timeout_seconds": 120,
+      "breach_action": "terminate_owned_process_group",
+      "breach_outcome": "resource_limit",
+      "implementation_path": "assurance/phase2/run_isolation_check.py"
+    },
+    "candidate_source": {
+      "max_bytes": 524288,
+      "allowed_files": 1
+    },
+    "docker_runtime": {
+      "memory_bytes": 268435456,
+      "pids_limit": 64,
+      "nano_cpus": 500000000,
+      "tmpfs_bytes": 16777216,
+      "log_driver": "local",
+      "log_max_size_bytes": 1048576,
+      "log_max_files": 2,
+      "max_owned_containers_per_attempt": 5,
+      "max_owned_networks_per_attempt": 3,
+      "max_owned_volumes_per_attempt": 2
+    },
+    "build": {
+      "timeout_seconds": 300,
+      "log_output_bytes": 1048576,
+      "context_bytes": 2097152
+    },
+    "artifacts": {
+      "total_bytes": 16777216,
+      "per_file_bytes": 4194304,
+      "max_files": 128,
+      "max_depth": 8
+    },
+    "fixture_traffic": {
+      "request_bytes": 65536,
+      "response_bytes": 262144,
+      "max_requests": 512,
+      "aggregate_bytes": 8388608
+    },
+    "execution": {
+      "attempt_timeout_seconds": 600,
+      "cleanup_timeout_seconds": 60,
+      "max_concurrent_attempts": 1
+    }
+  },
+  "archive_extraction": {
+    "compressed_bytes": 16777216,
+    "expanded_bytes": 33554432,
+    "max_files": 128,
+    "max_depth": 8,
+    "max_expansion_ratio": 20,
+    "reject_absolute_paths": true,
+    "reject_parent_traversal": true,
+    "reject_symlinks": true,
+    "reject_hardlinks": true,
+    "reject_device_entries": true,
+    "reject_duplicate_names": true,
+    "reject_type_collisions": true
+  },
+  "json_intake": {
+    "max_bytes": 1048576,
+    "max_depth": 32,
+    "max_string_bytes": 65536,
+    "max_array_items": 1024,
+    "max_object_members": 1024,
+    "duplicate_keys": "reject",
+    "schema_version_required": true,
+    "field_types": "strict"
+  },
+  "cleanup_semantics": {
+    "malformed_or_missing_evidence_outcome": "UNKNOWN",
+    "recovery_required": true,
+    "fabricate_clean_state": false
+  },
+  "required_before_hostile_execution": [
+    "docker_log_budget_enforced",
+    "build_log_budget_enforced",
+    "artifact_budget_enforced",
+    "archive_safe_extraction_enforced",
+    "json_bounded_parser_enforced",
+    "fixture_traffic_budget_enforced",
+    "execution_concurrency_budget_enforced",
+    "malformed_cleanup_maps_to_unknown"
+  ]
+}
