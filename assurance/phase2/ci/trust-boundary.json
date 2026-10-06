@@ -133,7 +133,8 @@
     "assurance/phase2/ci/p3-promoted-authority.json",
     "assurance/phase2/ci/p3_promotion.py",
     "assurance/phase2/ci/p4-resource-policy.json",
-    "assurance/phase2/ci/p4_resource_policy.py"
+    "assurance/phase2/ci/p4_resource_policy.py",
+    "assurance/phase2/ci/p4_resource_enforcement.py"
   ],
   "retained_historical_evidence": [
     "assurance/phase2/runtime-profile.json",
@@ -195,5 +196,27 @@
     "validator_path": "assurance/phase2/ci/p4_resource_policy.py",
     "candidate_execution_enabled": false,
     "runtime_enforcement_proven": false
+  },
+  "p4_resource_enforcement": {
+    "status": "IMPLEMENTED_NOT_RUNTIME_PROVEN",
+    "stage": "PRE_HOSTILE_ENFORCEMENT_IMPLEMENTATION",
+    "module_path": "assurance/phase2/ci/p4_resource_enforcement.py",
+    "module_sha256": "048c341db4ec15fbccabad97488c10fbc089283a822f57967a6c91fc76a7a007",
+    "policy_path": "assurance/phase2/ci/p4-resource-policy.json",
+    "policy_sha256": "cd321216217fbc11034e0aeb0a4afaca7ae42607142cd9158e31d094f54a707f",
+    "candidate_execution_enabled": false,
+    "hostile_execution_authorized": false,
+    "runtime_enforcement_proven": false,
+    "implemented_primitives": [
+      "docker_log_options_builder",
+      "build_command_limits",
+      "artifact_tree_budget",
+      "safe_archive_extraction",
+      "bounded_json_parser",
+      "fixture_traffic_budget",
+      "attempt_deadline_and_single_attempt_lock",
+      "owned_docker_resource_budget",
+      "fail_closed_cleanup_classification"
+    ]
   }
 }
