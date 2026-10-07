@@ -137,7 +137,9 @@
     "assurance/phase2/ci/p4_resource_enforcement.py",
     "assurance/phase2/ci/p4_controller_plan.py",
     ".github/workflows/phase2-trusted-intake.yml",
-    "assurance/phase2/ci/p4_candidate_materialization.py"
+    "assurance/phase2/ci/p4_candidate_materialization.py",
+    "assurance/phase2/ci/p4-live-materialization-proof.json",
+    "assurance/phase2/ci/p4_runtime_enforcement_plan.py"
   ],
   "retained_historical_evidence": [
     "assurance/phase2/runtime-profile.json",
@@ -249,6 +251,36 @@
     "candidate_workflow_artifacts_are_authority": false,
     "candidate_execution_enabled": false,
     "hostile_execution_authorized": false,
+    "runtime_enforcement_proven": false,
+    "verdict_publication_enabled": false
+  },
+  "p4_live_materialization_proof": {
+    "status": "ACCEPTED_NON_EXECUTING",
+    "stage": "LIVE_CURRENT_HEAD_MATERIALIZATION_PROOF",
+    "proof_path": "assurance/phase2/ci/p4-live-materialization-proof.json",
+    "proof_sha256": "fe0d2b836431b2aa2de2f1320dd4a078a62b3cebbefa2d37c04e3a378f465d24",
+    "proof_pr_number": 51,
+    "proof_base_sha": "05412cfc43aca2bb246300b5c5bef8452cfb1253",
+    "proof_head_sha": "1686adaee6387b47e3928c94766f1ffe7b9fed5d",
+    "trusted_intake_run_id": 37563924035,
+    "trusted_intake_artifact_id": 11458475964,
+    "candidate_execution_performed": false,
+    "hostile_execution_authorized": false,
+    "runtime_enforcement_proven": false,
+    "proof_pr_merged": false,
+    "proof_pr_closed": true,
+    "proof_branch_deleted": true
+  },
+  "p4_runtime_enforcement_plan": {
+    "status": "PLAN_ONLY_NOT_RUNTIME_PROVEN",
+    "stage": "PRE_HOSTILE_RUNTIME_ENFORCEMENT_PLAN",
+    "module_path": "assurance/phase2/ci/p4_runtime_enforcement_plan.py",
+    "module_sha256": "39f8c634bef58fbb5039007f18b8a28575883df69bee9d4e9e3d8aee35c73e76",
+    "proof_path": "assurance/phase2/ci/p4-live-materialization-proof.json",
+    "proof_sha256": "fe0d2b836431b2aa2de2f1320dd4a078a62b3cebbefa2d37c04e3a378f465d24",
+    "candidate_execution_enabled": false,
+    "hostile_execution_authorized": false,
+    "runtime_execution_enabled": false,
     "runtime_enforcement_proven": false,
     "verdict_publication_enabled": false
   }
