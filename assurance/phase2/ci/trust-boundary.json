@@ -134,7 +134,9 @@
     "assurance/phase2/ci/p3_promotion.py",
     "assurance/phase2/ci/p4-resource-policy.json",
     "assurance/phase2/ci/p4_resource_policy.py",
-    "assurance/phase2/ci/p4_resource_enforcement.py"
+    "assurance/phase2/ci/p4_resource_enforcement.py",
+    "assurance/phase2/ci/p4_controller_plan.py",
+    ".github/workflows/phase2-trusted-intake.yml"
   ],
   "retained_historical_evidence": [
     "assurance/phase2/runtime-profile.json",
@@ -218,5 +220,18 @@
       "owned_docker_resource_budget",
       "fail_closed_cleanup_classification"
     ]
+  },
+  "p4_controller_plan": {
+    "status": "PLAN_ONLY_NOT_RUNTIME_PROVEN",
+    "stage": "TRUSTED_INTAKE_PLAN_ONLY",
+    "module_path": "assurance/phase2/ci/p4_controller_plan.py",
+    "module_sha256": "a37746dd75758ffc84f99bb6ebee2a8424f83c908d35a6e7df080f04d0bd47b1",
+    "workflow_path": ".github/workflows/phase2-trusted-intake.yml",
+    "workflow_sha256": "8078833e5e2bc304752a952c65db0567545172d8cadb06286ad107fff359eb4e",
+    "candidate_materialization_performed": false,
+    "candidate_execution_enabled": false,
+    "hostile_execution_authorized": false,
+    "runtime_enforcement_proven": false,
+    "verdict_publication_enabled": false
   }
 }
