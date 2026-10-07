@@ -215,3 +215,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+# Phase 2C live materialization proof sentinel: p4-live-materialization-proof-v1
