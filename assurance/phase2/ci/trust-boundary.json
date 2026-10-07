@@ -136,7 +136,8 @@
     "assurance/phase2/ci/p4_resource_policy.py",
     "assurance/phase2/ci/p4_resource_enforcement.py",
     "assurance/phase2/ci/p4_controller_plan.py",
-    ".github/workflows/phase2-trusted-intake.yml"
+    ".github/workflows/phase2-trusted-intake.yml",
+    "assurance/phase2/ci/p4_candidate_materialization.py"
   ],
   "retained_historical_evidence": [
     "assurance/phase2/runtime-profile.json",
@@ -227,8 +228,25 @@
     "module_path": "assurance/phase2/ci/p4_controller_plan.py",
     "module_sha256": "a37746dd75758ffc84f99bb6ebee2a8424f83c908d35a6e7df080f04d0bd47b1",
     "workflow_path": ".github/workflows/phase2-trusted-intake.yml",
-    "workflow_sha256": "8078833e5e2bc304752a952c65db0567545172d8cadb06286ad107fff359eb4e",
+    "workflow_sha256": "f22da6a01594f32aa3cdd21b3e0158dcd204f002c8d8cb03f8d64bc778a9197e",
     "candidate_materialization_performed": false,
+    "candidate_execution_enabled": false,
+    "hostile_execution_authorized": false,
+    "runtime_enforcement_proven": false,
+    "verdict_publication_enabled": false
+  },
+  "p4_candidate_materialization": {
+    "status": "WIRED_NOT_LIVE_PROVEN",
+    "stage": "CANDIDATE_MATERIALIZATION_WIRING_ONLY",
+    "module_path": "assurance/phase2/ci/p4_candidate_materialization.py",
+    "module_sha256": "ae780cd49612bcd2ff039bfc296928e1e096fb4456eb1046432cdd9e78a9ea44",
+    "workflow_path": ".github/workflows/phase2-trusted-intake.yml",
+    "workflow_sha256": "f22da6a01594f32aa3cdd21b3e0158dcd204f002c8d8cb03f8d64bc778a9197e",
+    "source_transport": "trusted_github_git_data_api_exact_blob",
+    "current_pr_recheck_required": true,
+    "candidate_context_outside_trusted_checkout": true,
+    "candidate_context_destroyed_before_artifact_upload": true,
+    "candidate_workflow_artifacts_are_authority": false,
     "candidate_execution_enabled": false,
     "hostile_execution_authorized": false,
     "runtime_enforcement_proven": false,

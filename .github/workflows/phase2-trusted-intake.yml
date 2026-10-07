@@ -56,6 +56,23 @@ jobs:
             --trusted-commit "$TRUSTED_COMMIT" \
             --output phase2c-intake/p4-controller-plan.json
 
+      - name: Materialize exact candidate for non-executing P4 proof
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TRUSTED_COMMIT: ${{ github.sha }}
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+          GITHUB_API_URL: ${{ github.api_url }}
+        run: |
+          set -euo pipefail
+          python assurance/phase2/ci/p4_candidate_materialization.py \
+            --repo "$GITHUB_WORKSPACE" \
+            --plan phase2c-intake/p4-controller-plan.json \
+            --trusted-commit "$TRUSTED_COMMIT" \
+            --expected-repository "$EXPECTED_REPOSITORY" \
+            --api-url "$GITHUB_API_URL" \
+            --context-dir "$RUNNER_TEMP/phase2c-candidate-materialization" \
+            --manifest phase2c-intake/p4-candidate-materialization.json
+
       - name: Upload normalized trusted intake
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
@@ -63,5 +80,6 @@ jobs:
           path: |
             phase2c-intake/intake.json
             phase2c-intake/p4-controller-plan.json
+            phase2c-intake/p4-candidate-materialization.json
           if-no-files-found: error
           retention-days: 7
