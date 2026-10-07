@@ -45,10 +45,23 @@ jobs:
           test -z "$(git status --porcelain=v1 --untracked-files=all)"
           python assurance/phase2/ci/collect_workflow_run_intake.py             --repo "$GITHUB_WORKSPACE"             --event "$GITHUB_EVENT_PATH"             --trusted-commit "$TRUSTED_COMMIT"             --expected-repository "$EXPECTED_REPOSITORY"             --api-url "$GITHUB_API_URL"             --output phase2c-intake/intake.json             --lookup-output phase2c-intake/pull-request-lookup.json
 
+      - name: Build non-executing P4 controller plan
+        env:
+          TRUSTED_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          python assurance/phase2/ci/p4_controller_plan.py \
+            --repo "$GITHUB_WORKSPACE" \
+            --intake phase2c-intake/intake.json \
+            --trusted-commit "$TRUSTED_COMMIT" \
+            --output phase2c-intake/p4-controller-plan.json
+
       - name: Upload normalized trusted intake
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: phase2c-trusted-intake-${{ github.run_id }}
-          path: phase2c-intake/intake.json
+          path: |
+            phase2c-intake/intake.json
+            phase2c-intake/p4-controller-plan.json
           if-no-files-found: error
           retention-days: 7
