@@ -1,16 +1,22 @@
 from __future__ import annotations
 
 import argparse
+import bz2
 import contextlib
 import fcntl
+import gzip
 import hashlib
 import json
+import lzma
+import math
 import os
 import stat
+import struct
 import tarfile
+import tempfile
 import time
 import zipfile
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -39,24 +45,96 @@ def _reject_duplicate_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     value: dict[str, Any] = {}
     for key, item in pairs:
         if key in value:
-            raise P4ResourceEnforcementError(f"duplicate JSON key: {key}")
+            raise P4ResourceEnforcementError(f"duplicate JSON key: {key[:80]!r}")
         value[key] = item
     return value
 
 
-def _load_object_bytes(raw: bytes, *, max_bytes: int, label: str) -> dict[str, Any]:
+def _preparse_json(raw: str, *, depth: int, array: int, members: int, string: int) -> None:
+    # Scan structure before json.loads can allocate a large nested object.
+    stack: list[list[int | str | bool]] = []
+    quoted = False
+    escaped = False
+    token_bytes = 0
+    for char in raw:
+        if quoted:
+            if escaped:
+                escaped = False
+                token_bytes += len(char.encode("utf-8", errors="surrogatepass"))
+            elif char == "\\":
+                escaped = True
+                token_bytes += 1
+            elif char == '"':
+                quoted = False
+            else:
+                token_bytes += len(char.encode("utf-8", errors="surrogatepass"))
+            if token_bytes > string * 6:
+                raise P4ResourceEnforcementError("JSON string exceeds policy")
+            continue
+        if char == '"':
+            quoted = True
+            token_bytes = 0
+        elif char in "{[":
+            stack.append([char, 0, False])
+            if len(stack) > depth:
+                raise P4ResourceEnforcementError("JSON nesting depth exceeds policy")
+        elif char in "}]":
+            if not stack or (stack[-1][0], char) not in (("{", "}"), ("[", "]")):
+                raise P4ResourceEnforcementError("JSON invalid structure")
+            kind, commas, content = stack.pop()
+            length = int(commas) + bool(content)
+            if length > (members if kind == "{" else array):
+                raise P4ResourceEnforcementError("JSON member/item count exceeds policy")
+        elif char == "," and stack:
+            stack[-1][1] = int(stack[-1][1]) + 1
+            bound = members if stack[-1][0] == "{" else array
+            if int(stack[-1][1]) >= bound:
+                raise P4ResourceEnforcementError("JSON member/item count exceeds policy")
+        if stack and char not in " \t\r\n":
+            stack[-1][2] = True
+    if quoted or stack:
+        raise P4ResourceEnforcementError("JSON truncated input")
+
+
+def _finite_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise P4ResourceEnforcementError("non-finite JSON number rejected")
+    return parsed
+
+
+def _reject_constant(_value: str) -> None:
+    raise P4ResourceEnforcementError("non-finite JSON constant rejected")
+
+
+def _load_object_bytes(
+    raw: bytes, *, max_bytes: int, label: str, shape: dict[str, Any] | None = None
+) -> dict[str, Any]:
     if len(raw) > max_bytes:
         raise P4ResourceEnforcementError(f"{label} exceeds {max_bytes} bytes")
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise P4ResourceEnforcementError(f"{label} is not UTF-8") from exc
+    if shape is not None:
+        _preparse_json(
+            text,
+            depth=_positive_int(shape.get("max_depth"), "json.max_depth"),
+            array=_positive_int(shape.get("max_array_items"), "json.max_array_items"),
+            members=_positive_int(shape.get("max_object_members"), "json.max_object_members"),
+            string=_positive_int(shape.get("max_string_bytes"), "json.max_string_bytes"),
+        )
     try:
-        value = json.loads(text, object_pairs_hook=_reject_duplicate_pairs)
+        value = json.loads(
+            text,
+            object_pairs_hook=_reject_duplicate_pairs,
+            parse_float=_finite_float,
+            parse_constant=_reject_constant,
+        )
     except P4ResourceEnforcementError:
         raise
-    except (json.JSONDecodeError, RecursionError) as exc:
-        raise P4ResourceEnforcementError(f"{label} is not valid bounded JSON: {exc}") from exc
+    except (json.JSONDecodeError, RecursionError, ValueError, UnicodeError, OverflowError) as exc:
+        raise P4ResourceEnforcementError(f"{label} is not valid bounded JSON") from exc
     if not isinstance(value, dict):
         raise P4ResourceEnforcementError(f"{label} must be a JSON object")
     return value
@@ -98,7 +176,11 @@ def _validate_json_shape(value: Any, policy: dict[str, Any]) -> None:
         if depth > max_depth:
             raise P4ResourceEnforcementError("JSON nesting depth exceeds policy")
         if isinstance(current, str):
-            if len(current.encode("utf-8")) > max_string:
+            try:
+                length = len(current.encode("utf-8"))
+            except UnicodeEncodeError as exc:
+                raise P4ResourceEnforcementError("JSON invalid Unicode string") from exc
+            if length > max_string:
                 raise P4ResourceEnforcementError("JSON string exceeds policy")
         elif isinstance(current, list):
             if len(current) > max_array:
@@ -108,7 +190,11 @@ def _validate_json_shape(value: Any, policy: dict[str, Any]) -> None:
             if len(current) > max_members:
                 raise P4ResourceEnforcementError("JSON object member count exceeds policy")
             for key, item in current.items():
-                if len(key.encode("utf-8")) > max_string:
+                try:
+                    key_length = len(key.encode("utf-8"))
+                except UnicodeEncodeError as exc:
+                    raise P4ResourceEnforcementError("JSON invalid Unicode key") from exc
+                if key_length > max_string:
                     raise P4ResourceEnforcementError("JSON key exceeds policy")
                 stack.append((item, depth + 1))
 
@@ -122,12 +208,14 @@ def load_bounded_json(
 ) -> dict[str, Any]:
     json_policy = _mapping(policy.get("json_intake"), "json_intake")
     max_bytes = _positive_int(json_policy.get("max_bytes"), "json.max_bytes")
-    value = _load_object_bytes(raw, max_bytes=max_bytes, label="JSON intake")
+    if type(expected_schema_version) is not int:
+        raise P4ResourceEnforcementError("expected schema_version must be an integer")
+    value = _load_object_bytes(raw, max_bytes=max_bytes, label="JSON intake", shape=json_policy)
     _validate_json_shape(value, json_policy)
     if json_policy.get("schema_version_required") is not True:
         raise P4ResourceEnforcementError("JSON policy must require schema_version")
     schema_version = value.get("schema_version")
-    if isinstance(schema_version, bool) or schema_version != expected_schema_version:
+    if type(schema_version) is not int or schema_version != expected_schema_version:
         raise P4ResourceEnforcementError("JSON schema_version mismatch")
     if json_policy.get("field_types") != "strict":
         raise P4ResourceEnforcementError("JSON policy must require strict field types")
@@ -136,9 +224,7 @@ def load_bounded_json(
             raise P4ResourceEnforcementError(f"JSON field type mismatch: {key}")
         item = value[key]
         expected_types = expected if isinstance(expected, tuple) else (expected,)
-        if isinstance(item, bool) and int in expected_types and bool not in expected_types:
-            raise P4ResourceEnforcementError(f"JSON field type mismatch: {key}")
-        if not isinstance(item, expected_types):
+        if type(item) not in expected_types:
             raise P4ResourceEnforcementError(f"JSON field type mismatch: {key}")
     return value
 
@@ -156,33 +242,42 @@ def validate_directory_budget(
     max_files: int,
     max_depth: int,
 ) -> dict[str, int]:
-    root = root.resolve(strict=True)
-    total = 0
-    count = 0
-    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-        base = Path(dirpath)
-        for name in list(dirnames):
-            path = base / name
-            if path.is_symlink():
-                raise P4ResourceEnforcementError(f"symlink directory rejected: {path}")
-            if _directory_depth(root, path) > max_depth:
-                raise P4ResourceEnforcementError("directory depth exceeds policy")
-        for name in filenames:
-            path = base / name
-            st = path.lstat()
-            if not stat.S_ISREG(st.st_mode):
-                raise P4ResourceEnforcementError(f"non-regular artifact rejected: {path}")
-            if _directory_depth(root, path) > max_depth:
-                raise P4ResourceEnforcementError("artifact depth exceeds policy")
-            if st.st_size > per_file_bytes:
-                raise P4ResourceEnforcementError("artifact file exceeds policy")
-            count += 1
-            total += st.st_size
-            if count > max_files:
-                raise P4ResourceEnforcementError("artifact file count exceeds policy")
-            if total > total_bytes:
-                raise P4ResourceEnforcementError("artifact total bytes exceeds policy")
-    return {"files": count, "bytes": total}
+    # The caller must fence writers before interpreting this as complete evidence.
+    try:
+        root_stat = root.lstat()
+        if not stat.S_ISDIR(root_stat.st_mode):
+            raise P4ResourceEnforcementError("artifact root must be a real directory")
+        root = root.absolute()
+        total = 0
+        files = 0
+        entries = 0
+
+        def visit(folder: Path, depth: int) -> None:
+            nonlocal total, files, entries
+            with os.scandir(folder) as iterator:
+                for entry in iterator:
+                    entries += 1
+                    if entries > max_files:
+                        raise P4ResourceEnforcementError("artifact entry count exceeds policy")
+                    if depth + 1 > max_depth:
+                        raise P4ResourceEnforcementError("artifact depth exceeds policy")
+                    st = entry.stat(follow_symlinks=False)
+                    if stat.S_ISDIR(st.st_mode):
+                        visit(Path(entry.path), depth + 1)
+                    elif stat.S_ISREG(st.st_mode):
+                        if st.st_size > per_file_bytes:
+                            raise P4ResourceEnforcementError("artifact file exceeds policy")
+                        files += 1
+                        total += st.st_size
+                        if total > total_bytes:
+                            raise P4ResourceEnforcementError("artifact total bytes exceeds policy")
+                    else:
+                        raise P4ResourceEnforcementError("non-regular artifact rejected")
+
+        visit(root, 0)
+        return {"files": files, "bytes": total}
+    except (OSError, RecursionError) as exc:
+        raise P4ResourceEnforcementError("artifact traversal failed") from exc
 
 
 def validate_artifact_tree(root: Path, policy: dict[str, Any]) -> dict[str, int]:
@@ -244,9 +339,13 @@ def _register_archive_path(
     seen[name] = "dir" if is_dir else "file"
 
 
-def _copy_limited(source: Any, target: Any, *, expected: int) -> None:
+def _copy_limited(
+    source: Any, target: Any, *, expected: int, deadline: float | None = None
+) -> None:
     remaining = expected
     while remaining:
+        if deadline is not None and time.monotonic() > deadline:
+            raise P4ResourceEnforcementError("archive extraction deadline exceeded")
         chunk = source.read(min(65_536, remaining))
         if not chunk:
             raise P4ResourceEnforcementError("archive member ended before declared size")
@@ -318,6 +417,8 @@ def _check_archive_totals(
         raise P4ResourceEnforcementError("archive expanded bytes exceed policy")
     if file_count > max_files:
         raise P4ResourceEnforcementError("archive file count exceeds policy")
+    # Ratio counts regular-file payload for ZIP and TAR. TAR headers, padding
+    # and extended metadata have a separate full-stream decompression cap.
     if compressed_size == 0:
         if expanded_size:
             raise P4ResourceEnforcementError("archive expansion ratio exceeds policy")
@@ -325,8 +426,43 @@ def _check_archive_totals(
         raise P4ResourceEnforcementError("archive expansion ratio exceeds policy")
 
 
-def _extract_zip(archive_path: Path, destination: Path, policy: dict[str, Any]) -> dict[str, int]:
+def _archive_entry_limit(archive: dict[str, Any], artifacts: dict[str, Any]) -> int:
+    return min(
+        _positive_int(archive.get("max_files"), "archive.max_files"),
+        _positive_int(artifacts.get("max_files"), "artifacts.max_files"),
+    )
+
+
+def _zip_preflight(path: Path, limit: int) -> None:
+    # Read EOCD before ZipFile builds its unbounded central-directory list.
+    size = path.stat().st_size
+    with path.open("rb") as stream:
+        stream.seek(max(0, size - 65_557))
+        tail = stream.read(65_557)
+    offset = tail.rfind(b"PK\x05\x06")
+    if offset < 0 or len(tail) - offset < 22:
+        raise P4ResourceEnforcementError("ZIP central directory missing")
+    (_, disk, cd_disk, disk_count, count, cd_size, cd_start, comment) = struct.unpack_from(
+        "<4s4H2LH", tail, offset
+    )
+    if disk or cd_disk or disk_count != count or count == 0xFFFF:
+        raise P4ResourceEnforcementError("ZIP multi-disk/ZIP64 rejected")
+    if len(tail) - offset != 22 + comment:
+        raise P4ResourceEnforcementError("ZIP trailing data rejected")
+    if count > limit or cd_size > min(1_048_576, limit * 8192):
+        raise P4ResourceEnforcementError("archive entry/metadata budget exceeded")
+    if cd_start + cd_size > size - (len(tail) - offset):
+        raise P4ResourceEnforcementError("ZIP central directory range rejected")
+
+
+def _extract_zip(
+    archive_path: Path, destination: Path, policy: dict[str, Any], *, deadline: float
+) -> dict[str, int]:
     archive, artifacts = _archive_limits(policy)
+    limit = _archive_entry_limit(archive, artifacts)
+    if time.monotonic() > deadline:
+        raise P4ResourceEnforcementError("archive extraction deadline exceeded")
+    _zip_preflight(archive_path, limit)
     max_depth = min(
         _positive_int(archive.get("max_depth"), "archive.max_depth"),
         _positive_int(artifacts.get("max_depth"), "artifacts.max_depth"),
@@ -336,14 +472,33 @@ def _extract_zip(archive_path: Path, destination: Path, policy: dict[str, Any]) 
     files: list[tuple[zipfile.ZipInfo, str]] = []
     expanded = 0
     with zipfile.ZipFile(archive_path) as zf:
-        for info in zf.infolist():
+        infos = zf.infolist()
+        if time.monotonic() > deadline:
+            raise P4ResourceEnforcementError("archive extraction deadline exceeded")
+        if len(infos) > limit:
+            raise P4ResourceEnforcementError("archive entry count exceeds policy")
+        for info in infos:
+            if time.monotonic() > deadline:
+                raise P4ResourceEnforcementError("archive extraction deadline exceeded")
+            if (
+                len(info.filename.encode("utf-8")) > 1024
+                or len(info.extra) > 4096
+                or len(info.comment) > 4096
+            ):
+                raise P4ResourceEnforcementError("archive metadata budget exceeded")
             name, trailing_dir = _archive_name(info.filename, max_depth=max_depth)
             mode = (info.external_attr >> 16) & 0o170000
-            is_dir = info.is_dir() or trailing_dir
             if mode == stat.S_IFLNK:
                 raise P4ResourceEnforcementError("archive symlink rejected")
             if mode not in (0, stat.S_IFREG, stat.S_IFDIR):
                 raise P4ResourceEnforcementError("archive special entry rejected")
+            if mode == stat.S_IFDIR and not trailing_dir:
+                raise P4ResourceEnforcementError("ZIP directory type/name mismatch")
+            if mode == stat.S_IFREG and trailing_dir:
+                raise P4ResourceEnforcementError("ZIP regular type/name mismatch")
+            is_dir = trailing_dir
+            if is_dir and info.file_size:
+                raise P4ResourceEnforcementError("ZIP directory has payload")
             _register_archive_path(name, is_dir=is_dir, seen=seen)
             if is_dir:
                 continue
@@ -363,79 +518,203 @@ def _extract_zip(archive_path: Path, destination: Path, policy: dict[str, Any]) 
             if kind == "dir":
                 _safe_target(destination, name).mkdir(parents=True, exist_ok=True)
         for info, name in files:
+            if time.monotonic() > deadline:
+                raise P4ResourceEnforcementError("archive extraction deadline exceeded")
             target = _safe_target(destination, name)
             target.parent.mkdir(parents=True, exist_ok=True)
             with zf.open(info, "r") as source, target.open("xb") as output:
-                _copy_limited(source, output, expected=info.file_size)
+                _copy_limited(
+                    source,
+                    output,
+                    expected=info.file_size,
+                    deadline=deadline,
+                )
     return validate_artifact_tree(destination, policy)
 
 
-def _extract_tar(archive_path: Path, destination: Path, policy: dict[str, Any]) -> dict[str, int]:
+@contextlib.contextmanager
+def _bounded_tar_stream(path: Path, limit: int, entries: int, *, deadline: float) -> Iterator[Any]:
+    # Bound decompression before tarfile processes extended headers.
+    with tempfile.TemporaryFile(mode="w+b") as spool, path.open("rb") as source:
+        magic = source.read(6)
+        source.seek(0)
+        copied = 0
+
+        def drain(reader: Any) -> None:
+            nonlocal copied
+            while True:
+                if time.monotonic() > deadline:
+                    raise P4ResourceEnforcementError("archive decompression deadline exceeded")
+                data = reader.read(65_536)
+                if not data:
+                    break
+                copied += len(data)
+                if copied > limit:
+                    raise P4ResourceEnforcementError("archive decompression budget exceeded")
+                spool.write(data)
+
+        if magic.startswith(b"\x1f\x8b"):
+            with gzip.GzipFile(fileobj=source) as reader:
+                drain(reader)
+        elif magic.startswith(b"BZh"):
+            with bz2.BZ2File(source) as reader:
+                drain(reader)
+        elif magic == b"\xfd7zXZ\x00":
+            with lzma.LZMAFile(source) as reader:
+                drain(reader)
+        else:
+            drain(source)
+        spool.seek(0)
+        count = 0
+        meta_bytes = 0
+        offset = 0
+        while offset + 512 <= copied:
+            if time.monotonic() > deadline:
+                raise P4ResourceEnforcementError("archive extraction deadline exceeded")
+            spool.seek(offset)
+            header = spool.read(512)
+            if header == bytes(512):
+                break
+            count += 1
+            if count > entries:
+                raise P4ResourceEnforcementError("archive entry count exceeds policy")
+            kind = header[156:157]
+            size_text = header[124:136].rstrip(b"\x00 ").lstrip(b" ")
+            if not size_text or size_text[:1] == b"\x80":
+                raise P4ResourceEnforcementError("unsupported TAR size encoding")
+            try:
+                size = int(size_text, 8)
+            except ValueError as exc:
+                raise P4ResourceEnforcementError("invalid TAR member size") from exc
+            if kind in (b"x", b"g", b"L", b"K"):
+                meta_bytes += size
+                if size > 65_536 or meta_bytes > min(1_048_576, entries * 8192):
+                    raise P4ResourceEnforcementError("archive metadata budget exceeded")
+            elif kind not in (b"0", b"\x00", b"5", b"1", b"2", b"3", b"4", b"6"):
+                raise P4ResourceEnforcementError("archive unsupported TAR entry type")
+            offset += 512 + ((size + 511) // 512) * 512
+            if offset > copied:
+                raise P4ResourceEnforcementError("truncated TAR payload")
+        spool.seek(0)
+        yield spool
+
+
+def _extract_tar(
+    archive_path: Path, destination: Path, policy: dict[str, Any], *, deadline: float
+) -> dict[str, int]:
     archive, artifacts = _archive_limits(policy)
+    entry_limit = _archive_entry_limit(archive, artifacts)
     max_depth = min(
         _positive_int(archive.get("max_depth"), "archive.max_depth"),
         _positive_int(artifacts.get("max_depth"), "artifacts.max_depth"),
     )
     per_file = _positive_int(artifacts.get("per_file_bytes"), "artifacts.per_file_bytes")
-    seen: dict[str, str] = {}
-    files: list[tuple[tarfile.TarInfo, str]] = []
-    expanded = 0
-    with tarfile.open(archive_path, mode="r:*") as tf:
-        for member in tf.getmembers():
-            name, trailing_dir = _archive_name(member.name, max_depth=max_depth)
-            is_dir = member.isdir() or trailing_dir
-            if member.issym():
-                raise P4ResourceEnforcementError("archive symlink rejected")
-            if member.islnk():
-                raise P4ResourceEnforcementError("archive hardlink rejected")
-            if member.isdev() or member.isfifo():
-                raise P4ResourceEnforcementError("archive device/fifo rejected")
-            if not (member.isfile() or is_dir):
-                raise P4ResourceEnforcementError("archive special entry rejected")
-            _register_archive_path(name, is_dir=is_dir, seen=seen)
-            if is_dir:
-                continue
-            if member.size > per_file:
-                raise P4ResourceEnforcementError("archive member exceeds per-file policy")
-            expanded += member.size
-            files.append((member, name))
-        _check_archive_totals(
-            compressed_size=archive_path.stat().st_size,
-            expanded_size=expanded,
-            file_count=len(files),
-            archive=archive,
-            artifacts=artifacts,
-        )
-        destination = _prepare_destination(destination)
-        for name, kind in seen.items():
-            if kind == "dir":
-                _safe_target(destination, name).mkdir(parents=True, exist_ok=True)
-        for member, name in files:
-            source = tf.extractfile(member)
-            if source is None:
-                raise P4ResourceEnforcementError("archive regular file has no data stream")
-            target = _safe_target(destination, name)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            with source, target.open("xb") as output:
-                _copy_limited(source, output, expected=member.size)
+    expanded_limit = _positive_int(archive.get("expanded_bytes"), "archive.expanded_bytes")
+    artifact_limit = _positive_int(artifacts.get("total_bytes"), "artifacts.total_bytes")
+    metadata_allowance = min(1_048_576, entry_limit * 8192)
+    stream_limit = min(expanded_limit, artifact_limit) + metadata_allowance
+    with _bounded_tar_stream(archive_path, stream_limit, entry_limit, deadline=deadline) as spool:
+        seen: dict[str, str] = {}
+        files: list[tuple[tarfile.TarInfo, str]] = []
+        expanded = 0
+        with tarfile.open(fileobj=spool, mode="r:") as tf:
+            for member in tf.getmembers():
+                if time.monotonic() > deadline:
+                    raise P4ResourceEnforcementError("archive extraction deadline exceeded")
+                if len(member.name.encode("utf-8")) > 1024:
+                    raise P4ResourceEnforcementError("archive name exceeds metadata budget")
+                name, trailing_dir = _archive_name(member.name, max_depth=max_depth)
+                is_dir = member.isdir()
+                if trailing_dir != is_dir and trailing_dir:
+                    raise P4ResourceEnforcementError("TAR type/name mismatch")
+                if member.issym():
+                    raise P4ResourceEnforcementError("archive symlink rejected")
+                if member.islnk():
+                    raise P4ResourceEnforcementError("archive hardlink rejected")
+                if member.isdev() or member.isfifo():
+                    raise P4ResourceEnforcementError("archive device/fifo rejected")
+                if not (member.isfile() or is_dir):
+                    raise P4ResourceEnforcementError("archive special entry rejected")
+                _register_archive_path(name, is_dir=is_dir, seen=seen)
+                if is_dir:
+                    continue
+                if member.size > per_file:
+                    raise P4ResourceEnforcementError("archive member exceeds per-file policy")
+                expanded += member.size
+                files.append((member, name))
+            _check_archive_totals(
+                compressed_size=archive_path.stat().st_size,
+                expanded_size=expanded,
+                file_count=len(files),
+                archive=archive,
+                artifacts=artifacts,
+            )
+            destination = _prepare_destination(destination)
+            for name, kind in seen.items():
+                if kind == "dir":
+                    _safe_target(destination, name).mkdir(parents=True, exist_ok=True)
+            for member, name in files:
+                if time.monotonic() > deadline:
+                    raise P4ResourceEnforcementError("archive extraction deadline exceeded")
+                source = tf.extractfile(member)
+                if source is None:
+                    raise P4ResourceEnforcementError("archive regular file has no data stream")
+                target = _safe_target(destination, name)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with source, target.open("xb") as output:
+                    _copy_limited(
+                        source,
+                        output,
+                        expected=member.size,
+                        deadline=deadline,
+                    )
     return validate_artifact_tree(destination, policy)
 
 
 def safe_extract_archive(
     archive_path: Path, destination: Path, policy: dict[str, Any]
 ) -> dict[str, int]:
-    archive_path = archive_path.resolve(strict=True)
-    compressed_limit = _positive_int(
-        _mapping(policy.get("archive_extraction"), "archive_extraction").get("compressed_bytes"),
-        "archive.compressed_bytes",
-    )
-    if archive_path.stat().st_size > compressed_limit:
-        raise P4ResourceEnforcementError("archive compressed bytes exceed policy")
-    if zipfile.is_zipfile(archive_path):
-        return _extract_zip(archive_path, destination, policy)
-    if tarfile.is_tarfile(archive_path):
-        return _extract_tar(archive_path, destination, policy)
-    raise P4ResourceEnforcementError("unsupported archive format")
+    deadline = time.monotonic() + 30.0
+    try:
+        if archive_path.is_symlink() or not archive_path.is_file():
+            raise P4ResourceEnforcementError("archive input must be a regular file")
+        compressed_limit = _positive_int(
+            _mapping(policy.get("archive_extraction"), "archive_extraction").get(
+                "compressed_bytes"
+            ),
+            "archive.compressed_bytes",
+        )
+        if archive_path.stat().st_size > compressed_limit:
+            raise P4ResourceEnforcementError("archive compressed bytes exceed policy")
+        if destination.is_symlink() or (
+            destination.exists() and (not destination.is_dir() or any(destination.iterdir()))
+        ):
+            raise P4ResourceEnforcementError("archive destination must be absent or empty")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=".p4_archive_", dir=destination.parent) as owned:
+            staging = Path(owned) / "tree"
+            if zipfile.is_zipfile(archive_path):
+                result = _extract_zip(archive_path, staging, policy, deadline=deadline)
+            else:
+                result = _extract_tar(archive_path, staging, policy, deadline=deadline)
+            if time.monotonic() > deadline:
+                raise P4ResourceEnforcementError("archive extraction deadline exceeded")
+            if destination.exists():
+                destination.rmdir()
+            staging.rename(destination)
+            return result
+    except P4ResourceEnforcementError:
+        raise
+    except (
+        OSError,
+        ValueError,
+        EOFError,
+        zipfile.BadZipFile,
+        tarfile.TarError,
+        gzip.BadGzipFile,
+        lzma.LZMAError,
+    ) as exc:
+        raise P4ResourceEnforcementError("archive input or extraction invalid") from exc
 
 
 def _docker_size(value: int) -> str:
@@ -518,19 +797,31 @@ class TrafficBudget:
             aggregate_bytes=_positive_int(value.get("aggregate_bytes"), "fixture.aggregate_bytes"),
         )
 
+    breached: bool = False
+
     def record(self, *, request_bytes: int, response_bytes: int) -> None:
+        if self.breached:
+            raise P4ResourceEnforcementError("fixture budget already breached")
+        if type(request_bytes) is not int or type(response_bytes) is not int:
+            raise P4ResourceEnforcementError("fixture byte counts must be integers")
         if request_bytes < 0 or response_bytes < 0:
             raise P4ResourceEnforcementError("fixture byte counts must be non-negative")
+        requests = self.requests + 1
+        total = self.total_bytes + request_bytes + response_bytes
         if request_bytes > self.request_bytes:
+            self.breached = True
             raise P4ResourceEnforcementError("fixture request exceeds policy")
         if response_bytes > self.response_bytes:
+            self.breached = True
             raise P4ResourceEnforcementError("fixture response exceeds policy")
-        self.requests += 1
-        self.total_bytes += request_bytes + response_bytes
-        if self.requests > self.max_requests:
+        if requests > self.max_requests:
+            self.breached = True
             raise P4ResourceEnforcementError("fixture request count exceeds policy")
-        if self.total_bytes > self.aggregate_bytes:
+        if total > self.aggregate_bytes:
+            self.breached = True
             raise P4ResourceEnforcementError("fixture aggregate bytes exceed policy")
+        self.requests = requests
+        self.total_bytes = total
 
 
 @dataclass

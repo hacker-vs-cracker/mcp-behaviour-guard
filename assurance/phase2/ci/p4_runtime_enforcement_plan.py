@@ -139,13 +139,32 @@ def validate_static_binding(repo: Path, trusted_commit: str) -> dict[str, Any]:
         or publisher.get("integration_id") is not None
     ):
         raise P4RuntimeEnforcementPlanError("publisher must remain unbootstrapped")
-    if promotion.get("status") != "PROMOTED" or promotion.get("authority_generation") != 1:
+    if (
+        promotion.get("status") != "PROMOTED"
+        or type(promotion.get("authority_generation")) is not int
+        or promotion.get("authority_generation") != 1
+    ):
         raise P4RuntimeEnforcementPlanError("promoted authority generation 1 is not active")
+    if _sha256(authority_raw) != promotion.get("authority_sha256"):
+        raise P4RuntimeEnforcementPlanError("promoted authority digest mismatch")
     if authority.get("status") != "PROMOTED" or authority.get("consumable") is not True:
         raise P4RuntimeEnforcementPlanError("promoted authority is not consumable")
     generation = _mapping(authority.get("generation"), "authority.generation")
-    if generation.get("number") != 1:
+    if (
+        type(generation.get("number")) is not int
+        or generation.get("number") != 1
+        or generation.get("supersedes") is not None
+    ):
         raise P4RuntimeEnforcementPlanError("authority generation differs from generation 1")
+    if authority.get("platform") != "linux/amd64":
+        raise P4RuntimeEnforcementPlanError("promoted authority platform mismatch")
+    authority_publisher = _mapping(authority.get("publisher"), "authority.publisher")
+    if authority_publisher != {"integration_id": None, "status": "UNBOOTSTRAPPED"}:
+        raise P4RuntimeEnforcementPlanError("promoted authority publisher mismatch")
+    reference = _mapping(authority.get("reference"), "authority.reference")
+    approval = _string(reference.get("approval_bundle_digest"), "authority approval digest")
+    if approval != promotion.get("approval_bundle_digest"):
+        raise P4RuntimeEnforcementPlanError("promoted authority approval digest mismatch")
     if materialization.get("candidate_execution_enabled") is not False:
         raise P4RuntimeEnforcementPlanError(
             "materialization boundary unexpectedly enables execution"

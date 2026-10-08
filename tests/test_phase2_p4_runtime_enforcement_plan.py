@@ -175,3 +175,53 @@ def test_runtime_plan_module_has_no_execution_or_remote_mutation_surface() -> No
         "checks: write",
     ):
         assert forbidden not in source
+
+
+@pytest.mark.parametrize(
+    "field,value,match",
+    [
+        ("reference.approval_bundle_digest", "0" * 64, "approval digest"),
+        ("platform", "linux/arm64", "platform"),
+        ("generation.number", 1.0, "generation"),
+        ("generation.number", 2, "generation"),
+        ("generation.supersedes", 0, "generation"),
+        ("consumable", False, "consumable"),
+        ("publisher.status", "BOOTSTRAPPED", "publisher"),
+    ],
+)
+def test_r24_committed_inconsistent_authority_rejected(
+    tmp_path: Path, field: str, value: object, match: str
+) -> None:
+    module = _module()
+    repo, _ = _trusted_repo(tmp_path)
+    path = repo / AUTHORITY.relative_to(ROOT)
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    cursor = doc
+    keys = field.split(".")
+    for key in keys[:-1]:
+        cursor = cursor[key]
+    cursor[keys[-1]] = value
+    path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    trust_path = repo / TRUST.relative_to(ROOT)
+    trust_doc = json.loads(trust_path.read_text(encoding="utf-8"))
+    import hashlib
+
+    trust_doc["p3_promotion"]["authority_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    trust_path.write_text(json.dumps(trust_doc, indent=2) + "\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "mutate fixture authority")
+    with pytest.raises(module.P4RuntimeEnforcementPlanError, match=match):
+        module.validate_static_binding(repo, _git(repo, "rev-parse", "HEAD"))
+
+
+def test_r24_committed_stale_authority_digest_rejected(tmp_path: Path) -> None:
+    module = _module()
+    repo, _ = _trusted_repo(tmp_path)
+    path = repo / AUTHORITY.relative_to(ROOT)
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    doc["reference"]["approval_bundle_digest"] = "0" * 64
+    path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "mutate fixture authority without rebinding")
+    with pytest.raises(module.P4RuntimeEnforcementPlanError, match="authority digest"):
+        module.validate_static_binding(repo, _git(repo, "rev-parse", "HEAD"))
