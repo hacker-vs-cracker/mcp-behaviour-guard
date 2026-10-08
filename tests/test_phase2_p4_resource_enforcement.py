@@ -416,3 +416,86 @@ def test_r24_traffic_rejects_types_and_latches_budget_breach() -> None:
     assert traffic.requests == 1 and traffic.total_bytes == 192
     with pytest.raises(module.P4ResourceEnforcementError, match="already breached"):
         traffic.record(request_bytes=0, response_bytes=0)
+
+
+def test_r24_archive_uses_one_deadline_for_all_members(tmp_path: Path, monkeypatch) -> None:
+    module = _module()
+    policy = _tight_policy(module)
+    observed: list[float] = []
+    original = module._copy_limited
+
+    def measure(source, target, *, expected: int, deadline: float | None = None) -> None:
+        assert deadline is not None
+        observed.append(deadline)
+        original(source, target, expected=expected, deadline=deadline)
+
+    monkeypatch.setattr(module, "_copy_limited", measure)
+    for kind in ("zip", "tar"):
+        observed.clear()
+        archive_path = tmp_path / ("two.zip" if kind == "zip" else "two.tar.gz")
+        if kind == "zip":
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("a", b"hello")
+                archive.writestr("b", b"world")
+        else:
+            with tarfile.open(archive_path, "w:gz") as archive:
+                for name, content in (("a", b"hello"), ("b", b"world")):
+                    info = tarfile.TarInfo(name)
+                    info.size = len(content)
+                    archive.addfile(info, io.BytesIO(content))
+        assert module.safe_extract_archive(archive_path, tmp_path / f"out-{kind}", policy) == {
+            "files": 2,
+            "bytes": 10,
+        }
+        assert len(observed) == 2 and observed[0] == observed[1]
+
+
+def test_r24_archive_global_deadline_rejects_before_publication(
+    tmp_path: Path, monkeypatch
+) -> None:
+    module = _module()
+    policy = _tight_policy(module)
+    path = tmp_path / "deadline.zip"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("a", b"hello")
+        archive.writestr("b", b"world")
+    # The first call establishes the deadline. Later calls advance the same clock.
+    clock = iter((0.0, 1.0, 2.0, 3.0, 31.0, 32.0, 33.0, 34.0, 35.0))
+    monkeypatch.setattr(module.time, "monotonic", lambda: next(clock, 50.0))
+    out = tmp_path / "deadline-output"
+    with pytest.raises(module.P4ResourceEnforcementError, match="deadline"):
+        module.safe_extract_archive(path, out, policy)
+    assert not out.exists()
+
+
+def test_r24_tar_ratio_counts_payload_with_separate_stream_cap(tmp_path: Path) -> None:
+    module = _module()
+    policy = _tight_policy(module)
+    policy["archive_extraction"]["max_expansion_ratio"] = 1
+    # TAR directory framing must not be counted as regular-file payload.
+    directory = tmp_path / "one-directory.tar.gz"
+    with tarfile.open(directory, "w:gz") as archive:
+        info = tarfile.TarInfo("empty/")
+        info.type = tarfile.DIRTYPE
+        archive.addfile(info)
+    assert module.safe_extract_archive(directory, tmp_path / "valid-directory", policy) == {
+        "files": 0,
+        "bytes": 0,
+    }
+    payload = tmp_path / "compressed-payload.tar.gz"
+    with tarfile.open(payload, "w:gz") as archive:
+        content = b"0" * 1000
+        info = tarfile.TarInfo("content")
+        info.size = len(content)
+        archive.addfile(info, io.BytesIO(content))
+    with pytest.raises(module.P4ResourceEnforcementError, match="expansion ratio"):
+        module.safe_extract_archive(payload, tmp_path / "ratio-failed", policy)
+    assert not (tmp_path / "ratio-failed").exists()
+    stream_limited = _tight_policy(module)
+    stream_limited["limits"]["artifacts"]["total_bytes"] = 32
+    stream_limited["limits"]["artifacts"]["max_files"] = 1
+    stream_limited["archive_extraction"]["expanded_bytes"] = 32
+    stream_limited["archive_extraction"]["max_files"] = 1
+    with pytest.raises(module.P4ResourceEnforcementError, match="decompression budget"):
+        module.safe_extract_archive(directory, tmp_path / "stream-failed", stream_limited)
+    assert not (tmp_path / "stream-failed").exists()

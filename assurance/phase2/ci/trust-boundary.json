@@ -206,7 +206,7 @@
     "status": "IMPLEMENTED_NOT_RUNTIME_PROVEN",
     "stage": "PRE_HOSTILE_ENFORCEMENT_IMPLEMENTATION",
     "module_path": "assurance/phase2/ci/p4_resource_enforcement.py",
-    "module_sha256": "3a90d28b152b15e650f04be94664442fde978f63cfc8bf19b1a4354cff327736",
+    "module_sha256": "3ea8b65d5157e2f79a9379c116329326bb874b6c0d9b037c1727688cbe45bc59",
     "policy_path": "assurance/phase2/ci/p4-resource-policy.json",
     "policy_sha256": "cd321216217fbc11034e0aeb0a4afaca7ae42607142cd9158e31d094f54a707f",
     "candidate_execution_enabled": false,

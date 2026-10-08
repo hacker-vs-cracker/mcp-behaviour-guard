@@ -417,6 +417,8 @@ def _check_archive_totals(
         raise P4ResourceEnforcementError("archive expanded bytes exceed policy")
     if file_count > max_files:
         raise P4ResourceEnforcementError("archive file count exceeds policy")
+    # Ratio counts regular-file payload for ZIP and TAR. TAR headers, padding
+    # and extended metadata have a separate full-stream decompression cap.
     if compressed_size == 0:
         if expanded_size:
             raise P4ResourceEnforcementError("archive expansion ratio exceeds policy")
@@ -453,9 +455,13 @@ def _zip_preflight(path: Path, limit: int) -> None:
         raise P4ResourceEnforcementError("ZIP central directory range rejected")
 
 
-def _extract_zip(archive_path: Path, destination: Path, policy: dict[str, Any]) -> dict[str, int]:
+def _extract_zip(
+    archive_path: Path, destination: Path, policy: dict[str, Any], *, deadline: float
+) -> dict[str, int]:
     archive, artifacts = _archive_limits(policy)
     limit = _archive_entry_limit(archive, artifacts)
+    if time.monotonic() > deadline:
+        raise P4ResourceEnforcementError("archive extraction deadline exceeded")
     _zip_preflight(archive_path, limit)
     max_depth = min(
         _positive_int(archive.get("max_depth"), "archive.max_depth"),
@@ -467,9 +473,13 @@ def _extract_zip(archive_path: Path, destination: Path, policy: dict[str, Any]) 
     expanded = 0
     with zipfile.ZipFile(archive_path) as zf:
         infos = zf.infolist()
+        if time.monotonic() > deadline:
+            raise P4ResourceEnforcementError("archive extraction deadline exceeded")
         if len(infos) > limit:
             raise P4ResourceEnforcementError("archive entry count exceeds policy")
         for info in infos:
+            if time.monotonic() > deadline:
+                raise P4ResourceEnforcementError("archive extraction deadline exceeded")
             if (
                 len(info.filename.encode("utf-8")) > 1024
                 or len(info.extra) > 4096
@@ -508,6 +518,8 @@ def _extract_zip(archive_path: Path, destination: Path, policy: dict[str, Any]) 
             if kind == "dir":
                 _safe_target(destination, name).mkdir(parents=True, exist_ok=True)
         for info, name in files:
+            if time.monotonic() > deadline:
+                raise P4ResourceEnforcementError("archive extraction deadline exceeded")
             target = _safe_target(destination, name)
             target.parent.mkdir(parents=True, exist_ok=True)
             with zf.open(info, "r") as source, target.open("xb") as output:
@@ -515,19 +527,18 @@ def _extract_zip(archive_path: Path, destination: Path, policy: dict[str, Any]) 
                     source,
                     output,
                     expected=info.file_size,
-                    deadline=time.monotonic() + 30.0,
+                    deadline=deadline,
                 )
     return validate_artifact_tree(destination, policy)
 
 
 @contextlib.contextmanager
-def _bounded_tar_stream(path: Path, limit: int, entries: int) -> Iterator[Any]:
+def _bounded_tar_stream(path: Path, limit: int, entries: int, *, deadline: float) -> Iterator[Any]:
     # Bound decompression before tarfile processes extended headers.
     with tempfile.TemporaryFile(mode="w+b") as spool, path.open("rb") as source:
         magic = source.read(6)
         source.seek(0)
         copied = 0
-        deadline = time.monotonic() + 30.0
 
         def drain(reader: Any) -> None:
             nonlocal copied
@@ -558,6 +569,8 @@ def _bounded_tar_stream(path: Path, limit: int, entries: int) -> Iterator[Any]:
         meta_bytes = 0
         offset = 0
         while offset + 512 <= copied:
+            if time.monotonic() > deadline:
+                raise P4ResourceEnforcementError("archive extraction deadline exceeded")
             spool.seek(offset)
             header = spool.read(512)
             if header == bytes(512):
@@ -586,7 +599,9 @@ def _bounded_tar_stream(path: Path, limit: int, entries: int) -> Iterator[Any]:
         yield spool
 
 
-def _extract_tar(archive_path: Path, destination: Path, policy: dict[str, Any]) -> dict[str, int]:
+def _extract_tar(
+    archive_path: Path, destination: Path, policy: dict[str, Any], *, deadline: float
+) -> dict[str, int]:
     archive, artifacts = _archive_limits(policy)
     entry_limit = _archive_entry_limit(archive, artifacts)
     max_depth = min(
@@ -598,12 +613,14 @@ def _extract_tar(archive_path: Path, destination: Path, policy: dict[str, Any]) 
     artifact_limit = _positive_int(artifacts.get("total_bytes"), "artifacts.total_bytes")
     metadata_allowance = min(1_048_576, entry_limit * 8192)
     stream_limit = min(expanded_limit, artifact_limit) + metadata_allowance
-    with _bounded_tar_stream(archive_path, stream_limit, entry_limit) as spool:
+    with _bounded_tar_stream(archive_path, stream_limit, entry_limit, deadline=deadline) as spool:
         seen: dict[str, str] = {}
         files: list[tuple[tarfile.TarInfo, str]] = []
         expanded = 0
         with tarfile.open(fileobj=spool, mode="r:") as tf:
             for member in tf.getmembers():
+                if time.monotonic() > deadline:
+                    raise P4ResourceEnforcementError("archive extraction deadline exceeded")
                 if len(member.name.encode("utf-8")) > 1024:
                     raise P4ResourceEnforcementError("archive name exceeds metadata budget")
                 name, trailing_dir = _archive_name(member.name, max_depth=max_depth)
@@ -637,6 +654,8 @@ def _extract_tar(archive_path: Path, destination: Path, policy: dict[str, Any]) 
                 if kind == "dir":
                     _safe_target(destination, name).mkdir(parents=True, exist_ok=True)
             for member, name in files:
+                if time.monotonic() > deadline:
+                    raise P4ResourceEnforcementError("archive extraction deadline exceeded")
                 source = tf.extractfile(member)
                 if source is None:
                     raise P4ResourceEnforcementError("archive regular file has no data stream")
@@ -647,7 +666,7 @@ def _extract_tar(archive_path: Path, destination: Path, policy: dict[str, Any]) 
                         source,
                         output,
                         expected=member.size,
-                        deadline=time.monotonic() + 30.0,
+                        deadline=deadline,
                     )
     return validate_artifact_tree(destination, policy)
 
@@ -655,6 +674,7 @@ def _extract_tar(archive_path: Path, destination: Path, policy: dict[str, Any]) 
 def safe_extract_archive(
     archive_path: Path, destination: Path, policy: dict[str, Any]
 ) -> dict[str, int]:
+    deadline = time.monotonic() + 30.0
     try:
         if archive_path.is_symlink() or not archive_path.is_file():
             raise P4ResourceEnforcementError("archive input must be a regular file")
@@ -674,9 +694,11 @@ def safe_extract_archive(
         with tempfile.TemporaryDirectory(prefix=".p4_archive_", dir=destination.parent) as owned:
             staging = Path(owned) / "tree"
             if zipfile.is_zipfile(archive_path):
-                result = _extract_zip(archive_path, staging, policy)
+                result = _extract_zip(archive_path, staging, policy, deadline=deadline)
             else:
-                result = _extract_tar(archive_path, staging, policy)
+                result = _extract_tar(archive_path, staging, policy, deadline=deadline)
+            if time.monotonic() > deadline:
+                raise P4ResourceEnforcementError("archive extraction deadline exceeded")
             if destination.exists():
                 destination.rmdir()
             staging.rename(destination)
