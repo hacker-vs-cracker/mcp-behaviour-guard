@@ -139,7 +139,8 @@
     ".github/workflows/phase2-trusted-intake.yml",
     "assurance/phase2/ci/p4_candidate_materialization.py",
     "assurance/phase2/ci/p4-live-materialization-proof.json",
-    "assurance/phase2/ci/p4_runtime_enforcement_plan.py"
+    "assurance/phase2/ci/p4_runtime_enforcement_plan.py",
+    "assurance/phase2/ci/p4_trusted_runtime_adapter.py"
   ],
   "retained_historical_evidence": [
     "assurance/phase2/runtime-profile.json",
@@ -281,6 +282,16 @@
     "candidate_execution_enabled": false,
     "hostile_execution_authorized": false,
     "runtime_execution_enabled": false,
+    "runtime_enforcement_proven": false,
+    "verdict_publication_enabled": false
+  },
+  "p4_trusted_runtime_adapter": {
+    "status": "SOURCE_WIRED_NOT_RUNTIME_PROVEN",
+    "stage": "TRUSTED_NON_HOSTILE_FIXTURE_ADAPTER",
+    "module_path": "assurance/phase2/ci/p4_trusted_runtime_adapter.py",
+    "module_sha256": "8bf2bab5dbe76b7fdd4d92fee50408b3b277727123459e4c1c5d371881ea810f",
+    "candidate_execution_enabled": false,
+    "hostile_execution_authorized": false,
     "runtime_enforcement_proven": false,
     "verdict_publication_enabled": false
   }
