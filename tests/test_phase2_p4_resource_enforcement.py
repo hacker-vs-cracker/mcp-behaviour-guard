@@ -289,3 +289,213 @@ def test_attempt_deadline_single_attempt_lock_and_cleanup_semantics(tmp_path: Pa
     assert module.classify_cleanup_evidence(
         {"cleanup_complete": True, "owned_resources_remaining": 0}, policy
     ) == {"outcome": "CLEAN", "recovery_required": False}
+
+
+def test_r24_json_strict_numeric_unicode_and_preparse() -> None:
+    module = _module()
+    policy = _tight_policy(module)
+    cases = (
+        b'{"schema_version":1.0}',
+        b'{"schema_version":1,"x":NaN}',
+        b'{"schema_version":1,"x":Infinity}',
+        b'{"schema_version":1,"x":1e10000}',
+        b'{"schema_version":1,"x":"\\ud800"}',
+        b'{"schema_version":1,"x":' + b"9" * 5000 + b"}",
+        b'{"schema_version":1,"x":[' + b"0," * 100 + b"0]}",
+        b'{"schema_version":1,"x":{"a":{' + b'"a":{' * 10 + b'"b":1' + b"}" * 11 + b"}",
+    )
+    for raw in cases:
+        with pytest.raises(module.P4ResourceEnforcementError):
+            module.load_bounded_json(raw, policy, expected_schema_version=1)
+    larger = json.loads(json.dumps(policy))
+    larger["json_intake"]["max_bytes"] = 8192
+    with pytest.raises(module.P4ResourceEnforcementError):
+        module.load_bounded_json(
+            b'{"schema_version":1,"n":' + b"9" * 5000 + b"}",
+            larger,
+            expected_schema_version=1,
+        )
+    with pytest.raises(module.P4ResourceEnforcementError):
+        module.load_bounded_json(b"{\xff}", policy, expected_schema_version=1)
+    with pytest.raises(module.P4ResourceEnforcementError):
+        module.load_bounded_json(b"[]", policy, expected_schema_version=1)
+    assert (
+        module.load_bounded_json(
+            b'{"schema_version":1,"quoted":"{[\\"}"}',
+            policy,
+            expected_schema_version=1,
+        )["schema_version"]
+        == 1
+    )
+
+
+def test_r24_artifact_roots_directory_entries_and_walk_failure(tmp_path: Path, monkeypatch) -> None:
+    module = _module()
+    policy = _tight_policy(module)
+    file_root = tmp_path / "file"
+    file_root.write_text("hello")
+    with pytest.raises(module.P4ResourceEnforcementError, match="root"):
+        module.validate_artifact_tree(file_root, policy)
+    (tmp_path / "root-link").symlink_to(tmp_path, target_is_directory=True)
+    with pytest.raises(module.P4ResourceEnforcementError, match="root"):
+        module.validate_artifact_tree(tmp_path / "root-link", policy)
+    root = tmp_path / "real"
+    root.mkdir()
+    for index in range(5):
+        (root / f"dir{index}").mkdir()
+    with pytest.raises(module.P4ResourceEnforcementError, match="entry count"):
+        module.validate_artifact_tree(root, policy)
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert module.validate_artifact_tree(empty, policy) == {"files": 0, "bytes": 0}
+
+    def broken(_root):
+        raise OSError("synthetic unreadable directory")
+
+    monkeypatch.setattr(module.os, "scandir", broken)
+    with pytest.raises(module.P4ResourceEnforcementError, match="traversal failed"):
+        module.validate_artifact_tree(empty, policy)
+
+
+def test_r24_archive_many_directories_and_atomic_failure(tmp_path: Path) -> None:
+    module = _module()
+    policy = _tight_policy(module)
+    zip_path = tmp_path / "many.zip"
+    with zipfile.ZipFile(zip_path, "w") as archive:
+        for index in range(5):
+            archive.writestr(f"d{index}/", b"")
+    with pytest.raises(module.P4ResourceEnforcementError, match="entry"):
+        module.safe_extract_archive(zip_path, tmp_path / "zip-out", policy)
+    assert not (tmp_path / "zip-out").exists()
+    tar_path = tmp_path / "many.tar.gz"
+    with tarfile.open(tar_path, "w:gz") as archive:
+        for index in range(5):
+            member = tarfile.TarInfo(f"d{index}/")
+            member.type = tarfile.DIRTYPE
+            archive.addfile(member)
+    with pytest.raises(module.P4ResourceEnforcementError, match="entry"):
+        module.safe_extract_archive(tar_path, tmp_path / "tar-out", policy)
+    assert not (tmp_path / "tar-out").exists()
+
+
+def test_r24_crc_and_extended_header_fail_without_published_tree(tmp_path: Path) -> None:
+    module = _module()
+    policy = _tight_policy(module)
+    path = tmp_path / "crc.zip"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("a", b"CRCCHECK")
+    raw = path.read_bytes()
+    assert raw.count(b"CRCCHECK") == 1
+    path.write_bytes(raw.replace(b"CRCCHECK", b"CRCBROKE", 1))
+    with pytest.raises(module.P4ResourceEnforcementError, match="archive input"):
+        module.safe_extract_archive(path, tmp_path / "out-corrupt", policy)
+    assert not (tmp_path / "out-corrupt").exists()
+
+    oversized_header = tmp_path / "pax.tar.gz"
+    with tarfile.open(oversized_header, "w:gz", format=tarfile.PAX_FORMAT) as archive:
+        info = tarfile.TarInfo("a")
+        info.pax_headers = {"comment": "x" * 70_000}
+        archive.addfile(info)
+    with pytest.raises(module.P4ResourceEnforcementError, match="budget|metadata"):
+        module.safe_extract_archive(oversized_header, tmp_path / "out-pax", policy)
+    assert not (tmp_path / "out-pax").exists()
+
+
+def test_r24_traffic_rejects_types_and_latches_budget_breach() -> None:
+    module = _module()
+    policy = _tight_policy(module)
+    traffic = module.TrafficBudget.from_policy(policy)
+    for bad in (True, 0.5, float("nan"), float("inf"), "1", -1):
+        with pytest.raises(module.P4ResourceEnforcementError):
+            traffic.record(request_bytes=bad, response_bytes=0)
+        assert traffic.requests == 0 and traffic.total_bytes == 0
+        assert traffic.breached is False
+    traffic.record(request_bytes=64, response_bytes=128)
+    with pytest.raises(module.P4ResourceEnforcementError, match="aggregate"):
+        traffic.record(request_bytes=1, response_bytes=8)
+    assert traffic.requests == 1 and traffic.total_bytes == 192
+    with pytest.raises(module.P4ResourceEnforcementError, match="already breached"):
+        traffic.record(request_bytes=0, response_bytes=0)
+
+
+def test_r24_archive_uses_one_deadline_for_all_members(tmp_path: Path, monkeypatch) -> None:
+    module = _module()
+    policy = _tight_policy(module)
+    observed: list[float] = []
+    original = module._copy_limited
+
+    def measure(source, target, *, expected: int, deadline: float | None = None) -> None:
+        assert deadline is not None
+        observed.append(deadline)
+        original(source, target, expected=expected, deadline=deadline)
+
+    monkeypatch.setattr(module, "_copy_limited", measure)
+    for kind in ("zip", "tar"):
+        observed.clear()
+        archive_path = tmp_path / ("two.zip" if kind == "zip" else "two.tar.gz")
+        if kind == "zip":
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("a", b"hello")
+                archive.writestr("b", b"world")
+        else:
+            with tarfile.open(archive_path, "w:gz") as archive:
+                for name, content in (("a", b"hello"), ("b", b"world")):
+                    info = tarfile.TarInfo(name)
+                    info.size = len(content)
+                    archive.addfile(info, io.BytesIO(content))
+        assert module.safe_extract_archive(archive_path, tmp_path / f"out-{kind}", policy) == {
+            "files": 2,
+            "bytes": 10,
+        }
+        assert len(observed) == 2 and observed[0] == observed[1]
+
+
+def test_r24_archive_global_deadline_rejects_before_publication(
+    tmp_path: Path, monkeypatch
+) -> None:
+    module = _module()
+    policy = _tight_policy(module)
+    path = tmp_path / "deadline.zip"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("a", b"hello")
+        archive.writestr("b", b"world")
+    # The first call establishes the deadline. Later calls advance the same clock.
+    clock = iter((0.0, 1.0, 2.0, 3.0, 31.0, 32.0, 33.0, 34.0, 35.0))
+    monkeypatch.setattr(module.time, "monotonic", lambda: next(clock, 50.0))
+    out = tmp_path / "deadline-output"
+    with pytest.raises(module.P4ResourceEnforcementError, match="deadline"):
+        module.safe_extract_archive(path, out, policy)
+    assert not out.exists()
+
+
+def test_r24_tar_ratio_counts_payload_with_separate_stream_cap(tmp_path: Path) -> None:
+    module = _module()
+    policy = _tight_policy(module)
+    policy["archive_extraction"]["max_expansion_ratio"] = 1
+    # TAR directory framing must not be counted as regular-file payload.
+    directory = tmp_path / "one-directory.tar.gz"
+    with tarfile.open(directory, "w:gz") as archive:
+        info = tarfile.TarInfo("empty/")
+        info.type = tarfile.DIRTYPE
+        archive.addfile(info)
+    assert module.safe_extract_archive(directory, tmp_path / "valid-directory", policy) == {
+        "files": 0,
+        "bytes": 0,
+    }
+    payload = tmp_path / "compressed-payload.tar.gz"
+    with tarfile.open(payload, "w:gz") as archive:
+        content = b"0" * 1000
+        info = tarfile.TarInfo("content")
+        info.size = len(content)
+        archive.addfile(info, io.BytesIO(content))
+    with pytest.raises(module.P4ResourceEnforcementError, match="expansion ratio"):
+        module.safe_extract_archive(payload, tmp_path / "ratio-failed", policy)
+    assert not (tmp_path / "ratio-failed").exists()
+    stream_limited = _tight_policy(module)
+    stream_limited["limits"]["artifacts"]["total_bytes"] = 32
+    stream_limited["limits"]["artifacts"]["max_files"] = 1
+    stream_limited["archive_extraction"]["expanded_bytes"] = 32
+    stream_limited["archive_extraction"]["max_files"] = 1
+    with pytest.raises(module.P4ResourceEnforcementError, match="decompression budget"):
+        module.safe_extract_archive(directory, tmp_path / "stream-failed", stream_limited)
+    assert not (tmp_path / "stream-failed").exists()
