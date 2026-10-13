@@ -785,8 +785,40 @@ class OwnedDockerAttempt:
         self._record("CREATE_CONFIRMED", item)
         return item
 
+    def _require_new_volume_name(self, item: OwnedItem) -> None:
+        """Never adopt an old Docker volume: create silently reuses existing names.
+
+        Absence is a required precondition, not proof against a concurrent
+        daemon-side replacement. Keep the lease and separately verify options,
+        owner and mounts after creation. Ambiguous daemon results stay UNKNOWN.
+        """
+        if (
+            not self._entered
+            or item.kind != "volume"
+            or item.state != "INTENT"
+            or not any(owned is item for owned in self.items)
+        ):
+            raise P4AdapterError("unreserved volume pre-create inventory")
+        try:
+            result = self._checked_call(
+                ["docker", "volume", "inspect", "--format", "{{.Name}}", item.name]
+            )
+            if (
+                result.exit_code != 1
+                or result.stdout
+                or not any(
+                    marker in result.stderr.lower()
+                    for marker in (b"no such volume", b"no such object")
+                )
+            ):
+                raise P4AdapterError("volume may already exist or inventory is ambiguous")
+        except Exception as exc:
+            self.recovery_required = True
+            raise P4RecoveryRequired("new owned volume name not independently absent") from exc
+
     def create_volume(self) -> OwnedItem:
         item = self._reserve("volume")
+        self._require_new_volume_name(item)
         item.state = "REQUESTED"
         self._record("CREATE_REQUESTED", item)
         res = self._checked_call(
@@ -799,10 +831,10 @@ class OwnedDockerAttempt:
                 item.name,
             ]
         )
-        if res.exit_code != 0:
+        if res.exit_code != 0 or res.stdout.strip() != item.name.encode("ascii"):
             self.recovery_required = True
             raise P4RecoveryRequired("volume creation requires owned inventory reconciliation")
-        item.object_id = res.stdout.decode("ascii", errors="ignore").strip()
+        item.object_id = item.name
         item.state = "CREATED"
         self._record("CREATE_CONFIRMED", item)
         return item
@@ -820,6 +852,7 @@ class OwnedDockerAttempt:
         owner_uid = 10001 if role == "fixture" else 10003
         item = self._reserve("volume")
         item.artifact_owner_uid = owner_uid
+        self._require_new_volume_name(item)
         item.state = "REQUESTED"
         self._record("CREATE_REQUESTED", item)
         artifact_bytes = bounds._positive_int(

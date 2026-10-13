@@ -1461,3 +1461,139 @@ def test_v13_role_volume_contract_does_not_enable_execution() -> None:
     item = module.OwnedItem(kind="volume", name="unsubmitted")
     assert item.artifact_tmpfs_attested is False
     assert item.artifact_owner_uid == 10001
+
+
+def test_v14_owned_volume_create_requires_verified_absence(tmp_path: Path) -> None:
+    module = _module()
+    sys.modules["p4_trusted_runtime_adapter"] = module
+    policy, _ = _inputs(module)
+    fake = FakeDocker()
+    with module.OwnedDockerAttempt(
+        policy, "v14normal", tmp_path / "lock", tmp_path / "owned-v14normal.jsonl", run=fake
+    ) as attempt:
+        volume = attempt.create_volume()
+        assert volume.object_id == volume.name
+        commands = fake.commands
+        preflight = next(
+            i
+            for i, command in enumerate(commands)
+            if command[:3] == ["docker", "volume", "inspect"]
+        )
+        created = next(
+            i for i, command in enumerate(commands) if command[:3] == ["docker", "volume", "create"]
+        )
+        assert preflight < created
+        assert commands[preflight][-1] == volume.name
+    assert attempt.cleanup_result()["outcome"] == "CLEAN"
+
+
+@pytest.mark.parametrize("kind", ["generic", "artifact"])
+def test_v14_preexisting_volume_never_adopted(tmp_path: Path, kind: str) -> None:
+    module = _module()
+    sys.modules["p4_trusted_runtime_adapter"] = module
+    policy, _ = _inputs(module)
+    from p4_trusted_runtime_adapter import CommandResult
+
+    class Preexisting(FakeDocker):
+        def __call__(self, argv, *, timeout, output_budget, retained_per_stream):
+            args = list(argv)
+            if args[:3] == ["docker", "volume", "inspect"] and "{{.Name}}" in args:
+                self.commands.append(args)
+                value = args[-1].encode()
+                return CommandResult(0, value, b"", len(value))
+            return super().__call__(
+                argv,
+                timeout=timeout,
+                output_budget=output_budget,
+                retained_per_stream=retained_per_stream,
+            )
+
+    fake = Preexisting()
+    attempt = module.OwnedDockerAttempt(
+        policy,
+        "v14existing",
+        tmp_path / "lock",
+        tmp_path / "owned-v14existing.jsonl",
+        run=fake,
+    )
+    with pytest.raises(module.P4RecoveryRequired), attempt:
+        if kind == "generic":
+            attempt.create_volume()
+        else:
+            attempt.create_bounded_artifact_volume(role="fixture")
+    assert attempt.recovery_required
+    assert not any(c[:3] == ["docker", "volume", "create"] for c in fake.commands)
+    assert attempt.cleanup_result()["outcome"] == "UNKNOWN"
+
+
+@pytest.mark.parametrize(
+    "exit_code,stderr",
+    [(1, b"unexpected daemon error"), (0, b"No such volume"), (2, b"No such volume")],
+)
+def test_v14_ambiguous_volume_absence_fails_closed(
+    tmp_path: Path, exit_code: int, stderr: bytes
+) -> None:
+    module = _module()
+    sys.modules["p4_trusted_runtime_adapter"] = module
+    policy, _ = _inputs(module)
+    from p4_trusted_runtime_adapter import CommandResult
+
+    class Ambiguous(FakeDocker):
+        def __call__(self, argv, *, timeout, output_budget, retained_per_stream):
+            args = list(argv)
+            if args[:3] == ["docker", "volume", "inspect"] and "{{.Name}}" in args:
+                self.commands.append(args)
+                return CommandResult(exit_code, b"", stderr, len(stderr))
+            return super().__call__(
+                argv,
+                timeout=timeout,
+                output_budget=output_budget,
+                retained_per_stream=retained_per_stream,
+            )
+
+    fake = Ambiguous()
+    attempt = module.OwnedDockerAttempt(
+        policy,
+        "v14ambiguous",
+        tmp_path / "lock",
+        tmp_path / "owned-v14ambiguous.jsonl",
+        run=fake,
+    )
+    with pytest.raises(module.P4RecoveryRequired), attempt:
+        attempt.create_bounded_artifact_volume(role="fixture")
+    assert not any(c[:3] == ["docker", "volume", "create"] for c in fake.commands)
+    assert attempt.cleanup_result()["outcome"] == "UNKNOWN"
+
+
+def test_v14_generic_volume_create_must_echo_exact_reserved_name(tmp_path: Path) -> None:
+    module = _module()
+    sys.modules["p4_trusted_runtime_adapter"] = module
+    policy, _ = _inputs(module)
+    from p4_trusted_runtime_adapter import CommandResult
+
+    class BadReply(FakeDocker):
+        def __call__(self, argv, *, timeout, output_budget, retained_per_stream):
+            args = list(argv)
+            if args[:3] == ["docker", "volume", "create"]:
+                super().__call__(
+                    argv,
+                    timeout=timeout,
+                    output_budget=output_budget,
+                    retained_per_stream=retained_per_stream,
+                )
+                return CommandResult(0, b"different-volume", b"", len(b"different-volume"))
+            return super().__call__(
+                argv,
+                timeout=timeout,
+                output_budget=output_budget,
+                retained_per_stream=retained_per_stream,
+            )
+
+    fake = BadReply()
+    attempt = module.OwnedDockerAttempt(
+        policy, "v14reply", tmp_path / "lock", tmp_path / "owned-v14reply.jsonl", run=fake
+    )
+    with pytest.raises(module.P4RecoveryRequired), attempt:
+        attempt.create_volume()
+    assert attempt.recovery_required
+    assert attempt.cleanup_result()["outcome"] == "UNKNOWN"
