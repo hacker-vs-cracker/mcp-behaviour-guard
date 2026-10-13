@@ -1106,6 +1106,7 @@ def test_v11_declared_image_volumes_require_exact_owned_mounts(
             item.state = "CREATED"
             item.object_id = item.name
             item.artifact_tmpfs_attested = True
+            item.artifact_owner_uid = 10001 if role == "fixture" else 10003
             bindings[destination] = item
         flags = attempt.plan_owned_image_mounts(image, authority, role=role, bindings=bindings)
         assert len(flags) == len(bindings) * 2
@@ -1359,3 +1360,104 @@ def test_v12_legacy_create_does_not_confer_mounted_attestation() -> None:
     item = module.OwnedItem(kind="container", name="not-runnable")
     assert item.planned_mounts is None
     assert item.mounted_attested is False
+
+
+def test_v13_unknown_volume_role_fails_before_any_reservation(tmp_path: Path) -> None:
+    module = _module()
+    policy, _ = _inputs(module)
+    fake = FakeDocker()
+    with module.OwnedDockerAttempt(
+        policy, "v13bad", tmp_path / "one.lock", tmp_path / "owned-v13bad.jsonl", run=fake
+    ) as attempt:
+        with pytest.raises(module.P4AdapterError, match="unapproved owned volume role"):
+            attempt.create_bounded_artifact_volume(role="unknown")
+        assert not attempt.items
+        assert not fake.commands
+
+
+@pytest.mark.parametrize("role,owner", [("fixture", 10001), ("evaluator", 10003)])
+def test_v13_volume_creation_seals_uid_and_gid_for_pinned_role(
+    tmp_path: Path, role: str, owner: int
+) -> None:
+    module = _module()
+    policy, _ = _inputs(module)
+    sys.modules["p4_trusted_runtime_adapter"] = module
+    from p4_trusted_runtime_adapter import CommandResult
+
+    class VolumeFake(FakeDocker):
+        def __call__(self, argv, *, timeout, output_budget, retained_per_stream):
+            args = list(argv)
+            if args[:3] == ["docker", "volume", "inspect"] and "{{json .}}" in args:
+                self.commands.append(args)
+                name = args[-1]
+                options = (
+                    f"size={policy['limits']['artifacts']['total_bytes']},uid={owner},"
+                    f"gid={owner},mode=0770,noexec,nosuid,nodev"
+                )
+                raw = json.dumps(
+                    {
+                        "Name": name,
+                        "Driver": "local",
+                        "Options": {"type": "tmpfs", "device": "tmpfs", "o": options},
+                        "Labels": {"mcpbg.p4.owner": "v13role"},
+                    }
+                ).encode()
+                return CommandResult(0, raw, b"", len(raw))
+            return super().__call__(
+                argv,
+                timeout=timeout,
+                output_budget=output_budget,
+                retained_per_stream=retained_per_stream,
+            )
+
+    fake = VolumeFake()
+    with module.OwnedDockerAttempt(
+        policy, "v13role", tmp_path / "one.lock", tmp_path / "owned-v13role.jsonl", run=fake
+    ) as attempt:
+        owned = attempt.create_bounded_artifact_volume(role=role)
+        assert owned.artifact_owner_uid == owner
+        assert owned.artifact_tmpfs_attested
+        command = next(c for c in fake.commands if c[:3] == ["docker", "volume", "create"])
+        assert f"uid={owner},gid={owner},mode=0770" in " ".join(command)
+    assert attempt.cleanup_result()["outcome"] == "CLEAN"
+
+
+def test_v13_fixture_volume_uid_mismatch_denies_mount_before_create(tmp_path: Path) -> None:
+    module = _module()
+    policy, authority = _inputs(module)
+    image = json.loads(authority)["runtime"]["images"]["fixture"]
+    fake = FakeDocker()
+    with module.OwnedDockerAttempt(
+        policy, "v13mount", tmp_path / "one.lock", tmp_path / "owned-v13mount.jsonl", run=fake
+    ) as attempt:
+        bindings = {}
+        for dest in ("/state", "/trusted-output"):
+            item = attempt._reserve("volume")
+            item.state = "CREATED"
+            item.object_id = item.name
+            item.artifact_tmpfs_attested = True
+            bindings[dest] = item
+        bindings["/trusted-output"].artifact_owner_uid = 10003
+        attempt.plan_owned_image_mounts = lambda *_a, **_kw: [
+            part
+            for dest in sorted(bindings)
+            for part in (
+                "--mount",
+                f"type=volume,src={bindings[dest].name},dst={dest},volume-nocopy",
+            )
+        ]
+        with pytest.raises(module.P4AdapterError, match="volume ownership mismatch"):
+            attempt.create_mounted_fixed_container(
+                image, authority, role="fixture", bindings=bindings
+            )
+        assert not any(cmd[:2] == ["docker", "create"] for cmd in fake.commands)
+        for item in bindings.values():
+            item.state = "INTENT"
+
+
+def test_v13_role_volume_contract_does_not_enable_execution() -> None:
+    module = _module()
+    assert len(module.PROMOTED_AUTHORITY_SHA256) == 64
+    item = module.OwnedItem(kind="volume", name="unsubmitted")
+    assert item.artifact_tmpfs_attested is False
+    assert item.artifact_owner_uid == 10001

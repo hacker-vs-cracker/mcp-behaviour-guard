@@ -428,6 +428,7 @@ class OwnedItem:
     object_id: str | None = None
     prestart_attested: bool = False
     artifact_tmpfs_attested: bool = False
+    artifact_owner_uid: int = 10001
     planned_mounts: dict[str, str] | None = None
     mounted_attested: bool = False
 
@@ -806,7 +807,7 @@ class OwnedDockerAttempt:
         self._record("CREATE_CONFIRMED", item)
         return item
 
-    def create_bounded_artifact_volume(self) -> OwnedItem:
+    def create_bounded_artifact_volume(self, *, role: str = "fixture") -> OwnedItem:
         """Request one attempt-owned Linux local-driver tmpfs volume, source-only.
 
         A volume is not trusted merely because `docker volume create` returned a
@@ -814,14 +815,20 @@ class OwnedDockerAttempt:
         passing it to a future candidate or read-only exporter. No global prune.
         The physical mounted filesystem and writer fence need separate proof.
         """
+        if type(role) is not str or role not in {"fixture", "evaluator"}:
+            raise P4AdapterError("unapproved owned volume role")
+        owner_uid = 10001 if role == "fixture" else 10003
         item = self._reserve("volume")
+        item.artifact_owner_uid = owner_uid
         item.state = "REQUESTED"
         self._record("CREATE_REQUESTED", item)
         artifact_bytes = bounds._positive_int(
             bounds._limits(self.policy, "artifacts").get("total_bytes"),
             "artifacts.total_bytes",
         )
-        options = f"size={artifact_bytes},uid=10001,gid=10001,mode=0770,noexec,nosuid,nodev"
+        options = (
+            f"size={artifact_bytes},uid={owner_uid},gid={owner_uid},mode=0770,noexec,nosuid,nodev"
+        )
         command = [
             "docker",
             "volume",
@@ -937,6 +944,7 @@ class OwnedDockerAttempt:
                     or item.kind != "volume"
                     or item.state != "CREATED"
                     or not item.artifact_tmpfs_attested
+                    or item.artifact_owner_uid != (10001 if role == "fixture" else 10003)
                     or item.object_id != item.name
                     or item.name in names
                 ):
@@ -1016,9 +1024,12 @@ class OwnedDockerAttempt:
                 or item.kind != "volume"
                 or item.state != "CREATED"
                 or not item.artifact_tmpfs_attested
+                or item.artifact_owner_uid != (10001 if role == "fixture" else 10003)
                 or item.object_id != item.name
             ):
-                raise P4AdapterError("owned mount identity changed before create")
+                raise P4AdapterError(
+                    "owned mount identity changed before create: volume ownership mismatch"
+                )
         # Retain the exact name mapping for later effective Docker inspection.
         planned = {path: bindings[path].name for path in sorted(expected_paths)}
         candidate = self._reserve("container")
@@ -1146,6 +1157,7 @@ class OwnedDockerAttempt:
                         owned.kind == "volume"
                         and owned.name == volume
                         and owned.artifact_tmpfs_attested
+                        and owned.artifact_owner_uid == (10001 if role == "fixture" else 10003)
                         and owned.state == "CREATED"
                         for owned in self.items
                     ):
