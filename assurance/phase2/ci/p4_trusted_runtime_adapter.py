@@ -265,6 +265,9 @@ class OwnedDockerAttempt:
             "event": event,
             "attempt": self.attempt_id,
             "nonce": self._nonce,
+            "lease_scope_sha256": hashlib.sha256(
+                str(self.lease_path.absolute()).encode("utf-8")
+            ).hexdigest(),
             "utc_epoch": int(time.time()),
         }
         if item is not None:
@@ -287,6 +290,112 @@ class OwnedDockerAttempt:
             self.recovery_required = True
             raise P4RecoveryRequired("durable resource ledger write failed") from exc
 
+    def _assert_previous_attempts_closed(self) -> None:
+        """Fail closed on unresolved local scope records before any new daemon call.
+
+        This is a shared-inode/local durability gate, NOT a cross-runner lease or
+        proof of Docker absence. UNKNOWN requires external inventory reconciliation.
+        """
+        directory = self.ledger_path.parent
+        scope = hashlib.sha256(str(self.lease_path.absolute()).encode("utf-8")).hexdigest()
+        try:
+            names = sorted(directory.glob("owned-*.jsonl"))
+            if len(names) > 64:
+                raise P4RecoveryRequired("prior owned ledger inventory exceeds budget")
+            for previous in names:
+                if previous == self.ledger_path:
+                    raise P4RecoveryRequired("prior owned ledger path reused")
+                if previous.is_symlink() or not previous.is_file():
+                    raise P4RecoveryRequired("prior owned ledger not regular")
+                if previous.stat().st_size > 131_072:
+                    raise P4RecoveryRequired("prior owned ledger exceeds byte budget")
+                raw = previous.read_bytes()
+                if not raw or not raw.endswith(b"\n") or len(raw.splitlines()) > 128:
+                    raise P4RecoveryRequired("prior owned ledger incomplete")
+                events: list[dict[str, Any]] = []
+                for line in raw.splitlines():
+                    if len(line) > 1024:
+                        raise P4RecoveryRequired("prior owned ledger entry exceeds budget")
+                    try:
+                        value = json.loads(
+                            line,
+                            object_pairs_hook=bounds._reject_duplicate_pairs,
+                            parse_constant=bounds._reject_constant,
+                        )
+                    except (ValueError, UnicodeError, bounds.P4ResourceEnforcementError) as exc:
+                        raise P4RecoveryRequired("prior owned ledger malformed") from exc
+                    if not isinstance(value, dict) or not isinstance(value.get("event"), str):
+                        raise P4RecoveryRequired("prior owned ledger event malformed")
+                    events.append(value)
+                scopes: list[str] = []
+                identities: list[tuple[str, str]] = []
+                for event in events:
+                    prior_scope = event.get("lease_scope_sha256")
+                    prior_attempt = event.get("attempt")
+                    prior_nonce = event.get("nonce")
+                    if not isinstance(prior_scope, str) or not re.fullmatch(
+                        r"[0-9a-f]{64}", prior_scope
+                    ):
+                        raise P4RecoveryRequired("prior owned ledger scope malformed")
+                    if (
+                        not isinstance(prior_attempt, str)
+                        or not prior_attempt
+                        or not isinstance(prior_nonce, str)
+                        or not prior_nonce
+                    ):
+                        raise P4RecoveryRequired("prior ledger has inconsistent attempt identity")
+                    scopes.append(prior_scope)
+                    identities.append((prior_attempt, prior_nonce))
+                if len(set(identities)) != 1:
+                    raise P4RecoveryRequired("prior ledger has inconsistent attempt identity")
+                if len(set(scopes)) != 1:
+                    raise P4RecoveryRequired("prior owned ledger scope malformed")
+                if scope not in scopes:
+                    continue  # Distinct lock path, not the same execution scope.
+                if (
+                    events[0].get("event") != "ATTEMPT_OPEN"
+                    or events[-1].get("event") != "FINISH_CLEAN"
+                ):
+                    raise P4RecoveryRequired("prior attempt unresolved; cleanup inventory required")
+                pending: dict[str, tuple[str, str]] = {}
+                for event in events[1:-1]:
+                    name = event.get("name")
+                    kind = event.get("kind")
+                    state = event.get("event")
+                    if (
+                        not isinstance(name, str)
+                        or not isinstance(kind, str)
+                        or kind not in {"container", "network", "volume"}
+                    ):
+                        raise P4RecoveryRequired("prior owned ledger resource malformed")
+                    if state == "RESERVED":
+                        if name in pending:
+                            raise P4RecoveryRequired("duplicate owned ledger resource")
+                        pending[name] = (kind, "RESERVED")
+                    elif state == "CREATE_REQUESTED" and pending.get(name) == (kind, "RESERVED"):
+                        pending[name] = (kind, "REQUESTED")
+                    elif state == "CREATE_CONFIRMED" and pending.get(name) == (kind, "REQUESTED"):
+                        pending[name] = (kind, "CREATED")
+                    elif state == "NOT_SUBMITTED" and pending.get(name) == (kind, "RESERVED"):
+                        pending[name] = (kind, "NEVER_SUBMITTED")
+                    elif state == "ABSENCE_VERIFIED" and pending.get(name) in {
+                        (kind, "REQUESTED"),
+                        (kind, "CREATED"),
+                    }:
+                        pending[name] = (kind, "ABSENT")
+                    else:
+                        raise P4RecoveryRequired("inconsistent prior owned ledger transition")
+                if any(
+                    status not in {"ABSENT", "NEVER_SUBMITTED"} for _, status in pending.values()
+                ):
+                    raise P4RecoveryRequired("prior owned resources not verified absent")
+        except P4RecoveryRequired:
+            self.recovery_required = True
+            raise
+        except (OSError, RecursionError) as exc:
+            self.recovery_required = True
+            raise P4RecoveryRequired("cannot verify previous attempt ledgers") from exc
+
     def __enter__(self) -> OwnedDockerAttempt:
         if not isinstance(self.attempt_id, str) or not _ATTEMPT.fullmatch(self.attempt_id):
             raise P4AdapterError("attempt ID is not a safe owned resource prefix")
@@ -295,6 +404,11 @@ class OwnedDockerAttempt:
         self._lease = bounds.AttemptLease(self.lease_path, self.policy)
         self._lease.__enter__()
         try:
+            if not re.fullmatch(r"owned-[a-zA-Z0-9._-]+\.jsonl", self.ledger_path.name):
+                raise P4AdapterError("ledger name must use owned-*.jsonl")
+            if self.lease_path.parent.absolute() != self.ledger_path.parent.absolute():
+                raise P4AdapterError("ledger and lease scope directories differ")
+            self._assert_previous_attempts_closed()
             # Do not reuse a previous run's ledger or follow a link.
             flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
             if hasattr(os, "O_NOFOLLOW"):

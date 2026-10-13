@@ -261,3 +261,176 @@ def test_hyphenated_owner_label_and_write_ahead_ledger(tmp_path: Path) -> None:
     assert "ABSENCE_VERIFIED" in events
     assert events[-1] == "FINISH_CLEAN"
     assert not fake.names
+
+
+def test_prior_clean_ledger_can_reuse_only_same_local_scope(tmp_path: Path) -> None:
+    module = _module()
+    policy, _ = _inputs(module)
+    sys.modules["p4_trusted_runtime_adapter"] = module
+    fake = FakeDocker()
+    lock = tmp_path / "shared.lock"
+    with module.OwnedDockerAttempt(
+        policy, "first", lock, tmp_path / "owned-first.jsonl", run=fake
+    ) as attempt:
+        attempt.create_network()
+    assert attempt.cleanup_result()["outcome"] == "CLEAN"
+    with module.OwnedDockerAttempt(
+        policy, "second", lock, tmp_path / "owned-second.jsonl", run=fake
+    ):
+        pass
+    assert (tmp_path / "owned-second.jsonl").exists()
+
+
+def test_prior_unknown_blocks_before_any_new_owned_operation(tmp_path: Path) -> None:
+    module = _module()
+    policy, _ = _inputs(module)
+    sys.modules["p4_trusted_runtime_adapter"] = module
+    fake = FakeDocker(fail_create=True)
+    authority = AUTHORITY.read_bytes()
+    image = json.loads(authority)["runtime"]["images"]["fixture"]
+    lock = tmp_path / "same-global.lock"
+    with (
+        pytest.raises(module.P4RecoveryRequired),
+        module.OwnedDockerAttempt(
+            policy, "first", lock, tmp_path / "owned-first.jsonl", run=fake
+        ) as attempt,
+        pytest.raises(module.P4AdapterError),
+    ):
+        attempt.create_fixed_container(image, authority, role="fixture")
+    before = len(fake.commands)
+    with (
+        pytest.raises(module.P4RecoveryRequired, match="prior attempt unresolved"),
+        module.OwnedDockerAttempt(
+            policy, "second", lock, tmp_path / "owned-second.jsonl", run=fake
+        ),
+    ):
+        pass
+    assert len(fake.commands) == before
+    assert not (tmp_path / "owned-second.jsonl").exists()
+
+
+def test_forged_clean_ending_does_not_hide_unresolved_resources(tmp_path: Path) -> None:
+    module = _module()
+    policy, _ = _inputs(module)
+    fake = FakeDocker()
+    lock = tmp_path / "global.lock"
+    scope = __import__("hashlib").sha256(str(lock.absolute()).encode()).hexdigest()
+
+    def row(event, **fields):
+        return (
+            json.dumps(
+                dict(
+                    event=event,
+                    attempt="first",
+                    nonce="deadbeef",
+                    lease_scope_sha256=scope,
+                    utc_epoch=1,
+                    **fields,
+                ),
+                sort_keys=True,
+            )
+            + "\n"
+        )
+
+    (tmp_path / "owned-first.jsonl").write_text(
+        row("ATTEMPT_OPEN")
+        + row(
+            "RESERVED",
+            kind="container",
+            name="mcpbg-p4-first-test-container-1",
+            state="INTENT",
+            object_id=None,
+        )
+        + row(
+            "CREATE_REQUESTED",
+            kind="container",
+            name="mcpbg-p4-first-test-container-1",
+            state="REQUESTED",
+            object_id=None,
+        )
+        + row("FINISH_CLEAN"),
+        encoding="utf-8",
+    )
+    with (
+        pytest.raises(module.P4RecoveryRequired, match="not verified absent"),
+        module.OwnedDockerAttempt(
+            policy, "second", lock, tmp_path / "owned-second.jsonl", run=fake
+        ),
+    ):
+        pass
+    assert fake.commands == []
+
+
+@pytest.mark.parametrize(
+    "mode", ["symlink", "truncated", "oversized", "duplicate_key", "unhashable_scope"]
+)
+def test_prior_corrupt_ledger_fails_closed(tmp_path: Path, mode: str) -> None:
+    module = _module()
+    policy, _ = _inputs(module)
+    lock = tmp_path / "global.lock"
+    prior = tmp_path / "owned-first.jsonl"
+    if mode == "symlink":
+        other = tmp_path / "outside.txt"
+        other.write_text("outside")
+        prior.symlink_to(other)
+    elif mode == "truncated":
+        prior.write_bytes(b'{"event":"ATTEMPT_OPEN"}')
+    elif mode == "oversized":
+        prior.write_bytes(b"x" * 131_073)
+    else:
+        prior.write_bytes(b'{"event":"ATTEMPT_OPEN","event":"FINISH_CLEAN"}\n')
+    with (
+        pytest.raises(module.P4RecoveryRequired),
+        module.OwnedDockerAttempt(policy, "second", lock, tmp_path / "owned-second.jsonl"),
+    ):
+        pass
+    assert not (tmp_path / "owned-second.jsonl").exists()
+
+
+def test_ledger_scope_must_share_lock_directory_and_known_name(tmp_path: Path) -> None:
+    module = _module()
+    policy, _ = _inputs(module)
+    separated = tmp_path / "other"
+    separated.mkdir()
+    for path in (separated / "owned-moved.jsonl", tmp_path / "wrong.jsonl"):
+        with (
+            pytest.raises(module.P4AdapterError),
+            module.OwnedDockerAttempt(policy, "safe", tmp_path / "global.lock", path),
+        ):
+            pass
+        assert not path.exists()
+
+
+def test_prior_ledger_kind_cannot_change_between_events(tmp_path: Path) -> None:
+    module = _module()
+    policy, _ = _inputs(module)
+    fake = FakeDocker()
+    lock = tmp_path / "global.lock"
+    scope = __import__("hashlib").sha256(str(lock.absolute()).encode()).hexdigest()
+    name = "mcpbg-p4-first-deadbeef-container-1"
+
+    def row(event: str, kind: str | None = None) -> str:
+        value = dict(
+            event=event, attempt="first", nonce="deadbeef", lease_scope_sha256=scope, utc_epoch=1
+        )
+        if kind is not None:
+            value.update(kind=kind, name=name, state="CREATED", object_id=None)
+        return json.dumps(value, sort_keys=True) + "\n"
+
+    (tmp_path / "owned-first.jsonl").write_text(
+        row("ATTEMPT_OPEN")
+        + row("RESERVED", "container")
+        + row("CREATE_REQUESTED", "container")
+        + row("ABSENCE_VERIFIED", "network")
+        + row("FINISH_CLEAN"),
+        encoding="utf-8",
+    )
+    with (
+        pytest.raises(module.P4RecoveryRequired, match="inconsistent prior"),
+        module.OwnedDockerAttempt(
+            policy, "second", lock, tmp_path / "owned-second.jsonl", run=fake
+        ),
+    ):
+        pass
+    assert fake.commands == []
+    assert not (tmp_path / "owned-second.jsonl").exists()
