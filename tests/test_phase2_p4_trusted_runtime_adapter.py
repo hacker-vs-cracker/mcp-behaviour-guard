@@ -822,3 +822,120 @@ def test_prestart_rejects_foreign_owned_item_without_daemon_read(tmp_path: Path)
         with pytest.raises(module.P4AdapterError, match="owned created container required"):
             attempt.attest_fixed_container(foreign, authority, role="fixture")
         assert len(fake.commands) == before
+
+
+def test_v9_archive_subprocess_consumes_real_pipes_and_checks_exit() -> None:
+    module = _module()
+    import time
+
+    def collect(code: str, *, limit: int = 1024, duration: float = 2.0) -> bytes:
+        return b"".join(
+            module._bounded_archive_process(
+                [sys.executable, "-c", code],
+                deadline=float(time.monotonic() + duration),
+                byte_limit=limit,
+            )
+        )
+
+    assert collect("import os;os.write(1,b'archive')") == b"archive"
+    with pytest.raises(module.P4AdapterError, match="bytes exceeded"):
+        collect("import os;os.write(1,b'x'*4096)", limit=100)
+    with pytest.raises(module.P4AdapterError, match="CLI failed"):
+        collect("import os,sys;os.write(1,b'archive');sys.exit(4)")
+    with pytest.raises(module.P4AdapterError, match="deadline"):
+        collect("import time;time.sleep(3)", duration=0.2)
+    with pytest.raises(module.P4AdapterError, match="stderr budget"):
+        b"".join(
+            module._bounded_archive_process(
+                [sys.executable, "-c", "import os;os.write(2,b'e'*2048)"],
+                deadline=float(time.monotonic() + 2),
+                byte_limit=1024,
+                stderr_limit=100,
+            )
+        )
+
+
+def test_v9_export_cannot_run_without_owned_fenced_fixture(tmp_path: Path) -> None:
+    module = _module()
+    policy, _ = _inputs(module)
+    sys.modules["p4_trusted_runtime_adapter"] = module
+    fake = FakeDocker()
+    with (
+        module.OwnedDockerAttempt(
+            policy, "export", tmp_path / "global.lock", tmp_path / "owned-export.jsonl", run=fake
+        ) as attempt,
+        pytest.raises(module.P4AdapterError, match="prestart-attested"),
+    ):
+        from p4_trusted_runtime_adapter import OwnedItem
+
+        other = OwnedItem(kind="container", name="foreign", state="CREATED", object_id="a" * 64)
+        attempt.export_paused_fixed_artifacts(
+            other, AUTHORITY.read_bytes(), role="fixture", destination=tmp_path / "published"
+        )
+    assert fake.commands == []
+
+
+def test_v9_paused_export_malformed_daemon_state_fail_closed(tmp_path: Path) -> None:
+    module = _module()
+    policy, authority = _inputs(module)
+    sys.modules["p4_trusted_runtime_adapter"] = module
+    fake = FakeDocker()
+    image = json.loads(authority)["runtime"]["images"]["fixture"]
+    with (
+        pytest.raises(module.P4RecoveryRequired, match="owned cleanup is UNKNOWN"),
+        module.OwnedDockerAttempt(
+            policy, "paused", tmp_path / "global.lock", tmp_path / "owned-paused.jsonl", run=fake
+        ) as attempt,
+    ):
+        item = attempt.create_fixed_container(image, authority, role="fixture")
+        item.prestart_attested = True  # synthetic pre-start boundary
+        try:
+            attempt.export_paused_fixed_artifacts(
+                item, authority, role="fixture", destination=tmp_path / "published"
+            )
+        except module.P4RecoveryRequired as exc:
+            assert "export UNKNOWN" in str(exc)
+        else:
+            raise AssertionError("untrusted Docker inspect must not authorize export")
+    assert attempt.cleanup_result()["outcome"] == "UNKNOWN"
+    assert not (tmp_path / "published").exists()
+    assert all(command[:2] != ["docker", "cp"] for command in fake.commands)
+
+
+def test_v9_unfinished_artifact_export_blocks_next_attempt(tmp_path: Path) -> None:
+    module = _module()
+    import hashlib
+
+    policy, _ = _inputs(module)
+    lock = tmp_path / "global.lock"
+    scope = hashlib.sha256(str(lock.absolute()).encode()).hexdigest()
+    name = "mcpbg-p4-first-deadbeef-container-1"
+
+    def row(event: str, resource: bool = False) -> str:
+        value = {
+            "event": event,
+            "attempt": "first",
+            "nonce": "deadbeef",
+            "lease_scope_sha256": scope,
+            "utc_epoch": 1,
+        }
+        if resource:
+            value.update(kind="container", name=name, state="CREATED", object_id="a" * 64)
+        return json.dumps(value, sort_keys=True) + "\n"
+
+    (tmp_path / "owned-first.jsonl").write_text(
+        row("ATTEMPT_OPEN")
+        + row("RESERVED", True)
+        + row("CREATE_REQUESTED", True)
+        + row("CREATE_CONFIRMED", True)
+        + row("ARTIFACT_EXPORT_BEGIN", True)
+        + row("ABSENCE_VERIFIED", True)
+        + row("FINISH_CLEAN"),
+        encoding="utf-8",
+    )
+    with (
+        pytest.raises(module.P4RecoveryRequired, match="prior artifact export unresolved"),
+        module.OwnedDockerAttempt(policy, "second", lock, tmp_path / "owned-second.jsonl"),
+    ):
+        pass
+    assert not (tmp_path / "owned-second.jsonl").exists()

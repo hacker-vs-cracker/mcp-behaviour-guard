@@ -307,7 +307,28 @@ def receive_bounded_artifact_archive(
                 raise P4AdapterError("artifact destination appeared during validation")
             # Publication is limited to a private parent controlled by this
             # attempt. The caller must also hold its shared writer lease.
+            # Durably flush validated extracted files and directories before rename.
+            for directory, _subdirs, files in os.walk(staged):
+                for filename in files:
+                    if time.monotonic() >= deadline:
+                        raise P4AdapterError("artifact fsync deadline exceeded")
+                    fd = os.open(Path(directory) / filename, os.O_RDONLY)
+                    try:
+                        os.fsync(fd)
+                    finally:
+                        os.close(fd)
+            for directory, _subdirs, _files in os.walk(staged, topdown=False):
+                fd = os.open(directory, os.O_RDONLY)
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
             staged.rename(destination)
+            parent_fd = os.open(parent, os.O_RDONLY)
+            try:
+                os.fsync(parent_fd)
+            finally:
+                os.close(parent_fd)
             return {
                 "files": result["files"],
                 "bytes": result["bytes"],
@@ -318,12 +339,94 @@ def receive_bounded_artifact_archive(
         raise P4AdapterError("artifact archive intake invalid") from exc
 
 
+def _bounded_archive_process(
+    argv: Sequence[str], *, deadline: float, byte_limit: int, stderr_limit: int = 131_072
+) -> Iterable[bytes]:
+    """Bound the *actual subprocess pipes*; never rely on a blocking input iterator.
+
+    This runs only when explicitly invoked, and does not execute on import. The
+    caller owns and verifies the source container; a nonzero exit rejects the
+    archive even when the bytes appear syntactically valid.
+    """
+    if (
+        not argv
+        or not all(type(x) is str and x and "\x00" not in x for x in argv)
+        or type(deadline) is not float
+        or not math.isfinite(deadline)
+        or type(byte_limit) is not int
+        or not 0 < byte_limit <= 16_777_216
+        or type(stderr_limit) is not int
+        or not 0 < stderr_limit <= 131_072
+        or time.monotonic() >= deadline
+    ):
+        raise P4AdapterError("bounded artifact subprocess invalid")
+    process: subprocess.Popen[bytes] | None = None
+    poller = selectors.DefaultSelector()
+    succeeded = False
+    stdout_bytes = 0
+    stderr_bytes = 0
+    try:
+        process = subprocess.Popen(
+            list(argv),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+            close_fds=True,
+        )
+        assert process.stdout is not None and process.stderr is not None
+        for name, stream in (("stdout", process.stdout), ("stderr", process.stderr)):
+            os.set_blocking(stream.fileno(), False)
+            poller.register(stream, selectors.EVENT_READ, name)
+        while poller.get_map() or process.poll() is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise P4AdapterError("artifact export process deadline exceeded")
+            for key, _ in poller.select(min(0.2, remaining)):
+                if key.data == "stdout":
+                    chunk = os.read(key.fd, min(65_536, byte_limit - stdout_bytes + 1))
+                else:
+                    chunk = os.read(key.fd, min(65_536, stderr_limit - stderr_bytes + 1))
+                if not chunk:
+                    poller.unregister(key.fileobj)
+                    continue
+                if key.data == "stderr":
+                    stderr_bytes += len(chunk)
+                    if stderr_bytes > stderr_limit:
+                        raise P4AdapterError("artifact export stderr budget exceeded")
+                else:
+                    stdout_bytes += len(chunk)
+                    if stdout_bytes > byte_limit:
+                        raise P4AdapterError("artifact export bytes exceeded")
+                    yield chunk
+        if process.wait(timeout=max(0.01, deadline - time.monotonic())) != 0:
+            raise P4AdapterError("artifact export CLI failed")
+        if stdout_bytes == 0:
+            raise P4AdapterError("artifact export CLI produced no archive")
+        succeeded = True
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise P4AdapterError("artifact export pipe failed or expired") from exc
+    finally:
+        poller.close()
+        if process is not None:
+            if not succeeded:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=2)
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.stderr is not None:
+                process.stderr.close()
+
+
 @dataclass
 class OwnedItem:
     kind: str
     name: str
     state: str = "INTENT"
     object_id: str | None = None
+    prestart_attested: bool = False
 
 
 @dataclass
@@ -457,6 +560,8 @@ class OwnedDockerAttempt:
                 ):
                     raise P4RecoveryRequired("prior attempt unresolved; cleanup inventory required")
                 pending: dict[str, tuple[str, str]] = {}
+                export_pending = False
+                export_finished = False
                 for event in events[1:-1]:
                     name = event.get("name")
                     kind = event.get("kind")
@@ -467,6 +572,20 @@ class OwnedDockerAttempt:
                         or kind not in {"container", "network", "volume"}
                     ):
                         raise P4RecoveryRequired("prior owned ledger resource malformed")
+                    if state == "ARTIFACT_EXPORT_BEGIN":
+                        if (
+                            kind != "container"
+                            or pending.get(name) != (kind, "CREATED")
+                            or export_pending
+                        ):
+                            raise P4RecoveryRequired("prior export start inconsistent")
+                        export_pending = True
+                        continue
+                    if state == "ARTIFACT_EXPORT_COMPLETE":
+                        if kind != "container" or not export_pending or export_finished:
+                            raise P4RecoveryRequired("prior export completion inconsistent")
+                        export_finished = True
+                        continue
                     if state == "RESERVED":
                         if name in pending:
                             raise P4RecoveryRequired("duplicate owned ledger resource")
@@ -484,6 +603,8 @@ class OwnedDockerAttempt:
                         pending[name] = (kind, "ABSENT")
                     else:
                         raise P4RecoveryRequired("inconsistent prior owned ledger transition")
+                if export_pending and not export_finished:
+                    raise P4RecoveryRequired("prior artifact export unresolved")
                 if any(
                     status not in {"ABSENT", "NEVER_SUBMITTED"} for _, status in pending.values()
                 ):
@@ -808,6 +929,7 @@ class OwnedDockerAttempt:
                 or log.get("Config") != {"max-size": "1m", "max-file": "2"}
             ):
                 raise P4AdapterError("effective Docker containment/identity mismatch")
+            item.prestart_attested = True
             return {
                 "status": "PRESTART_CONFIG_ATTESTED_SOURCE_ONLY",
                 "container_id": item.object_id,
@@ -815,6 +937,110 @@ class OwnedDockerAttempt:
         except Exception as exc:
             self.recovery_required = True
             raise P4RecoveryRequired("pre-start container attestation UNKNOWN") from exc
+
+    def export_paused_fixed_artifacts(
+        self, item: OwnedItem, authority_raw: bytes, *, role: str, destination: Path
+    ) -> dict[str, int | str]:
+        """Source-only physical export: read from exactly one verified *paused* fixture.
+
+        This method never starts, resumes or pauses a container. Separate
+        runner-controlled start/fencing and proof are required before use.
+        """
+        if (
+            not self._entered
+            or not any(owned is item for owned in self.items)
+            or item.kind != "container"
+            or item.state != "CREATED"
+            or not item.prestart_attested
+            or not isinstance(item.object_id, str)
+            or re.fullmatch(r"[a-f0-9]{64}", item.object_id) is None
+        ):
+            raise P4AdapterError("verified prestart-attested owned container required")
+        if self.attempt_deadline is None:
+            raise P4AdapterError("trusted attempt deadline missing")
+        self.attempt_deadline.remaining()
+        try:
+            authority = json.loads(authority_raw)
+            image = authority["runtime"]["images"][role]
+            approved_fixture_image(authority_raw, role=role, image=image)
+            inspected = self._checked_call(
+                ["docker", "container", "inspect", "--format", "{{json .}}", item.object_id]
+            )
+            if inspected.exit_code != 0:
+                raise P4AdapterError("paused fixture Docker inspection failed")
+            json_policy = bounds._mapping(self.policy.get("json_intake"), "json_intake")
+            parsed = bounds._load_object_bytes(
+                inspected.stdout,
+                max_bytes=bounds._positive_int(json_policy.get("max_bytes"), "json.max_bytes"),
+                label="paused Docker export inspection",
+                shape=json_policy,
+            )
+            bounds._validate_json_shape(parsed, json_policy)
+            state = parsed.get("State")
+            config = parsed.get("Config")
+            host = parsed.get("HostConfig")
+            artifact_limit = bounds._limits(self.policy, "artifacts")["total_bytes"]
+            if (
+                not isinstance(state, dict)
+                or not isinstance(config, dict)
+                or not isinstance(host, dict)
+                or parsed.get("Id") != item.object_id
+                or parsed.get("Name") != "/" + item.name
+                or config.get("Image") != image
+                or not isinstance(config.get("Labels"), dict)
+                or config["Labels"].get("mcpbg.p4.owner") != self.attempt_id
+                or state.get("Running") is not True
+                or state.get("Paused") is not True
+                or type(state.get("Pid")) is not int
+                or state["Pid"] <= 0
+                or host.get("NetworkMode") != "none"
+                or host.get("Privileged") is not False
+                or host.get("ReadonlyRootfs") is not True
+                or host.get("Memory")
+                != bounds._limits(self.policy, "docker_runtime")["memory_bytes"]
+                or host.get("MemorySwap")
+                != bounds._limits(self.policy, "docker_runtime")["memory_bytes"]
+                or host.get("PidsLimit")
+                != bounds._limits(self.policy, "docker_runtime")["pids_limit"]
+                or host.get("NanoCpus")
+                != bounds._limits(self.policy, "docker_runtime")["nano_cpus"]
+                or not isinstance(host.get("CapDrop"), list)
+                or "ALL" not in host["CapDrop"]
+                or host.get("CapAdd") not in (None, [])
+                or not isinstance(host.get("SecurityOpt"), list)
+                or "no-new-privileges:true" not in host["SecurityOpt"]
+                or not isinstance(host.get("Tmpfs"), dict)
+                or host["Tmpfs"].get("/trusted-output") != f"rw,noexec,nosuid,size={artifact_limit}"
+                or parsed.get("Mounts") not in (None, [])
+            ):
+                raise P4AdapterError("paused fixture identity or writer fence mismatch")
+            archive = bounds._mapping(self.policy.get("archive_extraction"), "archive_extraction")
+            max_bytes = bounds._positive_int(
+                archive.get("compressed_bytes"), "archive.compressed_bytes"
+            )
+            deadline = min(time.monotonic() + 30.0, self.attempt_deadline.deadline)
+            self._record("ARTIFACT_EXPORT_BEGIN", item)
+            stream = _bounded_archive_process(
+                ["docker", "cp", f"{item.object_id}:/trusted-output/.", "-"],
+                deadline=deadline,
+                byte_limit=max_bytes,
+            )
+            try:
+                result = receive_bounded_artifact_archive(
+                    stream,
+                    destination,
+                    self.policy,
+                    deadline=deadline,
+                )
+            finally:
+                stream.close()  # terminate CLI immediately on rejected archive
+            self._record("ARTIFACT_EXPORT_COMPLETE", item)
+            return result
+        except Exception as exc:
+            self.recovery_required = True
+            raise P4RecoveryRequired(
+                "physical artifact export UNKNOWN; retain all evidence"
+            ) from exc
 
     # BuildKit execution is deferred until its image is pinned by digest and its
     # extra daemon container, cache volume, loaded image and cleanup are owned.
