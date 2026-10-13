@@ -575,3 +575,122 @@ def test_unaccounted_subprocess_result_fails_closed(tmp_path: Path) -> None:
             attempt._checked_call(["docker", "version"])
     assert len(calls) == 1
     assert attempt.cleanup_result() == {"outcome": "UNKNOWN", "recovery_required": True}
+
+
+def test_forwarding_accounts_before_side_effect_and_aborts_on_writer_error() -> None:
+    module = _module()
+    policy, _ = _inputs(module)
+    budget = module.bounds.TrafficBudget.from_policy(policy)
+    relay = module.StreamMeter(budget)
+    sent = []
+    relay.begin()
+
+    def sink(chunk: bytes) -> int:
+        sent.append(chunk)
+        return len(chunk)
+
+    relay.forward(b"ok", response=False, sink=sink)
+    policy_limit = budget.request_bytes
+    with pytest.raises(module.P4AdapterError, match="budget"):
+        relay.forward(b"x" * policy_limit, response=False, sink=sink)
+    assert sent == [b"ok"]  # Over-budget chunk never reached the side effect.
+    assert relay.aborted and budget.breached
+    with pytest.raises(module.P4AdapterError):
+        relay.finish()
+
+
+def test_forwarding_partial_writer_and_exception_fail_closed() -> None:
+    module = _module()
+    policy, _ = _inputs(module)
+    for writer in (lambda raw: len(raw) - 1, lambda raw: True):
+        relay = module.StreamMeter(module.bounds.TrafficBudget.from_policy(policy))
+        relay.begin()
+        with pytest.raises(module.P4AdapterError, match="incomplete"):
+            relay.forward(b"data", response=True, sink=writer)
+        assert relay.aborted and relay.budget.breached
+    relay = module.StreamMeter(module.bounds.TrafficBudget.from_policy(policy))
+    relay.begin()
+
+    def failing(_raw: bytes) -> int:
+        raise OSError("downstream disconnected")
+
+    with pytest.raises(OSError, match="disconnected"):
+        relay.forward(b"data", response=False, sink=failing)
+    assert relay.aborted and relay.budget.breached
+
+
+def test_streamed_archive_atomic_publish_and_digest(tmp_path: Path) -> None:
+    import hashlib
+    import io
+    import tarfile
+
+    module = _module()
+    policy, _ = _inputs(module)
+    parent = tmp_path / "private"
+    parent.mkdir(mode=0o700)
+    payload = b"synthetic artifact"
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as tar:
+        info = tarfile.TarInfo("report.txt")
+        info.size = len(payload)
+        tar.addfile(info, io.BytesIO(payload))
+    raw = buffer.getvalue()
+    policy["archive_extraction"]["compressed_bytes"] = len(raw) + 128
+
+    def pieces():
+        for start in range(0, len(raw), 257):
+            yield raw[start : start + 257]
+
+    destination = parent / "results"
+    result = module.receive_bounded_artifact_archive(
+        pieces(), destination, policy, deadline=module.time.monotonic() + 20
+    )
+    assert result == {
+        "files": 1,
+        "bytes": len(payload),
+        "archive_bytes": len(raw),
+        "archive_sha256": hashlib.sha256(raw).hexdigest(),
+    }
+    assert (destination / "report.txt").read_bytes() == payload
+    with pytest.raises(module.P4AdapterError, match="exists"):
+        module.receive_bounded_artifact_archive(
+            pieces(), destination, policy, deadline=module.time.monotonic() + 20
+        )
+
+
+def test_streamed_archive_rejects_overflow_corruption_and_partial_exposure(tmp_path: Path) -> None:
+    module = _module()
+    policy, _ = _inputs(module)
+    parent = tmp_path / "private"
+    parent.mkdir(mode=0o700)
+    destination = parent / "results"
+    policy["archive_extraction"]["compressed_bytes"] = 1024
+    for chunks in ([b"z" * 1025], [b"z" * 200], [b"ok", "wrong type"]):
+        with pytest.raises(module.P4AdapterError):
+            module.receive_bounded_artifact_archive(
+                chunks, destination, policy, deadline=module.time.monotonic() + 20
+            )
+        assert not destination.exists()
+        assert list(parent.iterdir()) == []
+
+
+def test_streamed_archive_rejects_exhausted_deadline_and_unsafe_parent(tmp_path: Path) -> None:
+    module = _module()
+    policy, _ = _inputs(module)
+    parent = tmp_path / "private"
+    parent.mkdir(mode=0o700)
+    with pytest.raises(module.P4AdapterError, match="deadline"):
+        module.receive_bounded_artifact_archive(
+            [b"blob"], parent / "results", policy, deadline=module.time.monotonic() - 1
+        )
+    for invalid in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(module.P4AdapterError, match="deadline invalid"):
+            module.receive_bounded_artifact_archive(
+                [b"blob"], parent / "results", policy, deadline=invalid
+            )
+    parent.chmod(0o755)
+    with pytest.raises(module.P4AdapterError, match="private"):
+        module.receive_bounded_artifact_archive(
+            [b"blob"], parent / "results", policy, deadline=module.time.monotonic() + 20
+        )
+    assert list(parent.iterdir()) == []

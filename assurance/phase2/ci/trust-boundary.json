@@ -289,7 +289,7 @@
     "status": "SOURCE_WIRED_NOT_RUNTIME_PROVEN",
     "stage": "TRUSTED_NON_HOSTILE_FIXTURE_ADAPTER",
     "module_path": "assurance/phase2/ci/p4_trusted_runtime_adapter.py",
-    "module_sha256": "4c3eab3a5fdaf6e025b6bd587020ff60851ff39af683eea2e2f27af484925095",
+    "module_sha256": "1265ff632ea04558c1c1b83a4b351b3b95477f57e4b6b003a304f32a66e996c8",
     "candidate_execution_enabled": false,
     "hostile_execution_authorized": false,
     "runtime_enforcement_proven": false,

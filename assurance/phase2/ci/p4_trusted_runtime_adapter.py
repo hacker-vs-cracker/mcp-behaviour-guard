@@ -10,14 +10,16 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
 import selectors
 import signal
 import subprocess
+import tempfile
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -223,6 +225,97 @@ class StreamMeter:
         self.aborted = True
         self.budget.breached = True
         self.inflight = False
+
+    def forward(self, chunk: bytes, *, response: bool, sink: Callable[[bytes], int]) -> None:
+        """Account the chunk *before* sending it to the trusted fixture transport.
+
+        This is a source-only transport seam, not an installed proxy. If the
+        output writer fails or writes partially, the stream becomes unusable;
+        already forwarded earlier chunks cannot be rolled back.
+        """
+        try:
+            self.account(chunk, response=response)
+            written = sink(chunk)
+            if type(written) is not int or written != len(chunk):
+                raise P4AdapterError("fixture transport incomplete write")
+        except BaseException:
+            self.abort()
+            raise
+
+
+def receive_bounded_artifact_archive(
+    chunks: Iterable[bytes],
+    destination: Path,
+    policy: dict[str, Any],
+    *,
+    deadline: float,
+) -> dict[str, int | str]:
+    """Bound a streamed archive and atomically validate it before publication.
+
+    `chunks` must come from an independently deadline-fenced transport which
+    terminates owned processes if blocked on the next chunk. This function
+    cannot itself interrupt a blocking iterator or prove the bytes came from
+    Docker. It must not be used as P4 runtime proof without that binding.
+
+    The parent is required to be a private, user-owned directory. Never
+    expose partial output; never overwrite a previously published result.
+    """
+    if not isinstance(destination, Path) or destination.name in ("", ".", ".."):
+        raise P4AdapterError("artifact destination must be a new named path")
+    parent = destination.parent
+    if parent.is_symlink() or not parent.is_dir():
+        raise P4AdapterError("artifact destination parent is not a real directory")
+    state = parent.stat()
+    if state.st_uid != os.getuid() or state.st_mode & 0o077:
+        raise P4AdapterError("artifact destination parent must be owned and private")
+    if destination.exists() or destination.is_symlink():
+        raise P4AdapterError("artifact destination already exists")
+    if type(deadline) is not float or not math.isfinite(deadline):
+        raise P4AdapterError("artifact deadline invalid")
+    archive = bounds._mapping(policy.get("archive_extraction"), "archive_extraction")
+    ceiling = bounds._positive_int(archive.get("compressed_bytes"), "archive.compressed_bytes")
+    if time.monotonic() >= deadline:
+        raise P4AdapterError("artifact intake deadline exceeded")
+    total = 0
+    count = 0
+    digest = hashlib.sha256()
+    try:
+        with tempfile.TemporaryDirectory(prefix=".p4_artifact_", dir=parent) as temp:
+            owned = Path(temp)
+            spool = owned / "archive.bin"
+            with spool.open("xb") as sink:
+                for chunk in chunks:
+                    if time.monotonic() >= deadline:
+                        raise P4AdapterError("artifact intake deadline exceeded")
+                    if type(chunk) is not bytes or not chunk or len(chunk) > 65_536:
+                        raise P4AdapterError("artifact intake chunk invalid")
+                    count += 1
+                    if count > 65_536 or total + len(chunk) > ceiling:
+                        raise P4AdapterError("artifact intake byte/chunk budget exceeded")
+                    sink.write(chunk)
+                    total += len(chunk)
+                    digest.update(chunk)
+                sink.flush()
+                os.fsync(sink.fileno())
+            if total == 0 or time.monotonic() >= deadline:
+                raise P4AdapterError("artifact intake incomplete or expired")
+            staged = owned / "unpacked"
+            result = bounds.safe_extract_archive(spool, staged, policy)
+            if time.monotonic() >= deadline:
+                raise P4AdapterError("artifact intake deadline exceeded")
+            if destination.exists() or destination.is_symlink():
+                raise P4AdapterError("artifact destination appeared during validation")
+            # Publication is limited to a private parent controlled by this
+            # attempt. The caller must also hold its shared writer lease.
+            staged.rename(destination)
+            return {
+                "files": result["files"],
+                "bytes": result["bytes"],
+                "archive_bytes": total,
+                "archive_sha256": digest.hexdigest(),
+            }
+    except (OSError, bounds.P4ResourceEnforcementError) as exc:
+        raise P4AdapterError("artifact archive intake invalid") from exc
 
 
 @dataclass
