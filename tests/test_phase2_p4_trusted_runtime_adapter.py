@@ -939,3 +939,126 @@ def test_v9_unfinished_artifact_export_blocks_next_attempt(tmp_path: Path) -> No
     ):
         pass
     assert not (tmp_path / "owned-second.jsonl").exists()
+
+
+def test_v10_unsupported_tmpfs_docker_cp_is_fail_closed(tmp_path: Path) -> None:
+    module = _module()
+    policy, authority = _inputs(module)
+    sys.modules["p4_trusted_runtime_adapter"] = module
+    fake = FakeDocker()
+    image = json.loads(authority)["runtime"]["images"]["fixture"]
+    with (
+        pytest.raises(module.P4RecoveryRequired, match="owned cleanup is UNKNOWN"),
+        module.OwnedDockerAttempt(
+            policy, "legacy", tmp_path / "global.lock", tmp_path / "owned-legacy.jsonl", run=fake
+        ) as attempt,
+    ):
+        item = attempt.create_fixed_container(image, authority, role="fixture")
+        item.prestart_attested = True
+        with pytest.raises(module.P4RecoveryRequired, match="unsupported"):
+            attempt.export_paused_fixed_artifacts(
+                item, authority, role="fixture", destination=tmp_path / "published"
+            )
+    assert not any(command[:2] == ["docker", "cp"] for command in fake.commands)
+    assert not (tmp_path / "published").exists()
+
+
+@pytest.mark.parametrize("bad", ["driver", "options", "name", "owner", "malformed"])
+def test_v10_artifact_volume_inspection_rejects_drift(tmp_path: Path, bad: str) -> None:
+    module = _module()
+    policy, _ = _inputs(module)
+    sys.modules["p4_trusted_runtime_adapter"] = module
+    from p4_trusted_runtime_adapter import CommandResult
+
+    class VolumeFake(FakeDocker):
+        def __call__(self, argv, *, timeout, output_budget, retained_per_stream):
+            args = list(argv)
+            if args[:3] == ["docker", "volume", "inspect"] and "{{json .}}" in args:
+                self.commands.append(args)
+                name = args[-1]
+                options = (
+                    f"size={policy['limits']['artifacts']['total_bytes']},uid=10001,"
+                    "gid=10001,mode=0770,noexec,nosuid,nodev"
+                )
+                doc = {
+                    "Name": name,
+                    "Driver": "local",
+                    "Options": {"type": "tmpfs", "device": "tmpfs", "o": options},
+                    "Labels": {"mcpbg.p4.owner": "volume"},
+                }
+                if bad == "driver":
+                    doc["Driver"] = "remote"
+                if bad == "options":
+                    doc["Options"]["o"] = "size=999999999"
+                if bad == "name":
+                    doc["Name"] = "other"
+                if bad == "owner":
+                    doc["Labels"]["mcpbg.p4.owner"] = "other"
+                if bad == "malformed":
+                    return CommandResult(0, b"not-json", b"", 8)
+                raw = json.dumps(doc).encode()
+                return CommandResult(0, raw, b"", len(raw))
+            return super().__call__(
+                argv,
+                timeout=timeout,
+                output_budget=output_budget,
+                retained_per_stream=retained_per_stream,
+            )
+
+    fake = VolumeFake()
+    with (
+        pytest.raises(module.P4RecoveryRequired, match="owned cleanup is UNKNOWN"),
+        module.OwnedDockerAttempt(
+            policy, "volume", tmp_path / "global.lock", tmp_path / "owned-volume.jsonl", run=fake
+        ) as attempt,
+        pytest.raises(module.P4RecoveryRequired, match="volume verification UNKNOWN"),
+    ):
+        attempt.create_bounded_artifact_volume()
+    assert attempt.recovery_required
+    assert attempt.cleanup_result()["outcome"] == "UNKNOWN"
+
+
+def test_v10_owned_volume_options_and_no_unbounded_storage(tmp_path: Path) -> None:
+    module = _module()
+    policy, _ = _inputs(module)
+    sys.modules["p4_trusted_runtime_adapter"] = module
+    from p4_trusted_runtime_adapter import CommandResult
+
+    class GoodVolumeFake(FakeDocker):
+        def __call__(self, argv, *, timeout, output_budget, retained_per_stream):
+            args = list(argv)
+            if args[:3] == ["docker", "volume", "inspect"] and "{{json .}}" in args:
+                self.commands.append(args)
+                name = args[-1]
+                options = (
+                    f"size={policy['limits']['artifacts']['total_bytes']},uid=10001,"
+                    "gid=10001,mode=0770,noexec,nosuid,nodev"
+                )
+                data = json.dumps(
+                    {
+                        "Name": name,
+                        "Driver": "local",
+                        "Options": {"type": "tmpfs", "device": "tmpfs", "o": options},
+                        "Labels": {"mcpbg.p4.owner": "volume"},
+                    }
+                ).encode()
+                return CommandResult(0, data, b"", len(data))
+            return super().__call__(
+                argv,
+                timeout=timeout,
+                output_budget=output_budget,
+                retained_per_stream=retained_per_stream,
+            )
+
+    fake = GoodVolumeFake()
+    with module.OwnedDockerAttempt(
+        policy, "volume", tmp_path / "global.lock", tmp_path / "owned-volume.jsonl", run=fake
+    ) as attempt:
+        resource = attempt.create_bounded_artifact_volume()
+        assert resource.artifact_tmpfs_attested is True
+        created = next(c for c in fake.commands if c[:3] == ["docker", "volume", "create"])
+        assert "--driver" in created and "local" in created
+        assert "--opt" in created and "type=tmpfs" in created and "device=tmpfs" in created
+        assert any(x.startswith("o=size=16777216,") for x in created)
+    assert attempt.cleanup_result()["outcome"] == "CLEAN"
+    assert not fake.names

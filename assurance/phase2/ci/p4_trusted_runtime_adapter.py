@@ -427,6 +427,7 @@ class OwnedItem:
     state: str = "INTENT"
     object_id: str | None = None
     prestart_attested: bool = False
+    artifact_tmpfs_attested: bool = False
 
 
 @dataclass
@@ -803,6 +804,73 @@ class OwnedDockerAttempt:
         self._record("CREATE_CONFIRMED", item)
         return item
 
+    def create_bounded_artifact_volume(self) -> OwnedItem:
+        """Request one attempt-owned Linux local-driver tmpfs volume, source-only.
+
+        A volume is not trusted merely because `docker volume create` returned a
+        name. Inspect its *effective* driver, options, owner and exact name before
+        passing it to a future candidate or read-only exporter. No global prune.
+        The physical mounted filesystem and writer fence need separate proof.
+        """
+        item = self._reserve("volume")
+        item.state = "REQUESTED"
+        self._record("CREATE_REQUESTED", item)
+        artifact_bytes = bounds._positive_int(
+            bounds._limits(self.policy, "artifacts").get("total_bytes"),
+            "artifacts.total_bytes",
+        )
+        options = f"size={artifact_bytes},uid=10001,gid=10001,mode=0770,noexec,nosuid,nodev"
+        command = [
+            "docker",
+            "volume",
+            "create",
+            "--driver",
+            "local",
+            "--opt",
+            "type=tmpfs",
+            "--opt",
+            "device=tmpfs",
+            "--opt",
+            f"o={options}",
+            "--label",
+            "mcpbg.p4.owner=" + self.attempt_id,
+            item.name,
+        ]
+        result = self._checked_call(command)
+        if result.exit_code != 0 or result.stdout.strip() != item.name.encode("ascii"):
+            self.recovery_required = True
+            raise P4RecoveryRequired("artifact volume creation UNKNOWN")
+        item.object_id = item.name
+        item.state = "CREATED"
+        self._record("CREATE_CONFIRMED", item)
+        try:
+            inspection = self._checked_call(
+                ["docker", "volume", "inspect", "--format", "{{json .}}", item.name]
+            )
+            if inspection.exit_code != 0:
+                raise P4AdapterError("artifact volume inspect failed")
+            json_rules = bounds._mapping(self.policy.get("json_intake"), "json_intake")
+            decoded = bounds._load_object_bytes(
+                inspection.stdout,
+                max_bytes=bounds._positive_int(json_rules.get("max_bytes"), "json.max_bytes"),
+                label="artifact volume inspection",
+                shape=json_rules,
+            )
+            bounds._validate_json_shape(decoded, json_rules)
+            if (
+                decoded.get("Name") != item.name
+                or decoded.get("Driver") != "local"
+                or decoded.get("Options") != {"type": "tmpfs", "device": "tmpfs", "o": options}
+                or not isinstance(decoded.get("Labels"), dict)
+                or decoded["Labels"].get("mcpbg.p4.owner") != self.attempt_id
+            ):
+                raise P4AdapterError("effective artifact volume identity/options mismatch")
+            item.artifact_tmpfs_attested = True
+            return item
+        except Exception as exc:
+            self.recovery_required = True
+            raise P4RecoveryRequired("artifact volume verification UNKNOWN") from exc
+
     def create_fixed_container(self, image: str, authority_raw: bytes, *, role: str) -> OwnedItem:
         approved_fixture_image(authority_raw, role=role, image=image)
         item = self._reserve("container")
@@ -941,10 +1009,11 @@ class OwnedDockerAttempt:
     def export_paused_fixed_artifacts(
         self, item: OwnedItem, authority_raw: bytes, *, role: str, destination: Path
     ) -> dict[str, int | str]:
-        """Source-only physical export: read from exactly one verified *paused* fixture.
+        """Disabled: docker cp cannot export a Docker tmpfs or named mount.
 
-        This method never starts, resumes or pauses a container. Separate
-        runner-controlled start/fencing and proof are required before use.
+        A future volume-backed exporter must independently prove its own
+        immutable identity, writer fence and daemon-side cleanup. This source
+        branch does not authorize execution, publishing or proof.
         """
         if (
             not self._entered
@@ -953,94 +1022,12 @@ class OwnedDockerAttempt:
             or item.state != "CREATED"
             or not item.prestart_attested
             or not isinstance(item.object_id, str)
-            or re.fullmatch(r"[a-f0-9]{64}", item.object_id) is None
         ):
             raise P4AdapterError("verified prestart-attested owned container required")
-        if self.attempt_deadline is None:
-            raise P4AdapterError("trusted attempt deadline missing")
-        self.attempt_deadline.remaining()
-        try:
-            authority = json.loads(authority_raw)
-            image = authority["runtime"]["images"][role]
-            approved_fixture_image(authority_raw, role=role, image=image)
-            inspected = self._checked_call(
-                ["docker", "container", "inspect", "--format", "{{json .}}", item.object_id]
-            )
-            if inspected.exit_code != 0:
-                raise P4AdapterError("paused fixture Docker inspection failed")
-            json_policy = bounds._mapping(self.policy.get("json_intake"), "json_intake")
-            parsed = bounds._load_object_bytes(
-                inspected.stdout,
-                max_bytes=bounds._positive_int(json_policy.get("max_bytes"), "json.max_bytes"),
-                label="paused Docker export inspection",
-                shape=json_policy,
-            )
-            bounds._validate_json_shape(parsed, json_policy)
-            state = parsed.get("State")
-            config = parsed.get("Config")
-            host = parsed.get("HostConfig")
-            artifact_limit = bounds._limits(self.policy, "artifacts")["total_bytes"]
-            if (
-                not isinstance(state, dict)
-                or not isinstance(config, dict)
-                or not isinstance(host, dict)
-                or parsed.get("Id") != item.object_id
-                or parsed.get("Name") != "/" + item.name
-                or config.get("Image") != image
-                or not isinstance(config.get("Labels"), dict)
-                or config["Labels"].get("mcpbg.p4.owner") != self.attempt_id
-                or state.get("Running") is not True
-                or state.get("Paused") is not True
-                or type(state.get("Pid")) is not int
-                or state["Pid"] <= 0
-                or host.get("NetworkMode") != "none"
-                or host.get("Privileged") is not False
-                or host.get("ReadonlyRootfs") is not True
-                or host.get("Memory")
-                != bounds._limits(self.policy, "docker_runtime")["memory_bytes"]
-                or host.get("MemorySwap")
-                != bounds._limits(self.policy, "docker_runtime")["memory_bytes"]
-                or host.get("PidsLimit")
-                != bounds._limits(self.policy, "docker_runtime")["pids_limit"]
-                or host.get("NanoCpus")
-                != bounds._limits(self.policy, "docker_runtime")["nano_cpus"]
-                or not isinstance(host.get("CapDrop"), list)
-                or "ALL" not in host["CapDrop"]
-                or host.get("CapAdd") not in (None, [])
-                or not isinstance(host.get("SecurityOpt"), list)
-                or "no-new-privileges:true" not in host["SecurityOpt"]
-                or not isinstance(host.get("Tmpfs"), dict)
-                or host["Tmpfs"].get("/trusted-output") != f"rw,noexec,nosuid,size={artifact_limit}"
-                or parsed.get("Mounts") not in (None, [])
-            ):
-                raise P4AdapterError("paused fixture identity or writer fence mismatch")
-            archive = bounds._mapping(self.policy.get("archive_extraction"), "archive_extraction")
-            max_bytes = bounds._positive_int(
-                archive.get("compressed_bytes"), "archive.compressed_bytes"
-            )
-            deadline = min(time.monotonic() + 30.0, self.attempt_deadline.deadline)
-            self._record("ARTIFACT_EXPORT_BEGIN", item)
-            stream = _bounded_archive_process(
-                ["docker", "cp", f"{item.object_id}:/trusted-output/.", "-"],
-                deadline=deadline,
-                byte_limit=max_bytes,
-            )
-            try:
-                result = receive_bounded_artifact_archive(
-                    stream,
-                    destination,
-                    self.policy,
-                    deadline=deadline,
-                )
-            finally:
-                stream.close()  # terminate CLI immediately on rejected archive
-            self._record("ARTIFACT_EXPORT_COMPLETE", item)
-            return result
-        except Exception as exc:
-            self.recovery_required = True
-            raise P4RecoveryRequired(
-                "physical artifact export UNKNOWN; retain all evidence"
-            ) from exc
+        self.recovery_required = True
+        raise P4RecoveryRequired(
+            "physical artifact export UNKNOWN; unsupported Docker cp from mounted filesystem"
+        )
 
     # BuildKit execution is deferred until its image is pinned by digest and its
     # extra daemon container, cache volume, loaded image and cleanup are owned.
