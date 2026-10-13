@@ -41,6 +41,7 @@ class FakeDocker:
         self.commands: list[list[str]] = []
         self.names: set[str] = set()
         self.owners: dict[str, str] = {}
+        self.ids: dict[str, str] = {}
         self.fail_create = fail_create
         self.foreign_owner = foreign_owner
 
@@ -56,6 +57,7 @@ class FakeDocker:
             name = args[args.index("--name") + 1]
             self.names.add(name)
             self.owners[name] = args[args.index("--label") + 1].split("=", 1)[1]
+            self.ids[name] = "a" * 64
             if self.fail_create:
                 raise OSError("ambiguous daemon response")
             return CommandResult(0, ("a" * 64).encode(), b"", 64)
@@ -63,7 +65,9 @@ class FakeDocker:
             name = args[-1]
             self.names.add(name)
             self.owners[name] = args[args.index("--label") + 1].split("=", 1)[1]
-            return CommandResult(0, name.encode(), b"", len(name))
+            identity = ("b" * 64) if args[1] == "network" else name
+            self.ids[name] = identity
+            return CommandResult(0, identity.encode(), b"", len(identity))
         if args[1:3] == ["buildx", "create"]:
             name = args[args.index("--name") + 1]
             self.names.add(name)
@@ -81,11 +85,15 @@ class FakeDocker:
                         55,
                     )
                 owner = self.owners[name]
-                return CommandResult(0, owner.encode(), b"", len(owner))
+                result = f"{self.ids[name]}|{owner}".encode()
+                return CommandResult(0, result, b"", len(result))
             return CommandResult(1, b"", b"Error: No such object", 21)
         if args[1] in {"rm", "buildx", "network", "volume"}:
-            name = args[-1]
-            self.names.discard(name)
+            identity = args[-1]
+            matches = [name for name in self.names if identity in {name, self.ids.get(name)}]
+            for name in matches:
+                self.names.discard(name)
+                self.ids.pop(name, None)
             return CommandResult(0, b"", b"", 0)
         raise AssertionError(f"unexpected Docker command: {args}")
 
@@ -434,3 +442,51 @@ def test_prior_ledger_kind_cannot_change_between_events(tmp_path: Path) -> None:
         pass
     assert fake.commands == []
     assert not (tmp_path / "owned-second.jsonl").exists()
+
+
+def test_cleanup_rejects_swapped_container_with_same_owner(tmp_path: Path) -> None:
+    module = _module()
+    policy, authority = _inputs(module)
+    sys.modules["p4_trusted_runtime_adapter"] = module
+    fake = FakeDocker()
+    image = json.loads(authority)["runtime"]["images"]["fixture"]
+    with (
+        pytest.raises(module.P4RecoveryRequired),
+        module.OwnedDockerAttempt(
+            policy, "swapped", tmp_path / "shared.lock", tmp_path / "owned-swapped.jsonl", run=fake
+        ) as attempt,
+    ):
+        item = attempt.create_fixed_container(image, authority, role="fixture")
+        fake.ids[item.name] = "c" * 64  # same resource name and owner, different object
+    assert attempt.cleanup_result() == {"outcome": "UNKNOWN", "recovery_required": True}
+    assert not any(c[:3] == ["docker", "rm", "-f"] for c in fake.commands)
+    assert fake.names
+
+
+def test_cleanup_uses_original_id_not_mutable_name(tmp_path: Path) -> None:
+    module = _module()
+    policy, authority = _inputs(module)
+    sys.modules["p4_trusted_runtime_adapter"] = module
+    fake = FakeDocker()
+    image = json.loads(authority)["runtime"]["images"]["fixture"]
+    with module.OwnedDockerAttempt(
+        policy, "stable", tmp_path / "shared.lock", tmp_path / "owned-stable.jsonl", run=fake
+    ) as attempt:
+        item = attempt.create_fixed_container(image, authority, role="fixture")
+        identity = item.object_id
+    assert ["docker", "rm", "-f", identity] in fake.commands
+    assert not fake.names
+
+
+def test_cleanup_network_id_identity_verification(tmp_path: Path) -> None:
+    module = _module()
+    policy, _ = _inputs(module)
+    sys.modules["p4_trusted_runtime_adapter"] = module
+    fake = FakeDocker()
+    with module.OwnedDockerAttempt(
+        policy, "network", tmp_path / "shared.lock", tmp_path / "owned-network.jsonl", run=fake
+    ) as attempt:
+        item = attempt.create_network()
+        assert item.object_id == "b" * 64
+    assert ["docker", "network", "rm", "b" * 64] in fake.commands
+    assert not fake.names

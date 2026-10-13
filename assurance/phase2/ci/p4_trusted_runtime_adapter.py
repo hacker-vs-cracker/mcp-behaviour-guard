@@ -530,7 +530,11 @@ class OwnedDockerAttempt:
         if res.exit_code != 0:
             self.recovery_required = True
             raise P4RecoveryRequired("network creation requires owned inventory reconciliation")
-        item.object_id = res.stdout.decode("ascii", errors="ignore").strip()
+        identity = res.stdout.decode("ascii", errors="ignore").strip()
+        if re.fullmatch(r"[a-f0-9]{64}", identity) is None:
+            self.recovery_required = True
+            raise P4RecoveryRequired("network identity could not be verified")
+        item.object_id = identity
         item.state = "CREATED"
         self._record("CREATE_CONFIRMED", item)
         return item
@@ -600,47 +604,43 @@ class OwnedDockerAttempt:
     # Do not fall back to Docker's shared default builder or a global prune.
 
     def _owned_before_delete(self, item: OwnedItem) -> bool | None:
-        """Return True for exact owner, False for proven absence, None for UNKNOWN."""
+        """Verify exact owner and immutable object ID, not an attacker-reused name.
+
+        A CREATE_REQUESTED record with no confirmed ID cannot authorize removal.
+        Only an independently verified absence can close that unknown operation.
+        """
         if item.kind == "container":
-            argv = [
-                "docker",
-                "container",
-                "inspect",
-                "--format",
-                '{{index .Config.Labels "mcpbg.p4.owner"}}',
-                item.name,
-            ]
-        elif item.kind == "network":
-            argv = [
-                "docker",
-                "network",
-                "inspect",
-                "--format",
-                '{{index .Labels "mcpbg.p4.owner"}}',
-                item.name,
-            ]
-        elif item.kind == "volume":
-            argv = [
-                "docker",
-                "volume",
-                "inspect",
-                "--format",
-                '{{index .Labels "mcpbg.p4.owner"}}',
-                item.name,
-            ]
+            field = '{{.Id}}|{{index .Config.Labels "mcpbg.p4.owner"}}'
+            argv = ["docker", "container", "inspect", "--format", field, item.name]
+        elif item.kind in {"network", "volume"}:
+            identity = ".Id" if item.kind == "network" else ".Name"
+            field = "{{" + identity + '}}|{{index .Labels "mcpbg.p4.owner"}}'
+            argv = ["docker", item.kind, "inspect", "--format", field, item.name]
         else:
             raise P4AdapterError("unsupported resource type")
         result = self._checked_call(argv, cleanup=True)
         if result.exit_code == 1 and any(
             token in result.stderr.lower()
-            for token in (b"no such object", b"no such network", b"no such volume", b"no builder")
+            for token in (b"no such object", b"no such network", b"no such volume")
         ):
             return False
-        if result.exit_code != 0:
+        if result.exit_code != 0 or len(result.stdout) > 256:
             return None
-        if result.stdout.strip() == self.attempt_id.encode("ascii"):
-            return True
-        return None
+        try:
+            parsed = result.stdout.decode("ascii").strip().split("|")
+        except UnicodeDecodeError:
+            return None
+        if len(parsed) != 2 or parsed[1] != self.attempt_id:
+            return None
+        expected = item.object_id
+        if not isinstance(expected, str) or not expected or parsed[0] != expected:
+            return None
+        if item.kind in {"container", "network"}:
+            if re.fullmatch(r"[a-f0-9]{64}", parsed[0]) is None:
+                return None
+        elif parsed[0] != item.name:
+            return None
+        return True
 
     def cleanup(self) -> bool:
         """Remove only exact owned objects, verify absence and never infer clean from errors."""
@@ -653,9 +653,9 @@ class OwnedDockerAttempt:
                 self._record("NOT_SUBMITTED", item)
                 continue
             if item.kind == "container":
-                delete = ["docker", "rm", "-f", item.name]
+                delete = ["docker", "rm", "-f", item.object_id or item.name]
             elif item.kind == "network":
-                delete = ["docker", "network", "rm", item.name]
+                delete = ["docker", "network", "rm", item.object_id or item.name]
             elif item.kind == "volume":
                 delete = ["docker", "volume", "rm", item.name]
             else:
