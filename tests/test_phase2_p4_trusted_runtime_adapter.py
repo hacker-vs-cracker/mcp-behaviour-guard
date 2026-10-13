@@ -165,11 +165,11 @@ def test_exact_fixed_container_options_and_absence(tmp_path: Path) -> None:
     fake = FakeDocker()
     # Module import is registered by helper for FakeDocker's result class.
     sys.modules["p4_trusted_runtime_adapter"] = module
-    image = json.loads(authority)["runtime"]["images"]["fixture"]
+    image = json.loads(authority)["runtime"]["images"]["evaluator"]
     with module.OwnedDockerAttempt(
         policy, "f12", tmp_path / "global.lock", tmp_path / "owned-f12.jsonl", run=fake
     ) as attempt:
-        container = attempt.create_fixed_container(image, authority, role="fixture")
+        container = attempt.create_fixed_container(image, authority, role="evaluator")
         assert container.object_id == "a" * 64
         assert container.state == "CREATED"
         assert attempt._reserve("network").state == "INTENT"
@@ -190,7 +190,7 @@ def test_partial_create_and_foreign_object_require_recovery(tmp_path: Path) -> N
     module = _module()
     policy, authority = _inputs(module)
     sys.modules["p4_trusted_runtime_adapter"] = module
-    image = json.loads(authority)["runtime"]["images"]["fixture"]
+    image = json.loads(authority)["runtime"]["images"]["evaluator"]
     fake = FakeDocker(fail_create=True)
     with (
         pytest.raises(module.P4RecoveryRequired),
@@ -199,7 +199,7 @@ def test_partial_create_and_foreign_object_require_recovery(tmp_path: Path) -> N
         ) as attempt,
         pytest.raises(module.P4AdapterError),
     ):
-        attempt.create_fixed_container(image, authority, role="fixture")
+        attempt.create_fixed_container(image, authority, role="evaluator")
     assert attempt.recovery_required is True
     assert attempt.cleanup_result()["outcome"] == "UNKNOWN"
     foreign = FakeDocker(foreign_owner=True)
@@ -295,7 +295,7 @@ def test_prior_unknown_blocks_before_any_new_owned_operation(tmp_path: Path) -> 
     sys.modules["p4_trusted_runtime_adapter"] = module
     fake = FakeDocker(fail_create=True)
     authority = AUTHORITY.read_bytes()
-    image = json.loads(authority)["runtime"]["images"]["fixture"]
+    image = json.loads(authority)["runtime"]["images"]["evaluator"]
     lock = tmp_path / "same-global.lock"
     with (
         pytest.raises(module.P4RecoveryRequired),
@@ -304,7 +304,7 @@ def test_prior_unknown_blocks_before_any_new_owned_operation(tmp_path: Path) -> 
         ) as attempt,
         pytest.raises(module.P4AdapterError),
     ):
-        attempt.create_fixed_container(image, authority, role="fixture")
+        attempt.create_fixed_container(image, authority, role="evaluator")
     before = len(fake.commands)
     with (
         pytest.raises(module.P4RecoveryRequired, match="prior attempt unresolved"),
@@ -449,14 +449,14 @@ def test_cleanup_rejects_swapped_container_with_same_owner(tmp_path: Path) -> No
     policy, authority = _inputs(module)
     sys.modules["p4_trusted_runtime_adapter"] = module
     fake = FakeDocker()
-    image = json.loads(authority)["runtime"]["images"]["fixture"]
+    image = json.loads(authority)["runtime"]["images"]["evaluator"]
     with (
         pytest.raises(module.P4RecoveryRequired),
         module.OwnedDockerAttempt(
             policy, "swapped", tmp_path / "shared.lock", tmp_path / "owned-swapped.jsonl", run=fake
         ) as attempt,
     ):
-        item = attempt.create_fixed_container(image, authority, role="fixture")
+        item = attempt.create_fixed_container(image, authority, role="evaluator")
         fake.ids[item.name] = "c" * 64  # same resource name and owner, different object
     assert attempt.cleanup_result() == {"outcome": "UNKNOWN", "recovery_required": True}
     assert not any(c[:3] == ["docker", "rm", "-f"] for c in fake.commands)
@@ -468,11 +468,11 @@ def test_cleanup_uses_original_id_not_mutable_name(tmp_path: Path) -> None:
     policy, authority = _inputs(module)
     sys.modules["p4_trusted_runtime_adapter"] = module
     fake = FakeDocker()
-    image = json.loads(authority)["runtime"]["images"]["fixture"]
+    image = json.loads(authority)["runtime"]["images"]["evaluator"]
     with module.OwnedDockerAttempt(
         policy, "stable", tmp_path / "shared.lock", tmp_path / "owned-stable.jsonl", run=fake
     ) as attempt:
-        item = attempt.create_fixed_container(image, authority, role="fixture")
+        item = attempt.create_fixed_container(image, authority, role="evaluator")
         identity = item.object_id
     assert ["docker", "rm", "-f", identity] in fake.commands
     assert not fake.names
@@ -780,7 +780,7 @@ class EffectiveConfigFake(FakeDocker):
 def test_prestart_daemon_configuration_is_fail_closed(tmp_path: Path, override: dict) -> None:
     module = _module()
     policy, authority = _inputs(module)
-    image = json.loads(authority)["runtime"]["images"]["fixture"]
+    image = json.loads(authority)["runtime"]["images"]["evaluator"]
     sys.modules["p4_trusted_runtime_adapter"] = module
     fake = EffectiveConfigFake(image, policy, **override)
     ledger = tmp_path / "owned-fixed.jsonl"
@@ -792,13 +792,13 @@ def test_prestart_daemon_configuration_is_fail_closed(tmp_path: Path, override: 
             policy, "fixed", tmp_path / "scope.lock", ledger, run=fake
         ) as attempt,
     ):
-        item = attempt.create_fixed_container(image, authority, role="fixture")
+        item = attempt.create_fixed_container(image, authority, role="evaluator")
         if override:
             with pytest.raises(module.P4RecoveryRequired, match="attestation UNKNOWN"):
-                attempt.attest_fixed_container(item, authority, role="fixture")
+                attempt.attest_fixed_container(item, authority, role="evaluator")
             assert attempt.recovery_required is True
         else:
-            value = attempt.attest_fixed_container(item, authority, role="fixture")
+            value = attempt.attest_fixed_container(item, authority, role="evaluator")
             assert value["status"] == "PRESTART_CONFIG_ATTESTED_SOURCE_ONLY"
             assert fake.attested_calls == 1
             assert "--memory-swap" in fake.commands[0]
@@ -880,18 +880,18 @@ def test_v9_paused_export_malformed_daemon_state_fail_closed(tmp_path: Path) -> 
     policy, authority = _inputs(module)
     sys.modules["p4_trusted_runtime_adapter"] = module
     fake = FakeDocker()
-    image = json.loads(authority)["runtime"]["images"]["fixture"]
+    image = json.loads(authority)["runtime"]["images"]["evaluator"]
     with (
         pytest.raises(module.P4RecoveryRequired, match="owned cleanup is UNKNOWN"),
         module.OwnedDockerAttempt(
             policy, "paused", tmp_path / "global.lock", tmp_path / "owned-paused.jsonl", run=fake
         ) as attempt,
     ):
-        item = attempt.create_fixed_container(image, authority, role="fixture")
+        item = attempt.create_fixed_container(image, authority, role="evaluator")
         item.prestart_attested = True  # synthetic pre-start boundary
         try:
             attempt.export_paused_fixed_artifacts(
-                item, authority, role="fixture", destination=tmp_path / "published"
+                item, authority, role="evaluator", destination=tmp_path / "published"
             )
         except module.P4RecoveryRequired as exc:
             assert "export UNKNOWN" in str(exc)
@@ -946,18 +946,18 @@ def test_v10_unsupported_tmpfs_docker_cp_is_fail_closed(tmp_path: Path) -> None:
     policy, authority = _inputs(module)
     sys.modules["p4_trusted_runtime_adapter"] = module
     fake = FakeDocker()
-    image = json.loads(authority)["runtime"]["images"]["fixture"]
+    image = json.loads(authority)["runtime"]["images"]["evaluator"]
     with (
         pytest.raises(module.P4RecoveryRequired, match="owned cleanup is UNKNOWN"),
         module.OwnedDockerAttempt(
             policy, "legacy", tmp_path / "global.lock", tmp_path / "owned-legacy.jsonl", run=fake
         ) as attempt,
     ):
-        item = attempt.create_fixed_container(image, authority, role="fixture")
+        item = attempt.create_fixed_container(image, authority, role="evaluator")
         item.prestart_attested = True
         with pytest.raises(module.P4RecoveryRequired, match="unsupported"):
             attempt.export_paused_fixed_artifacts(
-                item, authority, role="fixture", destination=tmp_path / "published"
+                item, authority, role="evaluator", destination=tmp_path / "published"
             )
     assert not any(command[:2] == ["docker", "cp"] for command in fake.commands)
     assert not (tmp_path / "published").exists()
@@ -1597,3 +1597,26 @@ def test_v14_generic_volume_create_must_echo_exact_reserved_name(tmp_path: Path)
         attempt.create_volume()
     assert attempt.recovery_required
     assert attempt.cleanup_result()["outcome"] == "UNKNOWN"
+
+
+def test_v15_legacy_fixture_create_rejects_implicit_anonymous_state_volume(
+    tmp_path: Path,
+) -> None:
+    module = _module()
+    sys.modules["p4_trusted_runtime_adapter"] = module
+    policy, authority = _inputs(module)
+    image = json.loads(authority)["runtime"]["images"]["fixture"]
+    fake = FakeDocker()
+    with module.OwnedDockerAttempt(
+        policy,
+        "v15legacy",
+        tmp_path / "global.lock",
+        tmp_path / "owned-v15legacy.jsonl",
+        run=fake,
+    ) as attempt:
+        before = len(fake.commands)
+        with pytest.raises(module.P4AdapterError, match="owned mount plan required"):
+            attempt.create_fixed_container(image, authority, role="fixture")
+        assert len(fake.commands) == before
+        assert attempt.items == []
+    assert attempt.cleanup_result()["outcome"] == "CLEAN"

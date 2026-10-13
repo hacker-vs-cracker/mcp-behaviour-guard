@@ -992,7 +992,15 @@ class OwnedDockerAttempt:
             raise P4RecoveryRequired("image mount inventory UNKNOWN") from exc
 
     def create_fixed_container(self, image: str, authority_raw: bytes, *, role: str) -> OwnedItem:
+        """Legacy test seam: never create the fixture's anonymous /state volume.
+
+        The fixture declares VOLUME /state; only create_mounted_fixed_container
+        can bind it to an independently attested owned resource. This legacy
+        evaluator-only path remains source-only and is not authorized for runs.
+        """
         approved_fixture_image(authority_raw, role=role, image=image)
+        if role == "fixture":
+            raise P4AdapterError("owned mount plan required for legacy fixture image")
         item = self._reserve("container")
         item.state = "REQUESTED"
         self._record("CREATE_REQUESTED", item)
