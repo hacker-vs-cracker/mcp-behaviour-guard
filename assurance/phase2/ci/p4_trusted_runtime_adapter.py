@@ -428,6 +428,8 @@ class OwnedItem:
     object_id: str | None = None
     prestart_attested: bool = False
     artifact_tmpfs_attested: bool = False
+    planned_mounts: dict[str, str] | None = None
+    mounted_attested: bool = False
 
 
 @dataclass
@@ -988,6 +990,73 @@ class OwnedDockerAttempt:
         self._record("CREATE_CONFIRMED", item)
         return item
 
+    def create_mounted_fixed_container(
+        self,
+        image: str,
+        authority_raw: bytes,
+        *,
+        role: str,
+        bindings: dict[str, OwnedItem],
+    ) -> OwnedItem:
+        """Create a nonexecuting container with *every* declared volume accounted for.
+
+        Unlike the historical, source-only create_fixed_container() test seam,
+        this path consumes V11's attested mount plan before any create intent.
+        It never starts a container, and is not yet a runtime-proof capability.
+        """
+        flags = self.plan_owned_image_mounts(image, authority_raw, role=role, bindings=bindings)
+        # The plan itself only returns arguments; it cannot create resources.
+        # Recheck the same OwnedItem object identities immediately before commit.
+        expected_paths = {"/state", "/trusted-output"} if role == "fixture" else {"/trusted-output"}
+        if set(bindings) != expected_paths or len(flags) != 2 * len(bindings):
+            raise P4AdapterError("owned mount plan changed before create")
+        for item in bindings.values():
+            if (
+                not any(item is owned for owned in self.items)
+                or item.kind != "volume"
+                or item.state != "CREATED"
+                or not item.artifact_tmpfs_attested
+                or item.object_id != item.name
+            ):
+                raise P4AdapterError("owned mount identity changed before create")
+        # Retain the exact name mapping for later effective Docker inspection.
+        planned = {path: bindings[path].name for path in sorted(expected_paths)}
+        candidate = self._reserve("container")
+        candidate.planned_mounts = planned
+        candidate.state = "REQUESTED"
+        self._record("CREATE_REQUESTED", candidate)
+        command = [
+            "docker",
+            "create",
+            "--platform",
+            "linux/amd64",
+            "--memory-swap",
+            str(bounds._limits(self.policy, "docker_runtime")["memory_bytes"]),
+            "--name",
+            candidate.name,
+            "--network",
+            "none",
+            "--label",
+            "mcpbg.p4.owner=" + self.attempt_id,
+            *bounds.docker_resource_args(self.policy),
+            *flags,
+            image,
+        ]
+        # No --tmpfs for /trusted-output: an owned volume occupies that path.
+        # The frozen /tmp OS-backed tmpfs remains in docker_resource_args.
+        result = self._checked_call(command)
+        if result.exit_code != 0:
+            self.recovery_required = True
+            raise P4RecoveryRequired("mounted container creation UNKNOWN")
+        identity = result.stdout.decode("ascii", errors="ignore").strip()
+        if re.fullmatch(r"[a-f0-9]{64}", identity) is None:
+            self.recovery_required = True
+            raise P4RecoveryRequired("mounted container identity UNKNOWN")
+        candidate.object_id = identity
+        candidate.state = "CREATED"
+        self._record("CREATE_CONFIRMED", candidate)
+        return candidate
+
     def attest_fixed_container(
         self, item: OwnedItem, authority_raw: bytes, *, role: str
     ) -> dict[str, str]:
@@ -1040,8 +1109,47 @@ class OwnedDockerAttempt:
             mounts = parsed.get("Mounts")
             expected_tmpfs = {
                 "/tmp": f"rw,noexec,nosuid,size={bounds._docker_size(limit['tmpfs_bytes'])}",
-                "/trusted-output": (f"rw,noexec,nosuid,size={artifacts['total_bytes']}"),
             }
+            if item.planned_mounts is None:
+                # Retained only for source-level backwards-compatibility tests.
+                # A legacy tmpfs container is NOT eligible for physical artifact export.
+                expected_tmpfs["/trusted-output"] = (
+                    f"rw,noexec,nosuid,size={artifacts['total_bytes']}"
+                )
+            else:
+                if (
+                    type(item.planned_mounts) is not dict
+                    or set(item.planned_mounts)
+                    != ({"/state", "/trusted-output"} if role == "fixture" else {"/trusted-output"})
+                    or not isinstance(mounts, list)
+                    or len(mounts) != len(item.planned_mounts)
+                ):
+                    raise P4AdapterError("effective owned mount inventory mismatch")
+                found: set[str] = set()
+                for mount in mounts:
+                    if not isinstance(mount, dict):
+                        raise P4AdapterError("effective Docker mount malformed")
+                    dest = mount.get("Destination")
+                    if (
+                        dest not in item.planned_mounts
+                        or dest in found
+                        or mount.get("Type") != "volume"
+                        or mount.get("Name") != item.planned_mounts[dest]
+                        or mount.get("RW") is not True
+                    ):
+                        raise P4AdapterError("effective owned mount identity mismatch")
+                    found.add(dest)
+                if found != set(item.planned_mounts):
+                    raise P4AdapterError("effective owned mounts incomplete")
+                for volume in item.planned_mounts.values():
+                    if not any(
+                        owned.kind == "volume"
+                        and owned.name == volume
+                        and owned.artifact_tmpfs_attested
+                        and owned.state == "CREATED"
+                        for owned in self.items
+                    ):
+                        raise P4AdapterError("effective mount no longer owned")
             labels = config.get("Labels")
             if (
                 parsed.get("Id") != item.object_id
@@ -1067,7 +1175,7 @@ class OwnedDockerAttempt:
                 or host.get("Binds") not in (None, [])
                 or host.get("Devices") not in (None, [])
                 or host.get("PortBindings") not in (None, {})
-                or mounts not in (None, [])
+                or (item.planned_mounts is None and mounts not in (None, []))
                 or tmpfs != expected_tmpfs
                 or not isinstance(log, dict)
                 or log.get("Type") != "local"
@@ -1075,6 +1183,7 @@ class OwnedDockerAttempt:
             ):
                 raise P4AdapterError("effective Docker containment/identity mismatch")
             item.prestart_attested = True
+            item.mounted_attested = item.planned_mounts is not None
             return {
                 "status": "PRESTART_CONFIG_ATTESTED_SOURCE_ONLY",
                 "container_id": item.object_id,
