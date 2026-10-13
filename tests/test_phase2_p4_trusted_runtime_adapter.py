@@ -490,3 +490,88 @@ def test_cleanup_network_id_identity_verification(tmp_path: Path) -> None:
         assert item.object_id == "b" * 64
     assert ["docker", "network", "rm", "b" * 64] in fake.commands
     assert not fake.names
+
+
+def test_subprocess_aggregate_output_cannot_reset_per_command(tmp_path: Path) -> None:
+    module = _module()
+    policy, _ = _inputs(module)
+    policy["limits"]["subprocess"]["aggregate_output_bytes"] = 200
+    policy["limits"]["subprocess"]["retained_bytes_per_stream"] = 16
+    seen = []
+
+    def bounded(argv, *, timeout, output_budget, retained_per_stream):
+        assert timeout > 0
+        assert retained_per_stream == min(16, output_budget)
+        seen.append(output_budget)
+        n = min(120, output_budget)
+        return module.CommandResult(0, b"x" * min(n, 16), b"", n)
+
+    with (
+        pytest.raises(module.P4RecoveryRequired, match="UNKNOWN"),
+        module.OwnedDockerAttempt(
+            policy,
+            "aggregate",
+            tmp_path / "shared.lock",
+            tmp_path / "owned-aggregate.jsonl",
+            run=bounded,
+        ) as attempt,
+    ):
+        attempt._checked_call(["docker", "version"])
+        attempt._checked_call(["docker", "version"])
+        assert attempt.command_output_bytes == 200
+        with pytest.raises(module.P4AdapterError, match="aggregate"):
+            attempt._checked_call(["docker", "version"])
+    assert seen == [200, 80]
+    assert attempt.cleanup_result() == {"outcome": "UNKNOWN", "recovery_required": True}
+
+
+def test_cleanup_output_reserve_is_separate_from_command_budget(tmp_path: Path) -> None:
+    import time
+
+    module = _module()
+    policy, _ = _inputs(module)
+    policy["limits"]["subprocess"]["aggregate_output_bytes"] = 100
+    used = []
+
+    def bounded(argv, *, timeout, output_budget, retained_per_stream):
+        assert timeout > 0
+        used.append(output_budget)
+        return module.CommandResult(0, b"", b"", output_budget)
+
+    with module.OwnedDockerAttempt(
+        policy, "reserved", tmp_path / "shared.lock", tmp_path / "owned-reserved.jsonl", run=bounded
+    ) as attempt:
+        attempt._checked_call(["docker", "version"])
+        attempt._cleanup_deadline = time.monotonic() + 5
+        attempt._checked_call(["docker", "version"], cleanup=True)
+        assert attempt.command_output_bytes == 100
+        assert attempt.cleanup_output_bytes == 100
+    assert used == [100, 100]
+
+
+def test_unaccounted_subprocess_result_fails_closed(tmp_path: Path) -> None:
+    module = _module()
+    policy, _ = _inputs(module)
+    calls = []
+
+    def invalid(argv, *, timeout, output_budget, retained_per_stream):
+        calls.append(argv)
+        return module.CommandResult(0, b"a", b"", output_budget + 1)
+
+    with (
+        pytest.raises(module.P4RecoveryRequired, match="UNKNOWN"),
+        module.OwnedDockerAttempt(
+            policy,
+            "accounting",
+            tmp_path / "shared.lock",
+            tmp_path / "owned-accounting.jsonl",
+            run=invalid,
+        ) as attempt,
+    ):
+        with pytest.raises(module.P4AdapterError, match="uncertain"):
+            attempt._checked_call(["docker", "version"])
+        assert attempt.command_output_unknown is True
+        with pytest.raises(module.P4AdapterError, match="aggregate"):
+            attempt._checked_call(["docker", "version"])
+    assert len(calls) == 1
+    assert attempt.cleanup_result() == {"outcome": "UNKNOWN", "recovery_required": True}

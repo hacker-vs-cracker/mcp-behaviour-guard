@@ -256,6 +256,12 @@ class OwnedDockerAttempt:
     _cleanup_deadline: float | None = None
     _ledger_fd: int | None = None
     _nonce: str = field(default_factory=lambda: secrets.token_hex(5))
+    command_output_bytes: int = 0
+    build_output_bytes: int = 0
+    cleanup_output_bytes: int = 0
+    command_output_unknown: bool = False
+    build_output_unknown: bool = False
+    cleanup_output_unknown: bool = False
 
     def _record(self, event: str, item: OwnedItem | None = None) -> None:
         """Write/fsync each intent *before* issuing its daemon operation."""
@@ -453,43 +459,65 @@ class OwnedDockerAttempt:
     ) -> CommandResult:
         if not self._entered:
             raise P4AdapterError("attempt lease must be active")
+        if cleanup and build:
+            raise P4AdapterError("build cannot use the cleanup output reserve")
+        subprocess_policy = bounds.subprocess_limits(self.policy)
         if cleanup:
             if self._cleanup_deadline is None:
                 raise P4AdapterError("cleanup deadline unavailable")
             timeout = self._cleanup_deadline - time.monotonic()
             if timeout <= 0:
                 raise P4AdapterError("shared cleanup deadline exceeded")
+            cap = subprocess_policy["output_budget_bytes"]
+            spent = self.cleanup_output_bytes
+            uncertain = self.cleanup_output_unknown
         else:
             if self.attempt_deadline is None:
                 raise P4AdapterError("attempt deadline missing")
-            remaining = self.attempt_deadline.remaining()
-            limit = (
-                bounds.build_command_limits(self.policy)
-                if build
-                else bounds.subprocess_limits(self.policy)
-            )
-            timeout = min(float(limit["timeout_seconds"]), remaining)
-        cap = (
-            bounds.build_command_limits(self.policy)["output_budget_bytes"]
-            if build
-            else bounds.subprocess_limits(self.policy)["output_budget_bytes"]
-        )
-        retained = min(131_072, cap)
+            remaining_time = self.attempt_deadline.remaining()
+            limits = bounds.build_command_limits(self.policy) if build else subprocess_policy
+            timeout = min(float(limits["timeout_seconds"]), remaining_time)
+            cap = limits["output_budget_bytes"]
+            spent = self.build_output_bytes if build else self.command_output_bytes
+            uncertain = self.build_output_unknown if build else self.command_output_unknown
+        if uncertain or cap - spent <= 0:
+            self.recovery_required = True
+            raise P4AdapterError("attempt aggregate subprocess output budget exhausted")
+        allowance = cap - spent
+        retained = min(subprocess_policy["capture_limit_bytes"], allowance)
         try:
-            return self.run(argv, timeout=timeout, output_budget=cap, retained_per_stream=retained)
-        except Exception as exc:
-            # A transport failure cannot prove that a daemon side effect did not occur.
-            if argv[:2] == ["docker", "create"] or (
-                len(argv) > 2
-                and argv[1:3]
-                in (
-                    ["network", "create"],
-                    ["volume", "create"],
-                    ["buildx", "create"],
-                    ["buildx", "build"],
-                )
+            result = self.run(
+                argv,
+                timeout=timeout,
+                output_budget=allowance,
+                retained_per_stream=retained,
+            )
+            if (
+                not isinstance(result, CommandResult)
+                or type(result.output_bytes) is not int
+                or not 0 <= result.output_bytes <= allowance
+                or type(result.stdout) is not bytes
+                or type(result.stderr) is not bytes
+                or len(result.stdout) + len(result.stderr) > result.output_bytes
             ):
-                self.recovery_required = True
+                raise P4AdapterError("bounded process returned invalid byte accounting")
+            if cleanup:
+                self.cleanup_output_bytes += result.output_bytes
+            elif build:
+                self.build_output_bytes += result.output_bytes
+            else:
+                self.command_output_bytes += result.output_bytes
+            return result
+        except Exception as exc:
+            # When the subprocess fails, captured bytes might be unknown. Never
+            # assume another subprocess can spend the unaccounted remainder.
+            if cleanup:
+                self.cleanup_output_unknown = True
+            elif build:
+                self.build_output_unknown = True
+            else:
+                self.command_output_unknown = True
+            self.recovery_required = True
             raise P4AdapterError("owned command uncertain or failed") from exc
 
     def _reserve(self, kind: str) -> OwnedItem:
