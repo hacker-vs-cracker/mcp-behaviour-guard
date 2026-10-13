@@ -871,6 +871,83 @@ class OwnedDockerAttempt:
             self.recovery_required = True
             raise P4RecoveryRequired("artifact volume verification UNKNOWN") from exc
 
+    def plan_owned_image_mounts(
+        self,
+        image: str,
+        authority_raw: bytes,
+        *,
+        role: str,
+        bindings: dict[str, OwnedItem],
+    ) -> list[str]:
+        """Bind *all* image-declared volumes to previously attested owned volumes.
+
+        This is a read-only daemon inventory and argument planner, NOT permission
+        to create or run a container. A fixture declares /state; Docker otherwise
+        creates an unmanaged anonymous volume. No implicit volume is allowed.
+        """
+        if not self._entered:
+            raise P4AdapterError("attempt lease required for mount inventory")
+        approved_fixture_image(authority_raw, role=role, image=image)
+        if type(bindings) is not dict:
+            raise P4AdapterError("owned volume bindings must be an exact mapping")
+        try:
+            inspection = self._checked_call(
+                ["docker", "image", "inspect", "--format", "{{json .}}", image]
+            )
+            if inspection.exit_code != 0:
+                raise P4AdapterError("immutable image inventory failed")
+            json_rules = bounds._mapping(self.policy.get("json_intake"), "json_intake")
+            decoded = bounds._load_object_bytes(
+                inspection.stdout,
+                max_bytes=bounds._positive_int(json_rules.get("max_bytes"), "json.max_bytes"),
+                label="immutable image inventory",
+                shape=json_rules,
+            )
+            bounds._validate_json_shape(decoded, json_rules)
+            config = decoded.get("Config")
+            digests = decoded.get("RepoDigests")
+            if (
+                not isinstance(config, dict)
+                or not isinstance(digests, list)
+                or image not in digests
+            ):
+                raise P4AdapterError("immutable image manifest identity unverified")
+            declared = config.get("Volumes")
+            if declared is None:
+                declared = {}
+            if not isinstance(declared, dict) or not all(
+                isinstance(path, str) and value == {} for path, value in declared.items()
+            ):
+                raise P4AdapterError("untrusted image-declared volume inventory")
+            expected_declarations = {"/state"} if role == "fixture" else set()
+            if set(declared) != expected_declarations:
+                raise P4AdapterError("unexpected image-declared anonymous volume")
+            required = expected_declarations | {"/trusted-output"}
+            if set(bindings) != required:
+                raise P4AdapterError("every image volume must be explicitly owned")
+            names: set[str] = set()
+            flags: list[str] = []
+            for destination in sorted(required):
+                item = bindings[destination]
+                if (
+                    not isinstance(item, OwnedItem)
+                    or not any(existing is item for existing in self.items)
+                    or item.kind != "volume"
+                    or item.state != "CREATED"
+                    or not item.artifact_tmpfs_attested
+                    or item.object_id != item.name
+                    or item.name in names
+                ):
+                    raise P4AdapterError("volume binding not attested or owned")
+                names.add(item.name)
+                flags.extend(
+                    ["--mount", f"type=volume,src={item.name},dst={destination},volume-nocopy"]
+                )
+            return flags
+        except (OSError, ValueError, TypeError, bounds.P4ResourceEnforcementError) as exc:
+            self.recovery_required = True
+            raise P4RecoveryRequired("image mount inventory UNKNOWN") from exc
+
     def create_fixed_container(self, image: str, authority_raw: bytes, *, role: str) -> OwnedItem:
         approved_fixture_image(authority_raw, role=role, image=image)
         item = self._reserve("container")

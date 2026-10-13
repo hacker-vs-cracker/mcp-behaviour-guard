@@ -1062,3 +1062,128 @@ def test_v10_owned_volume_options_and_no_unbounded_storage(tmp_path: Path) -> No
         assert any(x.startswith("o=size=16777216,") for x in created)
     assert attempt.cleanup_result()["outcome"] == "CLEAN"
     assert not fake.names
+
+
+@pytest.mark.parametrize("role,paths", [("fixture", {"/state"}), ("evaluator", set())])
+def test_v11_declared_image_volumes_require_exact_owned_mounts(
+    tmp_path: Path, role: str, paths: set[str]
+) -> None:
+    module = _module()
+    policy, authority = _inputs(module)
+    sys.modules["p4_trusted_runtime_adapter"] = module
+    images = json.loads(authority)["runtime"]["images"]
+    if role not in images:
+        pytest.skip("synthetic authority lacks this fixed role")
+    image = images[role]
+    from p4_trusted_runtime_adapter import CommandResult
+
+    class ImageFake(FakeDocker):
+        def __call__(self, argv, *, timeout, output_budget, retained_per_stream):
+            args = list(argv)
+            if args[:3] == ["docker", "image", "inspect"]:
+                self.commands.append(args)
+                data = json.dumps(
+                    {
+                        "RepoDigests": [image],
+                        "Config": {"Volumes": {key: {} for key in paths}},
+                    }
+                ).encode()
+                return CommandResult(0, data, b"", len(data))
+            return super().__call__(
+                argv,
+                timeout=timeout,
+                output_budget=output_budget,
+                retained_per_stream=retained_per_stream,
+            )
+
+    fake = ImageFake()
+    with module.OwnedDockerAttempt(
+        policy, "mountplan", tmp_path / "one.lock", tmp_path / "owned-mountplan.jsonl", run=fake
+    ) as attempt:
+        bindings = {}
+        for destination in sorted(paths | {"/trusted-output"}):
+            item = attempt._reserve("volume")
+            item.state = "CREATED"
+            item.object_id = item.name
+            item.artifact_tmpfs_attested = True
+            bindings[destination] = item
+        flags = attempt.plan_owned_image_mounts(image, authority, role=role, bindings=bindings)
+        assert len(flags) == len(bindings) * 2
+        assert "--mount" in flags
+        assert all("volume-nocopy" in flag for flag in flags if flag != "--mount")
+        assert not any(cmd[:2] == ["docker", "create"] for cmd in fake.commands)
+        # This is a mock-only planner check. Reservation is not real Docker proof.
+        for item in attempt.items:
+            item.state = "INTENT"
+    assert attempt.recovery_required is False
+
+
+def test_v11_missing_fixture_state_binding_fails_before_docker_create(tmp_path: Path) -> None:
+    module = _module()
+    policy, authority = _inputs(module)
+    sys.modules["p4_trusted_runtime_adapter"] = module
+    role = "fixture"
+    image = json.loads(authority)["runtime"]["images"][role]
+    from p4_trusted_runtime_adapter import CommandResult
+
+    class ImageFake(FakeDocker):
+        def __call__(self, argv, *, timeout, output_budget, retained_per_stream):
+            args = list(argv)
+            if args[:3] == ["docker", "image", "inspect"]:
+                self.commands.append(args)
+                raw = json.dumps(
+                    {"RepoDigests": [image], "Config": {"Volumes": {"/state": {}}}}
+                ).encode()
+                return CommandResult(0, raw, b"", len(raw))
+            return super().__call__(
+                argv,
+                timeout=timeout,
+                output_budget=output_budget,
+                retained_per_stream=retained_per_stream,
+            )
+
+    fake = ImageFake()
+    with module.OwnedDockerAttempt(
+        policy, "mountdeny", tmp_path / "one.lock", tmp_path / "owned-mountdeny.jsonl", run=fake
+    ) as attempt:
+        with pytest.raises(module.P4AdapterError, match="explicitly owned"):
+            attempt.plan_owned_image_mounts(image, authority, role=role, bindings={})
+        assert not any(command[:2] == ["docker", "create"] for command in fake.commands)
+
+
+@pytest.mark.parametrize("case", ["missing_digest", "extra_volume", "invalid_shape"])
+def test_v11_image_declared_volume_inventory_fails_closed(tmp_path: Path, case: str) -> None:
+    module = _module()
+    policy, authority = _inputs(module)
+    sys.modules["p4_trusted_runtime_adapter"] = module
+    image = json.loads(authority)["runtime"]["images"]["fixture"]
+    from p4_trusted_runtime_adapter import CommandResult
+
+    class ImageFake(FakeDocker):
+        def __call__(self, argv, *, timeout, output_budget, retained_per_stream):
+            args = list(argv)
+            if args[:3] == ["docker", "image", "inspect"]:
+                self.commands.append(args)
+                doc = {"RepoDigests": [image], "Config": {"Volumes": {"/state": {}}}}
+                if case == "missing_digest":
+                    doc["RepoDigests"] = []
+                if case == "extra_volume":
+                    doc["Config"]["Volumes"]["/unowned"] = {}
+                if case == "invalid_shape":
+                    doc["Config"]["Volumes"] = ["/state"]
+                raw = b"not-json" if case == "bad_bytes" else json.dumps(doc).encode()
+                return CommandResult(0, raw, b"", len(raw))
+            return super().__call__(
+                argv,
+                timeout=timeout,
+                output_budget=output_budget,
+                retained_per_stream=retained_per_stream,
+            )
+
+    fake = ImageFake()
+    with module.OwnedDockerAttempt(
+        policy, "mountbad", tmp_path / "one.lock", tmp_path / "owned-mountbad.jsonl", run=fake
+    ) as attempt:
+        with pytest.raises((module.P4AdapterError, module.P4RecoveryRequired)):
+            attempt.plan_owned_image_mounts(image, authority, role="fixture", bindings={})
+        assert not any(command[:2] == ["docker", "create"] for command in fake.commands)
