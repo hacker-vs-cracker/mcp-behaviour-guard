@@ -1101,7 +1101,7 @@ def test_v11_declared_image_volumes_require_exact_owned_mounts(
         policy, "mountplan", tmp_path / "one.lock", tmp_path / "owned-mountplan.jsonl", run=fake
     ) as attempt:
         bindings = {}
-        for destination in sorted(paths | {"/trusted-output"}):
+        for destination in sorted(paths | ({"/trusted-output"} if role == "evaluator" else set())):
             item = attempt._reserve("volume")
             item.state = "CREATED"
             item.object_id = item.name
@@ -1200,7 +1200,7 @@ def test_v12_mount_path_applies_attested_flags_before_create(tmp_path: Path) -> 
         policy, "v12mount", tmp_path / "global.lock", tmp_path / "owned-v12mount.jsonl", run=fake
     ) as attempt:
         mounts = {}
-        for dest in ("/state", "/trusted-output"):
+        for dest in ("/state",):
             volume = attempt._reserve("volume")
             volume.state = "CREATED"
             volume.object_id = volume.name
@@ -1226,7 +1226,7 @@ def test_v12_mount_path_applies_attested_flags_before_create(tmp_path: Path) -> 
         assert owned.state == "CREATED"
         assert owned.planned_mounts == {path: mounts[path].name for path in sorted(mounts)}
         command = next(cmd for cmd in fake.commands if cmd[:2] == ["docker", "create"])
-        assert command.count("--mount") == 2
+        assert command.count("--mount") == 1
         assert "/trusted-output:" not in " ".join(command)
         assert all("volume-nocopy" in arg for arg in command if arg.startswith("type=volume"))
         assert "--read-only" in command and "--network" in command
@@ -1247,20 +1247,16 @@ def test_v12_mount_path_rejects_stale_volume_before_create(tmp_path: Path) -> No
         policy, "v12stale", tmp_path / "global.lock", tmp_path / "owned-v12stale.jsonl", run=fake
     ) as attempt:
         a = attempt._reserve("volume")
-        b = attempt._reserve("volume")
-        for item in (a, b):
-            item.state = "CREATED"
-            item.object_id = item.name
-            item.artifact_tmpfs_attested = True
-        bindings = {"/state": a, "/trusted-output": b}
+        a.state = "CREATED"
+        a.object_id = a.name
+        a.artifact_tmpfs_attested = True
+        bindings = {"/state": a}
 
         def stale_plan(img, auth, *, role, bindings):
             a.artifact_tmpfs_attested = False
             return [
                 "--mount",
                 f"type=volume,src={a.name},dst=/state,volume-nocopy",
-                "--mount",
-                f"type=volume,src={b.name},dst=/trusted-output,volume-nocopy",
             ]
 
         attempt.plan_owned_image_mounts = stale_plan
@@ -1273,8 +1269,7 @@ def test_v12_mount_path_rejects_stale_volume_before_create(tmp_path: Path) -> No
         else:
             pytest.fail("stale owned volume unexpectedly passed pre-create verification")
         assert not any(cmd[:2] == ["docker", "create"] for cmd in fake.commands)
-        for item in (a, b):
-            item.state = "INTENT"
+        a.state = "INTENT"
     assert attempt.recovery_required is False
 
 
@@ -1323,7 +1318,7 @@ def test_v12_mounted_effective_inspection_requires_exact_owned_volumes(
         ) as attempt,
     ):
         bindings = {}
-        for dest in ("/state", "/trusted-output"):
+        for dest in ("/state",):
             volume = attempt._reserve("volume")
             volume.state = "CREATED"
             volume.object_id = volume.name
@@ -1431,13 +1426,13 @@ def test_v13_fixture_volume_uid_mismatch_denies_mount_before_create(tmp_path: Pa
         policy, "v13mount", tmp_path / "one.lock", tmp_path / "owned-v13mount.jsonl", run=fake
     ) as attempt:
         bindings = {}
-        for dest in ("/state", "/trusted-output"):
+        for dest in ("/state",):
             item = attempt._reserve("volume")
             item.state = "CREATED"
             item.object_id = item.name
             item.artifact_tmpfs_attested = True
             bindings[dest] = item
-        bindings["/trusted-output"].artifact_owner_uid = 10003
+        bindings["/state"].artifact_owner_uid = 10003
         attempt.plan_owned_image_mounts = lambda *_a, **_kw: [
             part
             for dest in sorted(bindings)
@@ -1619,4 +1614,136 @@ def test_v15_legacy_fixture_create_rejects_implicit_anonymous_state_volume(
             attempt.create_fixed_container(image, authority, role="fixture")
         assert len(fake.commands) == before
         assert attempt.items == []
+    assert attempt.cleanup_result()["outcome"] == "CLEAN"
+
+
+@pytest.mark.parametrize(
+    "role,expected_paths",
+    [
+        ("fixture", {"/state"}),
+        ("evaluator", {"/trusted-output"}),
+    ],
+)
+def test_v17_required_mounts_are_role_specific_and_within_two_volume_limit(
+    tmp_path: Path, role: str, expected_paths: set[str]
+) -> None:
+    module = _module()
+    policy, authority = _inputs(module)
+    sys.modules["p4_trusted_runtime_adapter"] = module
+    images = json.loads(authority)["runtime"]["images"]
+    if role not in images:
+        pytest.skip("synthetic authority lacks this fixed role")
+    image = images[role]
+    from p4_trusted_runtime_adapter import CommandResult
+
+    class ImageFake(FakeDocker):
+        def __call__(self, argv, *, timeout, output_budget, retained_per_stream):
+            args = list(argv)
+            if args[:3] == ["docker", "image", "inspect"]:
+                self.commands.append(args)
+                declared = {"/state": {}} if role == "fixture" else {}
+                raw = json.dumps({"RepoDigests": [image], "Config": {"Volumes": declared}}).encode()
+                return CommandResult(0, raw, b"", len(raw))
+            return super().__call__(
+                argv,
+                timeout=timeout,
+                output_budget=output_budget,
+                retained_per_stream=retained_per_stream,
+            )
+
+    fake = ImageFake()
+    with module.OwnedDockerAttempt(
+        policy,
+        "v17roles",
+        tmp_path / "shared.lock",
+        tmp_path / "owned-v17roles.jsonl",
+        run=fake,
+    ) as attempt:
+        item = attempt._reserve("volume")
+        item.state = "CREATED"
+        item.object_id = item.name
+        item.artifact_tmpfs_attested = True
+        item.artifact_owner_uid = 10001 if role == "fixture" else 10003
+        bindings = {next(iter(expected_paths)): item}
+        flags = attempt.plan_owned_image_mounts(image, authority, role=role, bindings=bindings)
+        assert flags == [
+            "--mount",
+            f"type=volume,src={item.name},dst={next(iter(expected_paths))},volume-nocopy",
+        ]
+        assert not any(cmd[:2] == ["docker", "create"] for cmd in fake.commands)
+        item.state = "INTENT"
+    assert attempt.cleanup_result()["outcome"] == "CLEAN"
+
+
+def test_v17_extra_fixture_output_mount_is_rejected_before_container_creation(
+    tmp_path: Path,
+) -> None:
+    module = _module()
+    policy, authority = _inputs(module)
+    sys.modules["p4_trusted_runtime_adapter"] = module
+    image = json.loads(authority)["runtime"]["images"]["fixture"]
+    from p4_trusted_runtime_adapter import CommandResult
+
+    class ImageFake(FakeDocker):
+        def __call__(self, argv, *, timeout, output_budget, retained_per_stream):
+            args = list(argv)
+            if args[:3] == ["docker", "image", "inspect"]:
+                self.commands.append(args)
+                raw = json.dumps(
+                    {"RepoDigests": [image], "Config": {"Volumes": {"/state": {}}}}
+                ).encode()
+                return CommandResult(0, raw, b"", len(raw))
+            return super().__call__(
+                argv,
+                timeout=timeout,
+                output_budget=output_budget,
+                retained_per_stream=retained_per_stream,
+            )
+
+    fake = ImageFake()
+    with module.OwnedDockerAttempt(
+        policy,
+        "v17extra",
+        tmp_path / "shared.lock",
+        tmp_path / "owned-v17extra.jsonl",
+        run=fake,
+    ) as attempt:
+        state = attempt._reserve("volume")
+        output = attempt._reserve("volume")
+        for item in (state, output):
+            item.state = "CREATED"
+            item.object_id = item.name
+            item.artifact_tmpfs_attested = True
+            item.artifact_owner_uid = 10001
+        with pytest.raises(module.P4AdapterError, match="every image volume"):
+            attempt.plan_owned_image_mounts(
+                image,
+                authority,
+                role="fixture",
+                bindings={"/state": state, "/trusted-output": output},
+            )
+        assert not any(cmd[:2] == ["docker", "create"] for cmd in fake.commands)
+        state.state = "INTENT"
+        output.state = "INTENT"
+    assert attempt.cleanup_result()["outcome"] == "CLEAN"
+
+
+def test_v17_fixture_plus_evaluator_budget_is_exactly_two(tmp_path: Path) -> None:
+    module = _module()
+    policy, _ = _inputs(module)
+    fake = FakeDocker()
+    with module.OwnedDockerAttempt(
+        policy,
+        "v17budget",
+        tmp_path / "shared.lock",
+        tmp_path / "owned-v17budget.jsonl",
+        run=fake,
+    ) as attempt:
+        state = attempt._reserve("volume")
+        output = attempt._reserve("volume")
+        assert state.name != output.name
+        with pytest.raises(module.P4AdapterError, match="resource slot budget"):
+            attempt._reserve("volume")
+        assert len(attempt.items) == 2
+        assert not fake.commands
     assert attempt.cleanup_result()["outcome"] == "CLEAN"

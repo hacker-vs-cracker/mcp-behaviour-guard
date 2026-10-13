@@ -964,7 +964,11 @@ class OwnedDockerAttempt:
             expected_declarations = {"/state"} if role == "fixture" else set()
             if set(declared) != expected_declarations:
                 raise P4AdapterError("unexpected image-declared anonymous volume")
-            required = expected_declarations | {"/trusted-output"}
+            # Role-minimal mount budget: fixture writes /state; evaluator writes /trusted-output.
+            # Do not spend a third frozen volume slot on unused fixture output.
+            required = expected_declarations | (
+                {"/trusted-output"} if role == "evaluator" else set()
+            )
             if set(bindings) != required:
                 raise P4AdapterError("every image volume must be explicitly owned")
             names: set[str] = set()
@@ -1056,7 +1060,7 @@ class OwnedDockerAttempt:
         flags = self.plan_owned_image_mounts(image, authority_raw, role=role, bindings=bindings)
         # The plan itself only returns arguments; it cannot create resources.
         # Recheck the same OwnedItem object identities immediately before commit.
-        expected_paths = {"/state", "/trusted-output"} if role == "fixture" else {"/trusted-output"}
+        expected_paths = {"/state"} if role == "fixture" else {"/trusted-output"}
         if set(bindings) != expected_paths or len(flags) != 2 * len(bindings):
             raise P4AdapterError("owned mount plan changed before create")
         for item in bindings.values():
@@ -1172,7 +1176,7 @@ class OwnedDockerAttempt:
                 if (
                     type(item.planned_mounts) is not dict
                     or set(item.planned_mounts)
-                    != ({"/state", "/trusted-output"} if role == "fixture" else {"/trusted-output"})
+                    != ({"/state"} if role == "fixture" else {"/trusted-output"})
                     or not isinstance(mounts, list)
                     or len(mounts) != len(item.planned_mounts)
                 ):
