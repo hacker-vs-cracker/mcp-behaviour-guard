@@ -696,6 +696,8 @@ class OwnedDockerAttempt:
             "create",
             "--platform",
             "linux/amd64",
+            "--memory-swap",
+            str(bounds._limits(self.policy, "docker_runtime")["memory_bytes"]),
             "--name",
             item.name,
             "--network",
@@ -719,6 +721,100 @@ class OwnedDockerAttempt:
         item.state = "CREATED"
         self._record("CREATE_CONFIRMED", item)
         return item
+
+    def attest_fixed_container(
+        self, item: OwnedItem, authority_raw: bytes, *, role: str
+    ) -> dict[str, str]:
+        """Check effective daemon state before any start; do not start the container.
+
+        Docker create flags are *requests*, not proof. The trusted image is
+        separately bound to P3 generation 1. Treat malformed or drifted Docker
+        inspection as UNKNOWN so the owned container is not executed.
+        """
+        if (
+            not self._entered
+            or not any(existing is item for existing in self.items)
+            or item.kind != "container"
+            or item.state != "CREATED"
+            or not isinstance(item.object_id, str)
+            or re.fullmatch(r"[a-f0-9]{64}", item.object_id) is None
+        ):
+            raise P4AdapterError("owned created container required for pre-start attestation")
+        try:
+            if (
+                type(authority_raw) is not bytes
+                or hashlib.sha256(authority_raw).hexdigest() != PROMOTED_AUTHORITY_SHA256
+            ):
+                raise P4AdapterError("attestation authority bytes differ")
+            authority = json.loads(authority_raw)
+            image = authority["runtime"]["images"][role]
+            approved_fixture_image(authority_raw, role=role, image=image)
+            result = self._checked_call(
+                ["docker", "container", "inspect", "--format", "{{json .}}", item.object_id]
+            )
+            if result.exit_code != 0:
+                raise P4AdapterError("effective Docker inspection failed")
+            json_policy = bounds._mapping(self.policy.get("json_intake"), "json_intake")
+            parsed = bounds._load_object_bytes(
+                result.stdout,
+                max_bytes=bounds._positive_int(json_policy.get("max_bytes"), "json.max_bytes"),
+                label="Docker effective inspection",
+                shape=json_policy,
+            )
+            bounds._validate_json_shape(parsed, json_policy)
+            config = parsed.get("Config")
+            host = parsed.get("HostConfig")
+            state = parsed.get("State")
+            if not all(isinstance(x, dict) for x in (config, host, state)):
+                raise P4AdapterError("Docker effective config missing")
+            limit = bounds._limits(self.policy, "docker_runtime")
+            artifacts = bounds._limits(self.policy, "artifacts")
+            log = host.get("LogConfig")
+            tmpfs = host.get("Tmpfs")
+            mounts = parsed.get("Mounts")
+            expected_tmpfs = {
+                "/tmp": f"rw,noexec,nosuid,size={bounds._docker_size(limit['tmpfs_bytes'])}",
+                "/trusted-output": (f"rw,noexec,nosuid,size={artifacts['total_bytes']}"),
+            }
+            labels = config.get("Labels")
+            if (
+                parsed.get("Id") != item.object_id
+                or parsed.get("Name") != "/" + item.name
+                or config.get("Image") != image
+                or not isinstance(labels, dict)
+                or labels.get("mcpbg.p4.owner") != self.attempt_id
+                or state.get("Running") is not False
+                or state.get("Pid") not in (0, None)
+                or host.get("NetworkMode") != "none"
+                or host.get("ReadonlyRootfs") is not True
+                or host.get("Privileged") is not False
+                or host.get("PublishAllPorts") is not False
+                or host.get("Memory") != limit["memory_bytes"]
+                or host.get("MemorySwap") != limit["memory_bytes"]
+                or host.get("PidsLimit") != limit["pids_limit"]
+                or host.get("NanoCpus") != limit["nano_cpus"]
+                or not isinstance(host.get("CapDrop"), list)
+                or "ALL" not in host["CapDrop"]
+                or host.get("CapAdd") not in (None, [])
+                or not isinstance(host.get("SecurityOpt"), list)
+                or "no-new-privileges:true" not in host["SecurityOpt"]
+                or host.get("Binds") not in (None, [])
+                or host.get("Devices") not in (None, [])
+                or host.get("PortBindings") not in (None, {})
+                or mounts not in (None, [])
+                or tmpfs != expected_tmpfs
+                or not isinstance(log, dict)
+                or log.get("Type") != "local"
+                or log.get("Config") != {"max-size": "1m", "max-file": "2"}
+            ):
+                raise P4AdapterError("effective Docker containment/identity mismatch")
+            return {
+                "status": "PRESTART_CONFIG_ATTESTED_SOURCE_ONLY",
+                "container_id": item.object_id,
+            }
+        except Exception as exc:
+            self.recovery_required = True
+            raise P4RecoveryRequired("pre-start container attestation UNKNOWN") from exc
 
     # BuildKit execution is deferred until its image is pinned by digest and its
     # extra daemon container, cache volume, loaded image and cleanup are owned.

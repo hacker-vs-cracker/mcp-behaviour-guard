@@ -694,3 +694,131 @@ def test_streamed_archive_rejects_exhausted_deadline_and_unsafe_parent(tmp_path:
             [b"blob"], parent / "results", policy, deadline=module.time.monotonic() + 20
         )
     assert list(parent.iterdir()) == []
+
+
+class EffectiveConfigFake(FakeDocker):
+    """Fake daemon returns inspect output; no Docker or candidate code executes."""
+
+    def __init__(self, image: str, policy: dict, **overrides) -> None:
+        super().__init__()
+        self.image = image
+        self.policy = policy
+        self.overrides = overrides
+        self.attested_calls = 0
+
+    def __call__(self, argv, *, timeout, output_budget, retained_per_stream):
+        from p4_trusted_runtime_adapter import CommandResult
+
+        args = list(argv)
+        if args[1:5] == ["container", "inspect", "--format", "{{json .}}"]:
+            self.commands.append(args)
+            self.attested_calls += 1
+            name = next(iter(self.names))
+            limit = self.policy["limits"]["docker_runtime"]
+            doc = {
+                "Id": "a" * 64,
+                "Name": "/" + name,
+                "Config": {"Image": self.image, "Labels": {"mcpbg.p4.owner": "fixed"}},
+                "State": {"Running": False, "Pid": 0},
+                "Mounts": [],
+                "HostConfig": {
+                    "NetworkMode": "none",
+                    "ReadonlyRootfs": True,
+                    "Privileged": False,
+                    "PublishAllPorts": False,
+                    "Memory": limit["memory_bytes"],
+                    "MemorySwap": limit["memory_bytes"],
+                    "PidsLimit": limit["pids_limit"],
+                    "NanoCpus": limit["nano_cpus"],
+                    "CapDrop": ["ALL"],
+                    "CapAdd": None,
+                    "SecurityOpt": ["no-new-privileges:true"],
+                    "Binds": None,
+                    "Devices": None,
+                    "PortBindings": None,
+                    "Tmpfs": {
+                        "/tmp": "rw,noexec,nosuid,size=16m",
+                        "/trusted-output": "rw,noexec,nosuid,size=16777216",
+                    },
+                    "LogConfig": {"Type": "local", "Config": {"max-size": "1m", "max-file": "2"}},
+                },
+            }
+            for key, value in self.overrides.items():
+                section, field = key.split("__", 1)
+                doc[section][field] = value
+            raw = (json.dumps(doc, sort_keys=True) + "\n").encode()
+            return CommandResult(0, raw, b"", len(raw))
+        return super().__call__(
+            argv,
+            timeout=timeout,
+            output_budget=output_budget,
+            retained_per_stream=retained_per_stream,
+        )
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {},
+        {"HostConfig__Privileged": True},
+        {"HostConfig__ReadonlyRootfs": False},
+        {"HostConfig__NetworkMode": "bridge"},
+        {"HostConfig__Memory": 1},
+        {"HostConfig__MemorySwap": -1},
+        {"HostConfig__NanoCpus": 0},
+        {"HostConfig__PidsLimit": 0},
+        {"HostConfig__CapDrop": []},
+        {"HostConfig__SecurityOpt": []},
+        {"HostConfig__PortBindings": {"8000/tcp": [{"HostPort": "8000"}]}},
+        {"HostConfig__Binds": ["/var/run/docker.sock:/var/run/docker.sock"]},
+        {"HostConfig__LogConfig": {"Type": "json-file", "Config": {}}},
+        {"HostConfig__Tmpfs": {}},
+        {"State__Running": True},
+        {"Config__Image": "unapproved:latest"},
+    ],
+)
+def test_prestart_daemon_configuration_is_fail_closed(tmp_path: Path, override: dict) -> None:
+    module = _module()
+    policy, authority = _inputs(module)
+    image = json.loads(authority)["runtime"]["images"]["fixture"]
+    sys.modules["p4_trusted_runtime_adapter"] = module
+    fake = EffectiveConfigFake(image, policy, **override)
+    ledger = tmp_path / "owned-fixed.jsonl"
+    with (
+        pytest.raises(module.P4RecoveryRequired)
+        if override
+        else __import__("contextlib").nullcontext(),
+        module.OwnedDockerAttempt(
+            policy, "fixed", tmp_path / "scope.lock", ledger, run=fake
+        ) as attempt,
+    ):
+        item = attempt.create_fixed_container(image, authority, role="fixture")
+        if override:
+            with pytest.raises(module.P4RecoveryRequired, match="attestation UNKNOWN"):
+                attempt.attest_fixed_container(item, authority, role="fixture")
+            assert attempt.recovery_required is True
+        else:
+            value = attempt.attest_fixed_container(item, authority, role="fixture")
+            assert value["status"] == "PRESTART_CONFIG_ATTESTED_SOURCE_ONLY"
+            assert fake.attested_calls == 1
+            assert "--memory-swap" in fake.commands[0]
+            assert all("start" not in args for args in fake.commands)
+    assert not fake.names
+
+
+def test_prestart_rejects_foreign_owned_item_without_daemon_read(tmp_path: Path) -> None:
+    module = _module()
+    policy, authority = _inputs(module)
+    image = json.loads(authority)["runtime"]["images"]["fixture"]
+    sys.modules["p4_trusted_runtime_adapter"] = module
+    fake = EffectiveConfigFake(image, policy)
+    with module.OwnedDockerAttempt(
+        policy, "fixed", tmp_path / "scope.lock", tmp_path / "owned-fixed.jsonl", run=fake
+    ) as attempt:
+        from p4_trusted_runtime_adapter import OwnedItem
+
+        foreign = OwnedItem(kind="container", name="external", state="CREATED", object_id="a" * 64)
+        before = len(fake.commands)
+        with pytest.raises(module.P4AdapterError, match="owned created container required"):
+            attempt.attest_fixed_container(foreign, authority, role="fixture")
+        assert len(fake.commands) == before
