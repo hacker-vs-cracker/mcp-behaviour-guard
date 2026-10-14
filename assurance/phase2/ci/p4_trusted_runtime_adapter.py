@@ -8,6 +8,7 @@ only intended execution subject is a separately approved *fixed* synthetic image
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import hashlib
 import json
 import math
@@ -16,10 +17,11 @@ import re
 import secrets
 import selectors
 import signal
+import stat
 import subprocess
 import tempfile
 import time
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Generator, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -116,6 +118,8 @@ class BoundedProcess:
         if (
             not argv
             or not all(isinstance(x, str) and x and "\x00" not in x for x in argv)
+            or not isinstance(timeout, (int, float))
+            or not math.isfinite(timeout)
             or timeout <= 0
             or type(output_budget) is not int
             or type(retained_per_stream) is not int
@@ -300,7 +304,7 @@ def receive_bounded_artifact_archive(
             if total == 0 or time.monotonic() >= deadline:
                 raise P4AdapterError("artifact intake incomplete or expired")
             staged = owned / "unpacked"
-            result = bounds.safe_extract_archive(spool, staged, policy)
+            result = bounds.safe_extract_archive(spool, staged, policy, deadline=deadline)
             if time.monotonic() >= deadline:
                 raise P4AdapterError("artifact intake deadline exceeded")
             if destination.exists() or destination.is_symlink():
@@ -341,7 +345,7 @@ def receive_bounded_artifact_archive(
 
 def _bounded_archive_process(
     argv: Sequence[str], *, deadline: float, byte_limit: int, stderr_limit: int = 131_072
-) -> Iterable[bytes]:
+) -> Generator[bytes, None, None]:
     """Bound the *actual subprocess pipes*; never rely on a blocking input iterator.
 
     This runs only when explicitly invoked, and does not execute on import. The
@@ -420,6 +424,54 @@ def _bounded_archive_process(
                 process.stderr.close()
 
 
+class PrivateAttemptLease:
+    """A local, inode-checked lock. It is not a lease across Docker hosts."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.fd: int | None = None
+        self.identity: str | None = None
+
+    def __enter__(self) -> PrivateAttemptLease:
+        if not hasattr(os, "O_NOFOLLOW"):
+            raise P4AdapterError("no-follow locks are unavailable")
+        # Refuse path aliases rather than allowing two spellings to partition replay.
+        parent = self.path.parent
+        if parent.absolute() != parent.resolve(strict=True):
+            raise P4AdapterError("execution state root is aliased")
+        info = parent.stat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise P4AdapterError("execution state root must be private and owned")
+        try:
+            self.fd = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            opened = os.fstat(self.fd)
+            named = os.stat(self.path, follow_symlinks=False)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_uid != os.getuid()
+                or opened.st_mode & 0o077
+                or opened.st_nlink != 1
+                or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)
+            ):
+                raise P4AdapterError("lock inode, owner or mode invalid")
+            fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            named = os.stat(self.path, follow_symlinks=False)
+            if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
+                raise P4AdapterError("lock inode replaced during acquisition")
+            self.identity = f"{opened.st_dev}:{opened.st_ino}"
+            return self
+        except BaseException:
+            self.__exit__(None, None, None)
+            raise
+
+    def __exit__(self, _t: Any, _v: Any, _tb: Any) -> None:
+        if self.fd is not None:
+            with contextlib.suppress(OSError):
+                fcntl.flock(self.fd, fcntl.LOCK_UN)
+            os.close(self.fd)
+            self.fd = None
+
+
 @dataclass
 class OwnedItem:
     kind: str
@@ -451,7 +503,12 @@ class OwnedDockerAttempt:
     items: list[OwnedItem] = field(default_factory=list)
     attempt_deadline: bounds.AttemptDeadline | None = None
     recovery_required: bool = False
-    _lease: bounds.AttemptLease | None = None
+    _lease: PrivateAttemptLease | None = None
+    daemon_context: str = "source-only-unbound"
+    daemon_identity: str = "source-only-unbound"
+    _scope_digest: str | None = None
+    _lock_identity: str | None = None
+    _durably_finished: bool = False
     _entered: bool = False
     _cleanup_deadline: float | None = None
     _ledger_fd: int | None = None
@@ -463,7 +520,9 @@ class OwnedDockerAttempt:
     build_output_unknown: bool = False
     cleanup_output_unknown: bool = False
 
-    def _record(self, event: str, item: OwnedItem | None = None) -> None:
+    def _record(
+        self, event: str, item: OwnedItem | None = None, *, details: dict[str, Any] | None = None
+    ) -> None:
         """Write/fsync each intent *before* issuing its daemon operation."""
         if self._ledger_fd is None:
             raise P4AdapterError("owned resource ledger is unavailable")
@@ -471,9 +530,10 @@ class OwnedDockerAttempt:
             "event": event,
             "attempt": self.attempt_id,
             "nonce": self._nonce,
-            "lease_scope_sha256": hashlib.sha256(
-                str(self.lease_path.absolute()).encode("utf-8")
-            ).hexdigest(),
+            "lease_scope_sha256": self._scope_digest,
+            "lock_identity": self._lock_identity,
+            "daemon_context": self.daemon_context,
+            "daemon_identity": self.daemon_identity,
             "utc_epoch": int(time.time()),
         }
         if item is not None:
@@ -485,9 +545,12 @@ class OwnedDockerAttempt:
                     "object_id": item.object_id,
                 }
             )
+        if details is not None:
+            data["details"] = details
         raw = (json.dumps(data, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
         if len(raw) > 1024:
-            raise P4AdapterError("resource ledger entry exceeds budget")
+            self.recovery_required = True
+            raise P4RecoveryRequired("resource ledger entry exceeds budget")
         try:
             if os.write(self._ledger_fd, raw) != len(raw):
                 raise OSError("short resource ledger write")
@@ -503,7 +566,8 @@ class OwnedDockerAttempt:
         proof of Docker absence. UNKNOWN requires external inventory reconciliation.
         """
         directory = self.ledger_path.parent
-        scope = hashlib.sha256(str(self.lease_path.absolute()).encode("utf-8")).hexdigest()
+        scope = self._scope_digest
+        assert isinstance(scope, str)
         try:
             names = sorted(directory.glob("owned-*.jsonl"))
             if len(names) > 64:
@@ -511,11 +575,24 @@ class OwnedDockerAttempt:
             for previous in names:
                 if previous == self.ledger_path:
                     raise P4RecoveryRequired("prior owned ledger path reused")
-                if previous.is_symlink() or not previous.is_file():
-                    raise P4RecoveryRequired("prior owned ledger not regular")
-                if previous.stat().st_size > 131_072:
-                    raise P4RecoveryRequired("prior owned ledger exceeds byte budget")
-                raw = previous.read_bytes()
+                flags = os.O_RDONLY | os.O_NOFOLLOW
+                fd = os.open(previous, flags)
+                try:
+                    info = os.fstat(fd)
+                    named = os.stat(previous, follow_symlinks=False)
+                    if (
+                        not stat.S_ISREG(info.st_mode)
+                        or info.st_uid != os.getuid()
+                        or info.st_mode & 0o077
+                        or info.st_nlink != 1
+                        or (info.st_dev, info.st_ino) != (named.st_dev, named.st_ino)
+                    ):
+                        raise P4RecoveryRequired("prior owned ledger inode/ownership invalid")
+                    if info.st_size > 131_072:
+                        raise P4RecoveryRequired("prior owned ledger exceeds byte budget")
+                    raw = os.read(fd, 131_073)
+                finally:
+                    os.close(fd)
                 if not raw or not raw.endswith(b"\n") or len(raw.splitlines()) > 128:
                     raise P4RecoveryRequired("prior owned ledger incomplete")
                 events: list[dict[str, Any]] = []
@@ -554,65 +631,150 @@ class OwnedDockerAttempt:
                     identities.append((prior_attempt, prior_nonce))
                 if len(set(identities)) != 1:
                     raise P4RecoveryRequired("prior ledger has inconsistent attempt identity")
-                if len(set(scopes)) != 1:
-                    raise P4RecoveryRequired("prior owned ledger scope malformed")
-                if scope not in scopes:
-                    continue  # Distinct lock path, not the same execution scope.
+                if len(set(scopes)) != 1 or scope not in scopes:
+                    raise P4RecoveryRequired("prior owned ledger scope/daemon mismatch")
+                if any(
+                    event.get("lock_identity") != self._lock_identity
+                    or event.get("daemon_identity") != self.daemon_identity
+                    or event.get("daemon_context") != self.daemon_context
+                    for event in events
+                ):
+                    raise P4RecoveryRequired("prior lock inode or Docker daemon identity changed")
                 if (
                     events[0].get("event") != "ATTEMPT_OPEN"
                     or events[-1].get("event") != "FINISH_CLEAN"
                 ):
                     raise P4RecoveryRequired("prior attempt unresolved; cleanup inventory required")
-                pending: dict[str, tuple[str, str]] = {}
-                export_pending = False
-                export_finished = False
+                # Replay exact immutable identity. A CLEAN ending is not evidence
+                # that a different resource ID was removed.
+                pending: dict[str, tuple[str, str, str | None]] = {}
+                export_pending: dict[str, dict[str, str]] = {}
+                export_finished: set[str] = set()
+                export_destinations: set[str] = set()
                 for event in events[1:-1]:
-                    name = event.get("name")
-                    kind = event.get("kind")
-                    state = event.get("event")
+                    name, kind, state = event.get("name"), event.get("kind"), event.get("event")
+                    object_id = event.get("object_id")
                     if (
                         not isinstance(name, str)
                         or not isinstance(kind, str)
                         or kind not in {"container", "network", "volume"}
+                        or not re.fullmatch(r"mcpbg-p4-[a-z0-9-]+", name)
                     ):
                         raise P4RecoveryRequired("prior owned ledger resource malformed")
+                    current = pending.get(name)
+                    expected_states = {
+                        "RESERVED": "INTENT",
+                        "CREATE_REQUESTED": "REQUESTED",
+                        "CREATE_CONFIRMED": "CREATED",
+                        "NOT_SUBMITTED": "NEVER_SUBMITTED",
+                        "ABSENCE_VERIFIED": "ABSENT",
+                    }
+                    if state in expected_states and event.get("state") != expected_states[state]:
+                        raise P4RecoveryRequired("prior ledger event state inconsistent")
                     if state == "ARTIFACT_EXPORT_BEGIN":
+                        details = event.get("details")
+                        if not isinstance(details, dict) or set(details) != {
+                            "role",
+                            "volume",
+                            "source",
+                            "destination",
+                        }:
+                            raise P4RecoveryRequired("prior artifact export intent malformed")
+                        role = details.get("role")
+                        source = "/state" if role == "fixture" else "/trusted-output"
+                        volume = details.get("volume")
+                        destination = details.get("destination")
                         if (
-                            kind != "container"
-                            or pending.get(name) != (kind, "CREATED")
-                            or export_pending
+                            role not in {"fixture", "evaluator"}
+                            or details.get("source") != source
+                            or not isinstance(volume, str)
+                            or pending.get(volume) != ("volume", "CREATED", volume)
+                            or not isinstance(destination, str)
+                            or not destination.startswith("/")
+                            or destination in export_destinations
+                            or kind != "container"
+                            or current is None
+                            or current[:2] != (kind, "CREATED")
+                            or object_id != current[2]
+                            or name in export_pending
+                            or name in export_finished
                         ):
-                            raise P4RecoveryRequired("prior export start inconsistent")
-                        export_pending = True
+                            raise P4RecoveryRequired(
+                                "prior export start or volume identity inconsistent"
+                            )
+                        export_pending[name] = details
+                        export_destinations.add(destination)
                         continue
                     if state == "ARTIFACT_EXPORT_COMPLETE":
-                        if kind != "container" or not export_pending or export_finished:
-                            raise P4RecoveryRequired("prior export completion inconsistent")
-                        export_finished = True
+                        details = event.get("details")
+                        intent = export_pending.get(name)
+                        if not isinstance(details, dict) or set(details) != {
+                            "destination",
+                            "archive_sha256",
+                            "archive_bytes",
+                        }:
+                            raise P4RecoveryRequired("prior artifact export completion malformed")
+                        if (
+                            kind != "container"
+                            or intent is None
+                            or details.get("destination") != intent["destination"]
+                            or not isinstance(details.get("archive_sha256"), str)
+                            or re.fullmatch(r"[0-9a-f]{64}", details["archive_sha256"]) is None
+                            or type(details.get("archive_bytes")) is not int
+                            or details["archive_bytes"] <= 0
+                            or current is None
+                            or object_id != current[2]
+                        ):
+                            raise P4RecoveryRequired(
+                                "prior export completion or destination inconsistent"
+                            )
+                        del export_pending[name]
+                        export_finished.add(name)
                         continue
-                    if state == "RESERVED":
-                        if name in pending:
-                            raise P4RecoveryRequired("duplicate owned ledger resource")
-                        pending[name] = (kind, "RESERVED")
-                    elif state == "CREATE_REQUESTED" and pending.get(name) == (kind, "RESERVED"):
-                        pending[name] = (kind, "REQUESTED")
-                    elif state == "CREATE_CONFIRMED" and pending.get(name) == (kind, "REQUESTED"):
-                        pending[name] = (kind, "CREATED")
-                    elif state == "NOT_SUBMITTED" and pending.get(name) == (kind, "RESERVED"):
-                        pending[name] = (kind, "NEVER_SUBMITTED")
-                    elif state == "ABSENCE_VERIFIED" and pending.get(name) in {
-                        (kind, "REQUESTED"),
-                        (kind, "CREATED"),
-                    }:
-                        pending[name] = (kind, "ABSENT")
+                    if state == "RESERVED" and current is None and object_id is None:
+                        pending[name] = (kind, "RESERVED", None)
+                    elif (
+                        state == "CREATE_REQUESTED"
+                        and current == (kind, "RESERVED", None)
+                        and object_id is None
+                    ):
+                        pending[name] = (kind, "REQUESTED", None)
+                    elif state == "CREATE_CONFIRMED" and current == (kind, "REQUESTED", None):
+                        if kind == "volume":
+                            valid_id = object_id == name
+                        else:
+                            valid_id = (
+                                isinstance(object_id, str)
+                                and re.fullmatch(r"[0-9a-f]{64}", object_id) is not None
+                            )
+                        if not valid_id:
+                            raise P4RecoveryRequired(
+                                "prior resource immutable ID missing or malformed"
+                            )
+                        pending[name] = (kind, "CREATED", object_id)
+                    elif (
+                        state == "NOT_SUBMITTED"
+                        and current == (kind, "RESERVED", None)
+                        and object_id is None
+                    ):
+                        pending[name] = (kind, "NEVER_SUBMITTED", None)
+                    elif (
+                        state == "ABSENCE_VERIFIED"
+                        and current is not None
+                        and current[:2] in {(kind, "REQUESTED"), (kind, "CREATED")}
+                        and object_id == current[2]
+                        and name not in export_pending
+                    ):
+                        pending[name] = (kind, "ABSENT", object_id)
                     else:
-                        raise P4RecoveryRequired("inconsistent prior owned ledger transition")
-                if export_pending and not export_finished:
+                        raise P4RecoveryRequired("inconsistent prior owned ledger transition or ID")
+                if export_pending:
                     raise P4RecoveryRequired("prior artifact export unresolved")
                 if any(
-                    status not in {"ABSENT", "NEVER_SUBMITTED"} for _, status in pending.values()
+                    status not in {"ABSENT", "NEVER_SUBMITTED"} for _, status, _ in pending.values()
                 ):
                     raise P4RecoveryRequired("prior owned resources not verified absent")
+
         except P4RecoveryRequired:
             self.recovery_required = True
             raise
@@ -625,8 +787,31 @@ class OwnedDockerAttempt:
             raise P4AdapterError("attempt ID is not a safe owned resource prefix")
         if self._entered or not isinstance(self.ledger_path, Path):
             raise P4AdapterError("attempt identity or ledger path invalid")
-        self._lease = bounds.AttemptLease(self.lease_path, self.policy)
+        if (
+            type(self.daemon_context) is not str
+            or not self.daemon_context
+            or type(self.daemon_identity) is not str
+            or not self.daemon_identity
+            or len(self.daemon_context) > 128
+            or len(self.daemon_identity) > 128
+        ):
+            raise P4AdapterError("invalid Docker daemon execution scope")
+        if self.lease_path.parent.absolute() != self.ledger_path.parent.absolute():
+            raise P4AdapterError("ledger and lease scope directories differ")
+        self._lease = PrivateAttemptLease(self.lease_path)
         self._lease.__enter__()
+        self._lock_identity = self._lease.identity
+        self._scope_digest = hashlib.sha256(
+            json.dumps(
+                [
+                    str(self.lease_path.resolve(strict=True)),
+                    self._lock_identity,
+                    self.daemon_context,
+                    self.daemon_identity,
+                ],
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
         try:
             if not re.fullmatch(r"owned-[a-zA-Z0-9._-]+\.jsonl", self.ledger_path.name):
                 raise P4AdapterError("ledger name must use owned-*.jsonl")
@@ -661,6 +846,7 @@ class OwnedDockerAttempt:
             self._record(
                 "FINISH_CLEAN" if clean and not self.recovery_required else "FINISH_UNKNOWN"
             )
+            self._durably_finished = True
         finally:
             if self._ledger_fd is not None:
                 os.close(self._ledger_fd)
@@ -677,6 +863,11 @@ class OwnedDockerAttempt:
     ) -> CommandResult:
         if not self._entered:
             raise P4AdapterError("attempt lease must be active")
+        if isinstance(self.run, BoundedProcess) and (
+            self.daemon_context == "source-only-unbound"
+            or self.daemon_identity == "source-only-unbound"
+        ):
+            raise P4AdapterError("Docker daemon identity must be independently bound")
         if cleanup and build:
             raise P4AdapterError("build cannot use the cleanup output reserve")
         subprocess_policy = bounds.subprocess_limits(self.policy)
@@ -1156,7 +1347,11 @@ class OwnedDockerAttempt:
             config = parsed.get("Config")
             host = parsed.get("HostConfig")
             state = parsed.get("State")
-            if not all(isinstance(x, dict) for x in (config, host, state)):
+            if (
+                not isinstance(config, dict)
+                or not isinstance(host, dict)
+                or not isinstance(state, dict)
+            ):
                 raise P4AdapterError("Docker effective config missing")
             limit = bounds._limits(self.policy, "docker_runtime")
             artifacts = bounds._limits(self.policy, "artifacts")
@@ -1252,11 +1447,12 @@ class OwnedDockerAttempt:
     def export_paused_fixed_artifacts(
         self, item: OwnedItem, authority_raw: bytes, *, role: str, destination: Path
     ) -> dict[str, int | str]:
-        """Disabled: docker cp cannot export a Docker tmpfs or named mount.
+        """Stream one owned, mounted volume through Engine's archive interface.
 
-        A future volume-backed exporter must independently prove its own
-        immutable identity, writer fence and daemon-side cleanup. This source
-        branch does not authorize execution, publishing or proof.
+        The Engine archive route is qualified source behavior, not native proof.
+        The caller must separately complete the fixture's transaction/finalization
+        protocol before the verified pause and retain the writer's volume mount
+        until the stream and publication finish. No shell or exec is involved.
         """
         if (
             not self._entered
@@ -1264,13 +1460,121 @@ class OwnedDockerAttempt:
             or item.kind != "container"
             or item.state != "CREATED"
             or not item.prestart_attested
+            or not item.mounted_attested
             or not isinstance(item.object_id, str)
+            or re.fullmatch(r"[0-9a-f]{64}", item.object_id) is None
+            or role not in {"fixture", "evaluator"}
         ):
-            raise P4AdapterError("verified prestart-attested owned container required")
-        self.recovery_required = True
-        raise P4RecoveryRequired(
-            "physical artifact export UNKNOWN; unsupported Docker cp from mounted filesystem"
+            raise P4AdapterError("verified mounted prestart-attested owned container required")
+        approved_fixture_image(
+            authority_raw, role=role, image=json.loads(authority_raw)["runtime"]["images"][role]
         )
+        path = "/state" if role == "fixture" else "/trusted-output"
+        if item.planned_mounts is None or set(item.planned_mounts) != {path}:
+            raise P4AdapterError("export source must be the exact owned role volume")
+        volume = item.planned_mounts[path]
+        if not any(
+            owned.kind == "volume"
+            and owned.name == volume
+            and owned.state == "CREATED"
+            and owned.artifact_tmpfs_attested
+            and owned.object_id == volume
+            for owned in self.items
+        ):
+            raise P4AdapterError("export volume identity not retained")
+        if not isinstance(destination, Path) or destination.is_symlink() or destination.exists():
+            raise P4AdapterError("export destination already exists or is invalid")
+        if self.attempt_deadline is None:
+            raise P4AdapterError("export deadline not available")
+        deadline = time.monotonic() + self.attempt_deadline.remaining()
+        if deadline <= time.monotonic():
+            raise P4AdapterError("export deadline expired")
+        intended = str(destination.absolute())
+        if len(intended) > 300:
+            raise P4AdapterError("export destination too long for durable intent")
+        # Log *before* remote archive operation; uncertain CLI side effects stay
+        # UNKNOWN and may leave a valid destination for finish-only recovery.
+        self._record(
+            "ARTIFACT_EXPORT_BEGIN",
+            item,
+            details={"role": role, "volume": volume, "source": path, "destination": intended},
+        )
+        try:
+            result = self._checked_call(
+                ["docker", "container", "inspect", "--format", "{{json .}}", item.object_id]
+            )
+            if result.exit_code != 0:
+                raise P4AdapterError("cannot verify writer fence")
+            json_rules = bounds._mapping(self.policy.get("json_intake"), "json_intake")
+            observed = bounds._load_object_bytes(
+                result.stdout,
+                max_bytes=bounds._positive_int(json_rules.get("max_bytes"), "json.max_bytes"),
+                label="paused export inspection",
+                shape=json_rules,
+            )
+            bounds._validate_json_shape(observed, json_rules)
+            state, config, mounts = (
+                observed.get("State"),
+                observed.get("Config"),
+                observed.get("Mounts"),
+            )
+            if (
+                not isinstance(state, dict)
+                or state.get("Running") is not True
+                or state.get("Paused") is not True
+                or not isinstance(config, dict)
+                or observed.get("Id") != item.object_id
+                or observed.get("Name") != "/" + item.name
+                or config.get("Labels", {}).get("mcpbg.p4.owner") != self.attempt_id
+                or not isinstance(mounts, list)
+                or len(mounts) != 1
+                or not isinstance(mounts[0], dict)
+                or any(
+                    mounts[0].get(key) != value
+                    for key, value in {
+                        "Name": volume,
+                        "Type": "volume",
+                        "Destination": path,
+                        "RW": True,
+                    }.items()
+                )
+            ):
+                raise P4AdapterError("paused source identity, fence or volume differs")
+            approved = json.loads(authority_raw)["runtime"]["images"][role]
+            if config.get("Image") != approved:
+                raise P4AdapterError("paused exporter image differs from reference role")
+            archive_policy = bounds._mapping(
+                self.policy.get("archive_extraction"), "archive_extraction"
+            )
+            max_bytes = bounds._positive_int(
+                archive_policy.get("compressed_bytes"), "archive bytes"
+            )
+            command = ["docker", "container", "cp", f"{item.object_id}:{path}", "-"]
+            # Explicit generator close terminates and reaps the CLI when intake
+            # stops before consuming the stream. Daemon completion still needs proof.
+            with contextlib.closing(
+                _bounded_archive_process(command, deadline=deadline, byte_limit=max_bytes)
+            ) as chunks:
+                export = receive_bounded_artifact_archive(
+                    chunks, destination, self.policy, deadline=deadline
+                )
+            self._record(
+                "ARTIFACT_EXPORT_COMPLETE",
+                item,
+                details={
+                    "destination": intended,
+                    "archive_sha256": export["archive_sha256"],
+                    "archive_bytes": export["archive_bytes"],
+                },
+            )
+            return export
+        except BaseException as exc:
+            self.recovery_required = True
+            if isinstance(exc, P4RecoveryRequired):
+                raise
+            raise P4RecoveryRequired(
+                "Engine archive export or publication UNKNOWN; retain intent and output"
+            ) from exc
 
     # BuildKit execution is deferred until its image is pinned by digest and its
     # extra daemon container, cache volume, loaded image and cleanup are owned.
@@ -1359,9 +1663,16 @@ class OwnedDockerAttempt:
         return clean
 
     def cleanup_result(self) -> dict[str, Any]:
-        verified_absent = all(item.state in {"ABSENT", "NEVER_SUBMITTED"} for item in self.items)
-        if self.recovery_required or not verified_absent:
+        if self.recovery_required:
             return {"outcome": "UNKNOWN", "recovery_required": True}
+        if not self._durably_finished:
+            if self._entered or self._ledger_fd is not None:
+                return {"outcome": "OPEN", "recovery_required": False}
+            return {"outcome": "NOT_STARTED", "recovery_required": False}
+        if not all(item.state in {"ABSENT", "NEVER_SUBMITTED"} for item in self.items):
+            return {"outcome": "UNKNOWN", "recovery_required": True}
+        if not self.items:
+            return {"outcome": "NO_DOCKER_OPERATION", "recovery_required": False}
         return {"outcome": "CLEAN", "recovery_required": False}
 
 
@@ -1379,4 +1690,20 @@ def adapter_binding(module_path: Path, trust: dict[str, Any]) -> dict[str, Any]:
     }
     if trust.get("p4_trusted_runtime_adapter") != expected:
         raise P4AdapterError("trusted runtime adapter module binding mismatch")
+    return expected
+
+
+def metered_relay_binding(module_path: Path, trust: dict[str, Any]) -> dict[str, Any]:
+    """Bind the separately reviewed P4 relay program; no P3 role inheritance."""
+    expected = {
+        "status": "SOURCE_ONLY_NOT_RUNTIME_ATTESTED",
+        "stage": "P4_FIXTURE_TRANSPORT_INTERCEPTION",
+        "module_path": "assurance/phase2/ci/p4_metered_fixture_relay.py",
+        "module_sha256": hashlib.sha256(module_path.read_bytes()).hexdigest(),
+        "candidate_execution_enabled": False,
+        "runtime_enforcement_proven": False,
+        "verdict_publication_enabled": False,
+    }
+    if trust.get("p4_metered_fixture_relay") != expected:
+        raise P4AdapterError("trusted fixture relay source binding mismatch")
     return expected

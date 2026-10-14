@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -14,6 +16,22 @@ MODULE = CI / "p4_trusted_runtime_adapter.py"
 POLICY = CI / "p4-resource-policy.json"
 AUTHORITY = CI / "p3-promoted-authority.json"
 TRUST = CI / "trust-boundary.json"
+
+
+def _ledger_identity(lock: Path) -> dict[str, str]:
+    lock.touch(exist_ok=True, mode=0o600)
+    info = lock.stat()
+    inode = f"{info.st_dev}:{info.st_ino}"
+    daemon = "source-only-unbound"
+    scope = hashlib.sha256(
+        json.dumps([str(lock.resolve()), inode, daemon, daemon], separators=(",", ":")).encode()
+    ).hexdigest()
+    return {
+        "lease_scope_sha256": scope,
+        "lock_identity": inode,
+        "daemon_context": daemon,
+        "daemon_identity": daemon,
+    }
 
 
 def _module() -> ModuleType:
@@ -203,10 +221,12 @@ def test_partial_create_and_foreign_object_require_recovery(tmp_path: Path) -> N
     assert attempt.recovery_required is True
     assert attempt.cleanup_result()["outcome"] == "UNKNOWN"
     foreign = FakeDocker(foreign_owner=True)
+    next_state = tmp_path / "other-state"
+    next_state.mkdir(mode=0o700)
     with (
         pytest.raises(module.P4RecoveryRequired),
         module.OwnedDockerAttempt(
-            policy, "f14", tmp_path / "global2.lock", tmp_path / "owned-f14.jsonl", run=foreign
+            policy, "f14", next_state / "global2.lock", next_state / "owned-f14.jsonl", run=foreign
         ) as other,
     ):
         other.create_network()
@@ -322,7 +342,7 @@ def test_forged_clean_ending_does_not_hide_unresolved_resources(tmp_path: Path) 
     policy, _ = _inputs(module)
     fake = FakeDocker()
     lock = tmp_path / "global.lock"
-    scope = __import__("hashlib").sha256(str(lock.absolute()).encode()).hexdigest()
+    scope_info = _ledger_identity(lock)
 
     def row(event, **fields):
         return (
@@ -331,8 +351,8 @@ def test_forged_clean_ending_does_not_hide_unresolved_resources(tmp_path: Path) 
                     event=event,
                     attempt="first",
                     nonce="deadbeef",
-                    lease_scope_sha256=scope,
                     utc_epoch=1,
+                    **scope_info,
                     **fields,
                 ),
                 sort_keys=True,
@@ -359,6 +379,7 @@ def test_forged_clean_ending_does_not_hide_unresolved_resources(tmp_path: Path) 
         + row("FINISH_CLEAN"),
         encoding="utf-8",
     )
+    (tmp_path / "owned-first.jsonl").chmod(0o600)
     with (
         pytest.raises(module.P4RecoveryRequired, match="not verified absent"),
         module.OwnedDockerAttempt(
@@ -414,15 +435,18 @@ def test_prior_ledger_kind_cannot_change_between_events(tmp_path: Path) -> None:
     policy, _ = _inputs(module)
     fake = FakeDocker()
     lock = tmp_path / "global.lock"
-    scope = __import__("hashlib").sha256(str(lock.absolute()).encode()).hexdigest()
+    scope_info = _ledger_identity(lock)
     name = "mcpbg-p4-first-deadbeef-container-1"
 
     def row(event: str, kind: str | None = None) -> str:
-        value = dict(
-            event=event, attempt="first", nonce="deadbeef", lease_scope_sha256=scope, utc_epoch=1
-        )
+        value = dict(event=event, attempt="first", nonce="deadbeef", utc_epoch=1, **scope_info)
         if kind is not None:
-            value.update(kind=kind, name=name, state="CREATED", object_id=None)
+            states = {
+                "RESERVED": "INTENT",
+                "CREATE_REQUESTED": "REQUESTED",
+                "ABSENCE_VERIFIED": "ABSENT",
+            }
+            value.update(kind=kind, name=name, state=states[event], object_id=None)
         return json.dumps(value, sort_keys=True) + "\n"
 
     (tmp_path / "owned-first.jsonl").write_text(
@@ -433,6 +457,7 @@ def test_prior_ledger_kind_cannot_change_between_events(tmp_path: Path) -> None:
         + row("FINISH_CLEAN"),
         encoding="utf-8",
     )
+    (tmp_path / "owned-first.jsonl").chmod(0o600)
     with (
         pytest.raises(module.P4RecoveryRequired, match="inconsistent prior"),
         module.OwnedDockerAttempt(
@@ -880,35 +905,38 @@ def test_v9_paused_export_malformed_daemon_state_fail_closed(tmp_path: Path) -> 
     policy, authority = _inputs(module)
     sys.modules["p4_trusted_runtime_adapter"] = module
     fake = FakeDocker()
-    image = json.loads(authority)["runtime"]["images"]["evaluator"]
+    output = tmp_path / "private"
+    output.mkdir(mode=0o700)
     with (
         pytest.raises(module.P4RecoveryRequired, match="owned cleanup is UNKNOWN"),
         module.OwnedDockerAttempt(
             policy, "paused", tmp_path / "global.lock", tmp_path / "owned-paused.jsonl", run=fake
         ) as attempt,
     ):
-        item = attempt.create_fixed_container(image, authority, role="evaluator")
-        item.prestart_attested = True  # synthetic pre-start boundary
-        try:
+        volume = attempt._reserve("volume")
+        volume.state, volume.object_id = "CREATED", volume.name
+        volume.artifact_tmpfs_attested, volume.artifact_owner_uid = True, 10003
+        item = attempt._reserve("container")
+        item.state, item.object_id = "CREATED", "a" * 64
+        item.prestart_attested = item.mounted_attested = True
+        item.planned_mounts = {"/trusted-output": volume.name}
+        with pytest.raises(
+            module.P4RecoveryRequired, match="archive export or publication UNKNOWN"
+        ):
             attempt.export_paused_fixed_artifacts(
-                item, authority, role="evaluator", destination=tmp_path / "published"
+                item, authority, role="evaluator", destination=output / "published"
             )
-        except module.P4RecoveryRequired as exc:
-            assert "export UNKNOWN" in str(exc)
-        else:
-            raise AssertionError("untrusted Docker inspect must not authorize export")
     assert attempt.cleanup_result()["outcome"] == "UNKNOWN"
-    assert not (tmp_path / "published").exists()
-    assert all(command[:2] != ["docker", "cp"] for command in fake.commands)
+    assert not (output / "published").exists()
+    assert not any(command[:3] == ["docker", "container", "cp"] for command in fake.commands)
 
 
 def test_v9_unfinished_artifact_export_blocks_next_attempt(tmp_path: Path) -> None:
     module = _module()
-    import hashlib
 
     policy, _ = _inputs(module)
     lock = tmp_path / "global.lock"
-    scope = hashlib.sha256(str(lock.absolute()).encode()).hexdigest()
+    scope_info = _ledger_identity(lock)
     name = "mcpbg-p4-first-deadbeef-container-1"
 
     def row(event: str, resource: bool = False) -> str:
@@ -916,11 +944,30 @@ def test_v9_unfinished_artifact_export_blocks_next_attempt(tmp_path: Path) -> No
             "event": event,
             "attempt": "first",
             "nonce": "deadbeef",
-            "lease_scope_sha256": scope,
             "utc_epoch": 1,
+            **scope_info,
         }
         if resource:
-            value.update(kind="container", name=name, state="CREATED", object_id="a" * 64)
+            known_id = (
+                "a" * 64
+                if event in {"CREATE_CONFIRMED", "ARTIFACT_EXPORT_BEGIN", "ABSENCE_VERIFIED"}
+                else None
+            )
+            states = {
+                "RESERVED": "INTENT",
+                "CREATE_REQUESTED": "REQUESTED",
+                "CREATE_CONFIRMED": "CREATED",
+                "ARTIFACT_EXPORT_BEGIN": "CREATED",
+                "ABSENCE_VERIFIED": "ABSENT",
+            }
+            value.update(kind="container", name=name, state=states[event], object_id=known_id)
+        if event == "ARTIFACT_EXPORT_BEGIN":
+            value["details"] = {
+                "role": "evaluator",
+                "volume": "mcpbg-p4-first-deadbeef-volume-1",
+                "source": "/trusted-output",
+                "destination": "/tmp/out",
+            }
         return json.dumps(value, sort_keys=True) + "\n"
 
     (tmp_path / "owned-first.jsonl").write_text(
@@ -933,8 +980,9 @@ def test_v9_unfinished_artifact_export_blocks_next_attempt(tmp_path: Path) -> No
         + row("FINISH_CLEAN"),
         encoding="utf-8",
     )
+    (tmp_path / "owned-first.jsonl").chmod(0o600)
     with (
-        pytest.raises(module.P4RecoveryRequired, match="prior artifact export unresolved"),
+        pytest.raises(module.P4RecoveryRequired, match="prior export"),
         module.OwnedDockerAttempt(policy, "second", lock, tmp_path / "owned-second.jsonl"),
     ):
         pass
@@ -947,19 +995,16 @@ def test_v10_unsupported_tmpfs_docker_cp_is_fail_closed(tmp_path: Path) -> None:
     sys.modules["p4_trusted_runtime_adapter"] = module
     fake = FakeDocker()
     image = json.loads(authority)["runtime"]["images"]["evaluator"]
-    with (
-        pytest.raises(module.P4RecoveryRequired, match="owned cleanup is UNKNOWN"),
-        module.OwnedDockerAttempt(
-            policy, "legacy", tmp_path / "global.lock", tmp_path / "owned-legacy.jsonl", run=fake
-        ) as attempt,
-    ):
+    with module.OwnedDockerAttempt(
+        policy, "legacy", tmp_path / "global.lock", tmp_path / "owned-legacy.jsonl", run=fake
+    ) as attempt:
         item = attempt.create_fixed_container(image, authority, role="evaluator")
         item.prestart_attested = True
-        with pytest.raises(module.P4RecoveryRequired, match="unsupported"):
+        with pytest.raises(module.P4AdapterError, match="verified mounted"):
             attempt.export_paused_fixed_artifacts(
                 item, authority, role="evaluator", destination=tmp_path / "published"
             )
-    assert not any(command[:2] == ["docker", "cp"] for command in fake.commands)
+    assert not any(command[:3] == ["docker", "container", "cp"] for command in fake.commands)
     assert not (tmp_path / "published").exists()
 
 
@@ -997,7 +1042,7 @@ def test_v10_artifact_volume_inspection_rejects_drift(tmp_path: Path, bad: str) 
                 if bad == "malformed":
                     return CommandResult(0, b"not-json", b"", 8)
                 raw = json.dumps(doc).encode()
-                return CommandResult(0, raw, b"", len(raw))
+                return module.CommandResult(0, raw, b"", len(raw))
             return super().__call__(
                 argv,
                 timeout=timeout,
@@ -1125,7 +1170,6 @@ def test_v11_missing_fixture_state_binding_fails_before_docker_create(tmp_path: 
     sys.modules["p4_trusted_runtime_adapter"] = module
     role = "fixture"
     image = json.loads(authority)["runtime"]["images"][role]
-    from p4_trusted_runtime_adapter import CommandResult
 
     class ImageFake(FakeDocker):
         def __call__(self, argv, *, timeout, output_budget, retained_per_stream):
@@ -1135,7 +1179,7 @@ def test_v11_missing_fixture_state_binding_fails_before_docker_create(tmp_path: 
                 raw = json.dumps(
                     {"RepoDigests": [image], "Config": {"Volumes": {"/state": {}}}}
                 ).encode()
-                return CommandResult(0, raw, b"", len(raw))
+                return module.CommandResult(0, raw, b"", len(raw))
             return super().__call__(
                 argv,
                 timeout=timeout,
@@ -1158,7 +1202,6 @@ def test_v11_image_declared_volume_inventory_fails_closed(tmp_path: Path, case: 
     policy, authority = _inputs(module)
     sys.modules["p4_trusted_runtime_adapter"] = module
     image = json.loads(authority)["runtime"]["images"]["fixture"]
-    from p4_trusted_runtime_adapter import CommandResult
 
     class ImageFake(FakeDocker):
         def __call__(self, argv, *, timeout, output_budget, retained_per_stream):
@@ -1173,7 +1216,7 @@ def test_v11_image_declared_volume_inventory_fails_closed(tmp_path: Path, case: 
                 if case == "invalid_shape":
                     doc["Config"]["Volumes"] = ["/state"]
                 raw = b"not-json" if case == "bad_bytes" else json.dumps(doc).encode()
-                return CommandResult(0, raw, b"", len(raw))
+                return module.CommandResult(0, raw, b"", len(raw))
             return super().__call__(
                 argv,
                 timeout=timeout,
@@ -1281,7 +1324,6 @@ def test_v12_mounted_effective_inspection_requires_exact_owned_volumes(
     policy, authority = _inputs(module)
     sys.modules["p4_trusted_runtime_adapter"] = module
     image = json.loads(authority)["runtime"]["images"]["fixture"]
-    from p4_trusted_runtime_adapter import CommandResult
 
     class MountedFake(EffectiveConfigFake):
         def __call__(self, argv, *, timeout, output_budget, retained_per_stream):
@@ -1304,7 +1346,7 @@ def test_v12_mounted_effective_inspection_requires_exact_owned_volumes(
                     for dest, name in sorted(self.planned.items())
                 ]
                 raw = json.dumps(doc).encode()
-                return CommandResult(0, raw, b"", len(raw))
+                return module.CommandResult(0, raw, b"", len(raw))
             return result
 
     fake = MountedFake(image, policy)
@@ -1377,7 +1419,6 @@ def test_v13_volume_creation_seals_uid_and_gid_for_pinned_role(
     module = _module()
     policy, _ = _inputs(module)
     sys.modules["p4_trusted_runtime_adapter"] = module
-    from p4_trusted_runtime_adapter import CommandResult
 
     class VolumeFake(FakeDocker):
         def __call__(self, argv, *, timeout, output_budget, retained_per_stream):
@@ -1397,7 +1438,7 @@ def test_v13_volume_creation_seals_uid_and_gid_for_pinned_role(
                         "Labels": {"mcpbg.p4.owner": "v13role"},
                     }
                 ).encode()
-                return CommandResult(0, raw, b"", len(raw))
+                return module.CommandResult(0, raw, b"", len(raw))
             return super().__call__(
                 argv,
                 timeout=timeout,
@@ -1614,7 +1655,7 @@ def test_v15_legacy_fixture_create_rejects_implicit_anonymous_state_volume(
             attempt.create_fixed_container(image, authority, role="fixture")
         assert len(fake.commands) == before
         assert attempt.items == []
-    assert attempt.cleanup_result()["outcome"] == "CLEAN"
+    assert attempt.cleanup_result()["outcome"] == "NO_DOCKER_OPERATION"
 
 
 @pytest.mark.parametrize(
@@ -1634,7 +1675,6 @@ def test_v17_required_mounts_are_role_specific_and_within_two_volume_limit(
     if role not in images:
         pytest.skip("synthetic authority lacks this fixed role")
     image = images[role]
-    from p4_trusted_runtime_adapter import CommandResult
 
     class ImageFake(FakeDocker):
         def __call__(self, argv, *, timeout, output_budget, retained_per_stream):
@@ -1643,7 +1683,7 @@ def test_v17_required_mounts_are_role_specific_and_within_two_volume_limit(
                 self.commands.append(args)
                 declared = {"/state": {}} if role == "fixture" else {}
                 raw = json.dumps({"RepoDigests": [image], "Config": {"Volumes": declared}}).encode()
-                return CommandResult(0, raw, b"", len(raw))
+                return module.CommandResult(0, raw, b"", len(raw))
             return super().__call__(
                 argv,
                 timeout=timeout,
@@ -1682,7 +1722,6 @@ def test_v17_extra_fixture_output_mount_is_rejected_before_container_creation(
     policy, authority = _inputs(module)
     sys.modules["p4_trusted_runtime_adapter"] = module
     image = json.loads(authority)["runtime"]["images"]["fixture"]
-    from p4_trusted_runtime_adapter import CommandResult
 
     class ImageFake(FakeDocker):
         def __call__(self, argv, *, timeout, output_budget, retained_per_stream):
@@ -1692,7 +1731,7 @@ def test_v17_extra_fixture_output_mount_is_rejected_before_container_creation(
                 raw = json.dumps(
                     {"RepoDigests": [image], "Config": {"Volumes": {"/state": {}}}}
                 ).encode()
-                return CommandResult(0, raw, b"", len(raw))
+                return module.CommandResult(0, raw, b"", len(raw))
             return super().__call__(
                 argv,
                 timeout=timeout,
@@ -1747,3 +1786,422 @@ def test_v17_fixture_plus_evaluator_budget_is_exactly_two(tmp_path: Path) -> Non
         assert len(attempt.items) == 2
         assert not fake.commands
     assert attempt.cleanup_result()["outcome"] == "CLEAN"
+
+
+@pytest.mark.parametrize(
+    "alias", ["symlink-parent", "relative-parent", "symlink-lock", "hardlink-lock"]
+)
+def test_r27_alias_paths_cannot_partition_recovery(tmp_path: Path, alias: str) -> None:
+    module = _module()
+    policy, _ = _inputs(module)
+    sys.modules["p4_trusted_runtime_adapter"] = module
+    lock = tmp_path / "shared.lock"
+    with module.OwnedDockerAttempt(
+        policy, "before", lock, tmp_path / "owned-before.jsonl", run=FakeDocker()
+    ):
+        pass
+    # Preserve an unresolved prior ledger for the same physical state directory.
+    events = (tmp_path / "owned-before.jsonl").read_text().splitlines()
+    events[-1] = events[-1].replace("FINISH_CLEAN", "FINISH_UNKNOWN")
+    (tmp_path / "owned-before.jsonl").write_text("\n".join(events) + "\n")
+    if alias == "symlink-parent":
+        indirect = tmp_path.parent / (tmp_path.name + "-alias")
+        indirect.symlink_to(tmp_path, target_is_directory=True)
+        new_lock, new_ledger = indirect / "shared.lock", indirect / "owned-after.jsonl"
+    elif alias == "relative-parent":
+        new_lock, new_ledger = (
+            tmp_path / "sub" / ".." / "shared.lock",
+            tmp_path / "sub" / ".." / "owned-after.jsonl",
+        )
+        (tmp_path / "sub").mkdir()
+    elif alias == "symlink-lock":
+        new_lock = tmp_path / "other.lock"
+        new_lock.symlink_to(lock)
+        new_ledger = tmp_path / "owned-after.jsonl"
+    else:
+        new_lock = tmp_path / "other.lock"
+        os.link(lock, new_lock)
+        new_ledger = tmp_path / "owned-after.jsonl"
+    with (
+        pytest.raises((module.P4AdapterError, module.P4RecoveryRequired, OSError)),
+        module.OwnedDockerAttempt(policy, "after", new_lock, new_ledger, run=FakeDocker()),
+    ):
+        pass
+    assert not (tmp_path / "owned-after.jsonl").exists()
+
+
+def test_r27_replaced_lock_inode_and_changed_daemon_reject(tmp_path: Path) -> None:
+    module = _module()
+    policy, _ = _inputs(module)
+    fake = FakeDocker()
+    lock = tmp_path / "shared.lock"
+    with module.OwnedDockerAttempt(
+        policy,
+        "first",
+        lock,
+        tmp_path / "owned-first.jsonl",
+        run=fake,
+        daemon_context="desktop-linux",
+        daemon_identity="engine-a",
+    ):
+        pass
+    with (
+        pytest.raises(module.P4RecoveryRequired, match="scope/daemon mismatch"),
+        module.OwnedDockerAttempt(
+            policy,
+            "second",
+            lock,
+            tmp_path / "owned-second.jsonl",
+            run=fake,
+            daemon_context="desktop-linux",
+            daemon_identity="engine-b",
+        ),
+    ):
+        pass
+    assert not (tmp_path / "owned-second.jsonl").exists()
+    lock.rename(tmp_path / "retired.lock")
+    lock.touch(mode=0o600)
+    with (
+        pytest.raises(module.P4RecoveryRequired, match="scope/daemon mismatch"),
+        module.OwnedDockerAttempt(
+            policy,
+            "third",
+            lock,
+            tmp_path / "owned-third.jsonl",
+            run=fake,
+            daemon_context="desktop-linux",
+            daemon_identity="engine-a",
+        ),
+    ):
+        pass
+
+
+@pytest.mark.parametrize("kind", ["container", "network", "volume"])
+def test_r27_clean_ledger_must_prove_same_resource_id(tmp_path: Path, kind: str) -> None:
+    module = _module()
+    policy, _ = _inputs(module)
+    fake = FakeDocker()
+    sys.modules["p4_trusted_runtime_adapter"] = module
+    lock, ledger = tmp_path / "shared.lock", tmp_path / "owned-first.jsonl"
+    with module.OwnedDockerAttempt(policy, "first", lock, ledger, run=fake) as attempt:
+        if kind == "container":
+            authority = AUTHORITY.read_bytes()
+            image = json.loads(authority)["runtime"]["images"]["evaluator"]
+            attempt.create_fixed_container(image, authority, role="evaluator")
+        elif kind == "network":
+            attempt.create_network()
+        else:
+            attempt.create_volume()
+    events = [json.loads(line) for line in ledger.read_text().splitlines()]
+    index = next(i for i, row in enumerate(events) if row["event"] == "ABSENCE_VERIFIED")
+    events[index]["object_id"] = "f" * 64 if kind != "volume" else "different-owned-volume"
+    ledger.write_text("".join(json.dumps(e, sort_keys=True) + "\n" for e in events))
+    with (
+        pytest.raises(module.P4RecoveryRequired, match="transition or ID"),
+        module.OwnedDockerAttempt(
+            policy, "second", lock, tmp_path / "owned-second.jsonl", run=fake
+        ),
+    ):
+        pass
+    assert not (tmp_path / "owned-second.jsonl").exists()
+
+
+def test_r27_cleanup_lifecycle_distinguishes_open_and_noop(tmp_path: Path) -> None:
+    module = _module()
+    policy, _ = _inputs(module)
+    attempt = module.OwnedDockerAttempt(
+        policy, "noop", tmp_path / "shared.lock", tmp_path / "owned-noop.jsonl", run=FakeDocker()
+    )
+    assert attempt.cleanup_result() == {"outcome": "NOT_STARTED", "recovery_required": False}
+    with attempt:
+        assert attempt.cleanup_result() == {"outcome": "OPEN", "recovery_required": False}
+    assert attempt.cleanup_result() == {
+        "outcome": "NO_DOCKER_OPERATION",
+        "recovery_required": False,
+    }
+    assert [
+        json.loads(line)["event"]
+        for line in (tmp_path / "owned-noop.jsonl").read_text().splitlines()
+    ] == ["ATTEMPT_OPEN", "FINISH_CLEAN"]
+
+
+def test_r27_failed_final_ledger_fsync_does_not_claim_clean(tmp_path: Path) -> None:
+    module = _module()
+    policy, _ = _inputs(module)
+    attempt = module.OwnedDockerAttempt(
+        policy,
+        "failedfinish",
+        tmp_path / "shared.lock",
+        tmp_path / "owned-failed.jsonl",
+        run=FakeDocker(),
+    )
+    original = attempt._record
+
+    def reject_final(event, item=None):
+        if event == "FINISH_CLEAN":
+            attempt.recovery_required = True
+            raise module.P4RecoveryRequired("synthetic final fsync failure")
+        return original(event, item)
+
+    attempt._record = reject_final
+    with pytest.raises(module.P4RecoveryRequired, match="synthetic final fsync"), attempt:
+        pass
+    assert attempt.cleanup_result() == {"outcome": "UNKNOWN", "recovery_required": True}
+    with (
+        pytest.raises(module.P4RecoveryRequired),
+        module.OwnedDockerAttempt(
+            policy,
+            "next",
+            tmp_path / "shared.lock",
+            tmp_path / "owned-next.jsonl",
+            run=FakeDocker(),
+        ),
+    ):
+        pass
+
+
+@pytest.mark.parametrize(
+    "role,path,uid", [("fixture", "/state", 10001), ("evaluator", "/trusted-output", 10003)]
+)
+def test_r27_engine_archive_source_binding_and_real_pipe(
+    tmp_path: Path, monkeypatch, role: str, path: str, uid: int
+) -> None:
+    import io
+    import tarfile
+
+    module = _module()
+    policy, authority = _inputs(module)
+    image = json.loads(authority)["runtime"]["images"][role]
+    output_root = tmp_path / "result"
+    output_root.mkdir(mode=0o700)
+    commands = []
+
+    class InspectFake(FakeDocker):
+        def __call__(self, argv, *, timeout, output_budget, retained_per_stream):
+            cmd = list(argv)
+            if cmd[:3] == ["docker", "container", "inspect"] and "{{json .}}" in cmd:
+                commands.append(cmd)
+                data = {
+                    "Id": "a" * 64,
+                    "Name": "/" + item.name,
+                    "Config": {"Image": image, "Labels": {"mcpbg.p4.owner": "engine"}},
+                    "State": {"Running": True, "Paused": True},
+                    "Mounts": [
+                        {"Type": "volume", "Destination": path, "Name": volume.name, "RW": True}
+                    ],
+                }
+                raw = json.dumps(data).encode()
+                return module.CommandResult(0, raw, b"", len(raw))
+            return super().__call__(
+                argv,
+                timeout=timeout,
+                output_budget=output_budget,
+                retained_per_stream=retained_per_stream,
+            )
+
+    fake = InspectFake()
+    sys.modules["p4_trusted_runtime_adapter"] = module
+    tar_data = io.BytesIO()
+    with tarfile.open(fileobj=tar_data, mode="w") as f:
+        entry = tarfile.TarInfo("receipt.txt")
+        entry.size = 8
+        f.addfile(entry, io.BytesIO(b"accepted"))
+    data = tar_data.getvalue()
+    run_data = tmp_path / "bounded.tar"
+    run_data.write_bytes(data)
+
+    def actual_archive(argv, *, deadline, byte_limit, stderr_limit=131072):
+        assert argv == ["docker", "container", "cp", "a" * 64 + ":" + path, "-"]
+        yield from module._original_archive_process(
+            [
+                sys.executable,
+                "-c",
+                "import sys;sys.stdout.buffer.write(open(sys.argv[1], 'rb').read())",
+                str(run_data),
+            ],
+            deadline=deadline,
+            byte_limit=byte_limit,
+            stderr_limit=stderr_limit,
+        )
+
+    module._original_archive_process = module._bounded_archive_process
+    monkeypatch.setattr(module, "_bounded_archive_process", actual_archive)
+    with module.OwnedDockerAttempt(
+        policy, "engine", tmp_path / "shared.lock", tmp_path / "owned-engine.jsonl", run=fake
+    ) as attempt:
+        volume = attempt._reserve("volume")
+        volume.state = "REQUESTED"
+        attempt._record("CREATE_REQUESTED", volume)
+        volume.object_id, volume.state = volume.name, "CREATED"
+        volume.artifact_tmpfs_attested, volume.artifact_owner_uid = True, uid
+        attempt._record("CREATE_CONFIRMED", volume)
+        item = attempt._reserve("container")
+        item.state = "REQUESTED"
+        attempt._record("CREATE_REQUESTED", item)
+        item.object_id, item.state = "a" * 64, "CREATED"
+        item.prestart_attested = item.mounted_attested = True
+        item.planned_mounts = {path: volume.name}
+        attempt._record("CREATE_CONFIRMED", item)
+        evidence = attempt.export_paused_fixed_artifacts(
+            item, authority, role=role, destination=output_root / "published"
+        )
+        assert evidence["archive_bytes"] == len(data)
+    assert (output_root / "published" / "receipt.txt").read_bytes() == b"accepted"
+    assert attempt.cleanup_result() == {"outcome": "CLEAN", "recovery_required": False}
+    events = [
+        json.loads(line) for line in (tmp_path / "owned-engine.jsonl").read_text().splitlines()
+    ]
+    assert any(row["event"] == "ARTIFACT_EXPORT_BEGIN" for row in events)
+    assert any(row["event"] == "ARTIFACT_EXPORT_COMPLETE" for row in events)
+    with module.OwnedDockerAttempt(
+        policy, "next", tmp_path / "shared.lock", tmp_path / "owned-next.jsonl", run=FakeDocker()
+    ) as closed:
+        assert closed.cleanup_result()["outcome"] == "OPEN"
+
+
+def test_r27_archive_outer_deadline_is_forwarded_to_extractor(tmp_path: Path, monkeypatch) -> None:
+    module = _module()
+    policy, _ = _inputs(module)
+    parent = tmp_path / "private"
+    parent.mkdir(mode=0o700)
+    received = []
+
+    def nested(_source, _destination, _policy, *, deadline):
+        received.append(deadline)
+        raise module.bounds.P4ResourceEnforcementError("synthetic nested expiry")
+
+    monkeypatch.setattr(module.bounds, "safe_extract_archive", nested)
+    target_deadline = module.time.monotonic() + 1.0
+    with pytest.raises(module.P4AdapterError, match="artifact archive intake invalid"):
+        module.receive_bounded_artifact_archive(
+            [b"archive"], parent / "published", policy, deadline=target_deadline
+        )
+    assert received == [target_deadline]
+    assert not (parent / "published").exists()
+
+
+def _synthetic_two_export_ledger(module, policy, tmp_path: Path) -> tuple[Path, Path, list[dict]]:
+    """Durable replay fixture only. No Docker operation or approval evidence."""
+    lock = tmp_path / "shared.lock"
+    ledger = tmp_path / "owned-first.jsonl"
+    with module.OwnedDockerAttempt(
+        policy,
+        "first",
+        lock,
+        ledger,
+        run=FakeDocker(),
+    ):
+        pass
+    rows = [json.loads(line) for line in ledger.read_text().splitlines()]
+    base = rows[0]
+
+    def event(kind: str, name: str, action: str, state: str, identity, details=None):
+        row = {
+            **base,
+            "event": action,
+            "kind": kind,
+            "name": name,
+            "state": state,
+            "object_id": identity,
+        }
+        if details is not None:
+            row["details"] = details
+        return row
+
+    volumes = [f"mcpbg-p4-first-abcdef0123-volume-{n}" for n in (1, 2)]
+    containers = [f"mcpbg-p4-first-abcdef0123-container-{n}" for n in (1, 2)]
+    identities = ["a" * 64, "b" * 64]
+    actions = []
+    for kind, names, ids in (("volume", volumes, volumes), ("container", containers, identities)):
+        for name, identity in zip(names, ids, strict=True):
+            actions += [
+                event(kind, name, "RESERVED", "INTENT", None),
+                event(kind, name, "CREATE_REQUESTED", "REQUESTED", None),
+                event(kind, name, "CREATE_CONFIRMED", "CREATED", identity),
+            ]
+    for role, volume, container, identity, source in zip(
+        ("fixture", "evaluator"),
+        volumes,
+        containers,
+        identities,
+        ("/state", "/trusted-output"),
+        strict=True,
+    ):
+        destination = f"/private/evidence/{role}"
+        actions.append(
+            event(
+                "container",
+                container,
+                "ARTIFACT_EXPORT_BEGIN",
+                "CREATED",
+                identity,
+                {"role": role, "volume": volume, "source": source, "destination": destination},
+            )
+        )
+        actions.append(
+            event(
+                "container",
+                container,
+                "ARTIFACT_EXPORT_COMPLETE",
+                "CREATED",
+                identity,
+                {"destination": destination, "archive_sha256": "d" * 64, "archive_bytes": 1024},
+            )
+        )
+    for kind, names, ids in (("container", containers, identities), ("volume", volumes, volumes)):
+        for name, identity in zip(names, ids, strict=True):
+            actions.append(event(kind, name, "ABSENCE_VERIFIED", "ABSENT", identity))
+    return lock, ledger, [rows[0], *actions, rows[-1]]
+
+
+def test_two_distinct_role_exports_can_replay_as_clean(tmp_path: Path) -> None:
+    module = _module()
+    policy, _ = _inputs(module)
+    lock, ledger, rows = _synthetic_two_export_ledger(module, policy, tmp_path)
+    ledger.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows))
+    with module.OwnedDockerAttempt(
+        policy,
+        "second",
+        lock,
+        tmp_path / "owned-second.jsonl",
+        run=FakeDocker(),
+    ):
+        pass
+
+
+@pytest.mark.parametrize(
+    "tamper", ["destination", "source", "volume", "duplicate", "id", "unfinished"]
+)
+def test_prior_exports_require_exact_role_volume_and_destination(
+    tmp_path: Path, tamper: str
+) -> None:
+    module = _module()
+    policy, _ = _inputs(module)
+    lock, ledger, rows = _synthetic_two_export_ledger(module, policy, tmp_path)
+    first = next(i for i, row in enumerate(rows) if row["event"] == "ARTIFACT_EXPORT_BEGIN")
+    complete = first + 1
+    if tamper == "destination":
+        rows[complete]["details"]["destination"] = "/private/evidence/other"
+    elif tamper == "source":
+        rows[first]["details"]["source"] = "/trusted-output"
+    elif tamper == "volume":
+        rows[first]["details"]["volume"] = "mcpbg-p4-first-abcdef0123-volume-other"
+    elif tamper == "duplicate":
+        rows.insert(complete + 1, dict(rows[first]))
+    elif tamper == "id":
+        rows[complete]["object_id"] = "f" * 64
+    else:
+        rows.pop(complete)
+    ledger.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows))
+    with (
+        pytest.raises(module.P4RecoveryRequired),
+        module.OwnedDockerAttempt(
+            policy,
+            "second",
+            lock,
+            tmp_path / "owned-second.jsonl",
+            run=FakeDocker(),
+        ),
+    ):
+        pass
+    assert not (tmp_path / "owned-second.jsonl").exists()
