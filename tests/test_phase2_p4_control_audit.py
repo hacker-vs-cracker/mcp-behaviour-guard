@@ -155,3 +155,31 @@ def test_final_audit_is_not_approval():
             finalized_attempt={"attempt": {"attempt_id": "attempt1", "state": "OPEN"}},
             attempt_id="attempt1",
         )
+
+
+@pytest.mark.parametrize(
+    "networks",
+    [
+        {},
+        {"wrong": None},
+        {"wrong": "untrusted"},
+        {"one": {"NetworkID": "b" * 64}, "two": {"NetworkID": "b" * 64}},
+        ["not-a-network-map"],
+    ],
+)
+def test_control_network_inventory_must_be_one_verified_mapping(networks):
+    m = module()
+    control = _container()
+    control["NetworkSettings"]["Networks"] = networks
+    with pytest.raises(m.ControlUnknown):
+        m.fixed_control_action(
+            control_container=control,
+            owner="attempt1",
+            volume="vol1",
+            fixture_image=_container()["Config"]["Image"],
+            control_network_id="b" * 64,
+            action="health",
+            attempt_id=None,
+            execute=lambda *_a, **_k: pytest.fail("untrusted control network reached"),
+            remaining_seconds=4,
+        )

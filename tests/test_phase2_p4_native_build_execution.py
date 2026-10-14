@@ -92,16 +92,18 @@ def test_failed_or_uncertain_build_never_returns_clean(tmp_path):
     admission, policy, command = _params(m, tmp_path)
     private = tmp_path / "private"
     private.mkdir(mode=0o700)
-    with m.DurableBuildJournal(private / "owned-build.jsonl") as journal:
-        with pytest.raises(m.P4BuildUnknown):
-            m.run_reviewed_private_build(
-                command=command,
-                admission=admission,
-                journal=journal,
-                policy=policy,
-                deadline=float(time.monotonic() + 5),
-                run=lambda *_a, **_kw: m.BuildCommandResult(1, b"", b"fail", 4),
-            )
+    with (
+        m.DurableBuildJournal(private / "owned-build.jsonl") as journal,
+        pytest.raises(m.P4BuildUnknown),
+    ):
+        m.run_reviewed_private_build(
+            command=command,
+            admission=admission,
+            journal=journal,
+            policy=policy,
+            deadline=float(time.monotonic() + 5),
+            run=lambda *_a, **_kw: m.BuildCommandResult(1, b"", b"fail", 4),
+        )
     assert '"BUILD_UNKNOWN"' in (private / "owned-build.jsonl").read_text()
 
 

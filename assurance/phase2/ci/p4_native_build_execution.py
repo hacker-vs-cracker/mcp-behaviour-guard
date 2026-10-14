@@ -6,6 +6,7 @@ Docker CLI completion does not attest image transfer, daemon disposal or cleanup
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -106,14 +107,10 @@ def bounded_native_command(
         selector.close()
         if proc is not None:
             if not complete:
-                try:
+                with contextlib.suppress(ProcessLookupError):
                     os.killpg(proc.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-            try:
+            with contextlib.suppress(subprocess.TimeoutExpired):
                 proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                pass
             if proc.stdout is not None:
                 proc.stdout.close()
             if proc.stderr is not None:

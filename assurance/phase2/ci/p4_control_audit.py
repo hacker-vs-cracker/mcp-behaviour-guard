@@ -125,6 +125,12 @@ def fixed_control_action(
         host = control_container["HostConfig"]
         networks = control_container["NetworkSettings"]["Networks"]
         identity = control_container["Id"]
+        # Malformed or multiple network attachments never satisfy the control role.
+        peer = (
+            next(iter(networks.values()))
+            if isinstance(networks, dict) and len(networks) == 1
+            else None
+        )
         if (
             not isinstance(config, dict)
             or not isinstance(mounts, list)
@@ -161,7 +167,8 @@ def fixed_control_action(
             or not isinstance(host.get("SecurityOpt"), list)
             or "no-new-privileges:true" not in host["SecurityOpt"]
             or not _ID.fullmatch(control_network_id)
-            or next(iter(networks.values()), {}).get("NetworkID") != control_network_id
+            or not isinstance(peer, dict)
+            or peer.get("NetworkID") != control_network_id
             or state.get("Running") is not True
             or state.get("Paused") is not False
             or len(networks) != 1
