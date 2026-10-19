@@ -14,6 +14,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+import p4_resource_enforcement as bounds
+
 
 class ControlUnknown(RuntimeError):
     pass
@@ -21,6 +23,61 @@ class ControlUnknown(RuntimeError):
 
 _ID = re.compile(r"[0-9a-f]{64}\Z")
 _ATTEMPT = re.compile(r"[a-z][a-z0-9-]{0,31}\Z")
+CONTROL_JSON_SHAPE: dict[str, Any] = {
+    "max_depth": 32,
+    "max_string_bytes": 65536,
+    "max_array_items": 1024,
+    "max_object_members": 1024,
+}
+
+
+def _strict_control_object(raw: bytes) -> dict[str, Any]:
+    try:
+        value = bounds._load_object_bytes(
+            raw, max_bytes=262144, label="fixture control response", shape=CONTROL_JSON_SHAPE
+        )
+        bounds._validate_json_shape(value, CONTROL_JSON_SHAPE)
+        return value
+    except bounds.P4ResourceEnforcementError as exc:
+        raise ControlUnknown("fixture control response not bounded strict JSON") from exc
+
+
+def _response_shape(value: dict[str, Any], *, action: str, attempt_id: str | None) -> None:
+    def attempt_equals() -> bool:
+        return type(value.get("attempt_id")) is str and value["attempt_id"] == attempt_id
+
+    if "error" in value:
+        raise ControlUnknown("fixture control endpoint reported error")
+    if action == "health":
+        valid = value.get("status") == "ok" and value.get("service") == "fixture-control"
+    elif action == "create":
+        valid = attempt_equals() and isinstance(value.get("token"), str) and bool(value["token"])
+    elif action == "reset":
+        valid = type(value.get("cursor_seq")) is int and value["cursor_seq"] >= 0
+    elif action == "audit":
+        valid = isinstance(value.get("events"), list)
+    elif action == "snapshot":
+        valid = (
+            isinstance(value.get("attempt"), dict)
+            and value["attempt"].get("attempt_id") == attempt_id
+            and isinstance(value.get("requests"), list)
+            and isinstance(value.get("audit"), list)
+        )
+    elif action == "final-snapshot":
+        valid = (
+            attempt_equals()
+            and value.get("state") == "FENCED"
+            and value.get("audit_complete") is True
+            and type(value.get("final_watermark")) is int
+            and isinstance(value.get("requests"), list)
+            and isinstance(value.get("audit"), list)
+        )
+    else:
+        target = {"open": "OPEN", "close": "FENCED", "finalize": "FINALIZED"}.get(action)
+        valid = target is not None and attempt_equals() and value.get("state") == target
+    if not valid:
+        raise ControlUnknown("fixture control action-specific response invalid")
+
 
 # Code identity is bound to this module and the allowed fixed action table.
 # Only localhost is contacted, inside the independently attested control role.
@@ -196,9 +253,8 @@ def fixed_control_action(
             or len(result.stdout) + len(result.stderr) > result.output_bytes
         ):
             raise ControlUnknown("fixture control CLI is uncertain")
-        decoded = json.loads(result.stdout)
-        if not isinstance(decoded, dict):
-            raise ControlUnknown("fixture control response invalid")
+        decoded = _strict_control_object(result.stdout)
+        _response_shape(decoded, action=action, attempt_id=attempt_id)
         return decoded
     except (KeyError, IndexError, TypeError, ValueError, OSError) as exc:
         raise ControlUnknown("fixture control operation or identity UNKNOWN") from exc
@@ -212,21 +268,87 @@ def audit_evidence_digest(
     The fixture final-snapshot endpoint deliberately returns state FENCED.
     Finalization happens afterward and is verified through GET /attempts/{id}.
     """
+
+    def natural(value: Any) -> bool:
+        return type(value) is int and value >= 0
+
+    if not isinstance(final_snapshot, dict) or not isinstance(finalized_attempt, dict):
+        raise ControlUnknown("fenced and finalized evidence must be objects")
+    record = finalized_attempt.get("attempt")
+    requests = final_snapshot.get("requests")
+    events = final_snapshot.get("audit")
+    final_requests = finalized_attempt.get("requests")
+    final_events = finalized_attempt.get("audit")
     if (
-        not isinstance(final_snapshot, dict)
+        not _ATTEMPT.fullmatch(attempt_id)
         or final_snapshot.get("attempt_id") != attempt_id
         or final_snapshot.get("state") != "FENCED"
         or final_snapshot.get("audit_complete") is not True
-        or type(final_snapshot.get("final_watermark")) is not int
-        or not isinstance(final_snapshot.get("requests"), list)
-        or not isinstance(final_snapshot.get("audit"), list)
-        or not isinstance(finalized_attempt, dict)
-        or not isinstance(finalized_attempt.get("attempt"), dict)
-        or finalized_attempt["attempt"].get("attempt_id") != attempt_id
-        or finalized_attempt["attempt"].get("state") != "FINALIZED"
-        or finalized_attempt["attempt"].get("audit_complete") != 1
+        or not natural(final_snapshot.get("final_watermark"))
+        or type(requests) is not list
+        or type(events) is not list
+        or not isinstance(record, dict)
+        or record.get("attempt_id") != attempt_id
+        or record.get("state") != "FINALIZED"
+        or record.get("audit_complete") != 1
+        or not natural(record.get("final_watermark"))
+        or not natural(record.get("audit_watermark"))
+        or not natural(record.get("final_request_count"))
+        or type(final_requests) is not list
+        or type(final_events) is not list
     ):
         raise ControlUnknown("fenced audit or independently finalized fixture state missing")
+    watermark = final_snapshot["final_watermark"]
+    if (
+        record["final_watermark"] != watermark
+        or record["audit_watermark"] != watermark
+        or record["final_request_count"] != len(requests)
+        or len(requests) != len(final_requests)
+        or len(events) != len(final_events)
+    ):
+        raise ControlUnknown("audit watermark or request count inconsistent")
+    # Current FixtureStore uses per-attempt monotonically increasing seq.
+    # Never infer count from unrelated/global event IDs.
+    seen_events: set[str] = set()
+    for ordinal, (event, final_event) in enumerate(zip(events, final_events, strict=True), 1):
+        if (
+            type(event) is not dict
+            or type(final_event) is not dict
+            or type(event.get("seq")) is not int
+            or type(final_event.get("seq")) is not int
+            or event["seq"] != final_event["seq"]
+            or event["seq"] != ordinal
+            or event.get("event_id") != final_event.get("event_id")
+            or not isinstance(event.get("event_id"), str)
+            or not event["event_id"]
+            or event["event_id"] in seen_events
+            or final_event.get("attempt_id") != attempt_id
+            or event.get("request_id") != final_event.get("request_id")
+        ):
+            raise ControlUnknown("fenced audit event identity mismatch")
+        seen_events.add(event["event_id"])
+    if len(events) != watermark:
+        raise ControlUnknown("fenced audit sequence coverage incomplete")
+    seen_requests: set[str] = set()
+    terminal = {"COMMITTED", "REJECTED", "ROLLED_BACK", "FAILED"}
+    for request, final_request in zip(requests, final_requests, strict=True):
+        if (
+            type(request) is not dict
+            or type(final_request) is not dict
+            or request.get("attempt_id") != attempt_id
+            or final_request.get("attempt_id") != attempt_id
+            or request.get("request_id") != final_request.get("request_id")
+            or request.get("state") != final_request.get("state")
+            or request.get("state") not in terminal
+            or not isinstance(request.get("request_id"), str)
+            or not request["request_id"]
+            or request["request_id"] in seen_requests
+        ):
+            raise ControlUnknown("fenced request or terminal state mismatch")
+        seen_requests.add(request["request_id"])
+    for event in events:
+        if event["request_id"] not in seen_requests:
+            raise ControlUnknown("audited event has no corresponding request")
 
     def canonical(value: dict[str, Any]) -> bytes:
         try:

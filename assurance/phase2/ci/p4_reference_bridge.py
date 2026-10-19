@@ -34,6 +34,82 @@ def _sha(path: Path) -> str:
     return hashlib.sha256(_read_file(path, ceiling=4_194_304)).hexdigest()
 
 
+def _json_file(path: Path) -> dict[str, Any]:
+    raw = _read_file(path, ceiling=4_194_304)
+    try:
+        value = json.loads(raw, object_pairs_hook=_unique_pairs, parse_constant=_bad_constant)
+    except (UnicodeError, ValueError, TypeError, RecursionError) as exc:
+        raise P4BridgeError("comparison sidecar is invalid strict JSON") from exc
+    if type(value) is not dict:
+        raise P4BridgeError("comparison sidecar is not an object")
+    return value
+
+
+def _unique_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise P4BridgeError("comparison JSON duplicate key")
+        value[key] = item
+    return value
+
+
+def _bad_constant(_value: str) -> None:
+    raise P4BridgeError("comparison JSON non-finite constant")
+
+
+def _validated_context(
+    candidate_dir: Path,
+    *,
+    subject: dict[str, Any],
+    stage_handoff: dict[str, Any],
+    runtime_evidence: dict[str, Any],
+) -> tuple[str, str]:
+    """Bind legacy null receipt.attempt_id through an external trusted sidecar.
+
+    This is an integrity check, not producer authentication. Controller provenance
+    and sealed storage remain required before a run can be considered trusted.
+    """
+    receipt_digest = _sha(candidate_dir / "receipt.json")
+    receipt = _json_file(candidate_dir / "receipt.json")
+    run = receipt.get("run")
+    if (
+        not isinstance(run, dict)
+        or not isinstance(run.get("run_id"), str)
+        or not run["run_id"]
+        or run.get("attempt_id") is not None
+    ):
+        raise P4BridgeError("legacy candidate receipt run identity invalid")
+    context = _json_file(candidate_dir / "p4-execution-context.json")
+    if (
+        context.get("schema_version") != 1
+        or context.get("kind") != "p4_trusted_execution_context_v1"
+        or context.get("receipt_sha256") != receipt_digest
+        or context.get("run_id") != run["run_id"]
+        or context.get("attempt_id") != subject["attempt_id"]
+        or context.get("candidate_image") != subject["candidate_image"]
+        or context.get("source_commit") != stage_handoff["source_commit"]
+        or context.get("source_tree") != stage_handoff.get("source_tree")
+        or context.get("runtime_adapter_sha256") != subject["p4_runtime_adapter_sha256"]
+    ):
+        raise P4BridgeError("candidate saved run not bound to trusted execution context")
+    for key in ("audit", "transport", "export", "cleanup"):
+        name = f"p4-{key}-evidence.json"
+        raw_hash = _sha(candidate_dir / name)
+        if context.get(f"{key}_sha256") != raw_hash:
+            raise P4BridgeError("candidate evidence digest substitution")
+        payload = _json_file(candidate_dir / name)
+        if (
+            payload.get("schema_version") != 1
+            or payload.get("attempt_id") != subject["attempt_id"]
+            or payload.get("candidate_image") != subject["candidate_image"]
+            or payload.get("status") != "VERIFIED"
+            or runtime_evidence.get(f"{key}_sha256") != raw_hash
+        ):
+            raise P4BridgeError("candidate evidence identity or outcome invalid")
+    return receipt_digest, run["run_id"]
+
+
 def compare_p4_saved_run(
     *,
     authority_raw: bytes,
@@ -85,6 +161,13 @@ def compare_p4_saved_run(
         or stage_handoff.get("p3_equivalence_claimed") is not False
         or stage_handoff.get("runtime_enforcement_proven") is not False
         or not COMMIT.fullmatch(stage_handoff.get("source_commit", ""))
+        or not COMMIT.fullmatch(stage_handoff.get("source_tree", ""))
+        or not SHA.fullmatch(stage_handoff.get("candidate_source_sha256", ""))
+        or not SHA.fullmatch(stage_handoff.get("trusted_dockerfile_sha256", ""))
+        or not SHA.fullmatch(stage_handoff.get("build_producer_sha256", ""))
+        or not SHA.fullmatch(stage_handoff.get("native_admission_sha256", ""))
+        or not isinstance(stage_handoff.get("candidate_image"), str)
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", stage_handoff["candidate_image"])
     ):
         raise P4BridgeError("P4 build handover not an independently bound source")
     if (
@@ -92,6 +175,8 @@ def compare_p4_saved_run(
         or subject.get("schema_version") != 1
         or subject.get("source_commit") != stage_handoff["source_commit"]
         or subject.get("candidate_image") != stage_handoff.get("candidate_image")
+        or not isinstance(subject.get("candidate_image"), str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", subject["candidate_image"]) is None
         or subject.get("platform") != "linux/amd64"
         or subject.get("attempt_id") in (None, "", ref.get("origin_attempt_id"))
         or not SHA.fullmatch(subject.get("p4_runtime_adapter_sha256", ""))
@@ -114,7 +199,34 @@ def compare_p4_saved_run(
         raise P4BridgeError("retained reference receipt does not match promoted generation")
     for filename in ("receipt.json", "report.json", "tool-inventory.json"):
         _read_file(candidate_dir / filename, ceiling=4_194_304)
+    receipt_digest, run_id = _validated_context(
+        candidate_dir,
+        subject=subject,
+        stage_handoff=stage_handoff,
+        runtime_evidence=runtime_evidence,
+    )
+    # Reject a substituted comparator; only the reviewed shipped saved-run
+    # comparator may be invoked. The caller may not supply an approving stub.
+    from mcp_behaviour_guard.baseline import compare_saved_runs  # type: ignore[import-untyped]
+
+    if comparator is not compare_saved_runs:
+        raise P4BridgeError("unreviewed saved-run comparator")
+    preflight = {
+        name: _sha(candidate_dir / name)
+        for name in (
+            "receipt.json",
+            "report.json",
+            "tool-inventory.json",
+            "p4-execution-context.json",
+            "p4-audit-evidence.json",
+            "p4-transport-evidence.json",
+            "p4-export-evidence.json",
+            "p4-cleanup-evidence.json",
+        )
+    }
     outcome = comparator(reference_dir, candidate_dir)
+    if any(_sha(candidate_dir / name) != digest for name, digest in preflight.items()):
+        raise P4BridgeError("candidate evidence mutated during comparison")
     if (
         not isinstance(outcome, dict)
         or outcome.get("schema_version") != 1
@@ -132,7 +244,9 @@ def compare_p4_saved_run(
         "reference_authority_sha256": PROMOTED_SHA256,
         "reference_generation": 1,
         "reference_receipt_sha256": ref["reference_receipt_sha256"],
-        "subject_receipt_sha256": _sha(candidate_dir / "receipt.json"),
+        "subject_receipt_sha256": receipt_digest,
+        "subject_run_id": run_id,
+        "subject_context_sha256": preflight["p4-execution-context.json"],
         "comparison": outcome,
         "approval_outcome": "NOT_EVALUATED",
         "runtime_proof_completed": False,

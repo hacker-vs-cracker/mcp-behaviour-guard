@@ -344,7 +344,12 @@ def receive_bounded_artifact_archive(
 
 
 def _bounded_archive_process(
-    argv: Sequence[str], *, deadline: float, byte_limit: int, stderr_limit: int = 131_072
+    argv: Sequence[str],
+    *,
+    deadline: float,
+    byte_limit: int,
+    stderr_limit: int = 131_072,
+    private_endpoint: str | None = None,
 ) -> Generator[bytes, None, None]:
     """Bound the *actual subprocess pipes*; never rely on a blocking input iterator.
 
@@ -364,6 +369,28 @@ def _bounded_archive_process(
         or time.monotonic() >= deadline
     ):
         raise P4AdapterError("bounded artifact subprocess invalid")
+    # Native archive streaming cannot use the ambient Docker context. The
+    # fixed source is an immutable owned ID and one of two reviewed mounts.
+    private_env: dict[str, str] | None = None
+    if private_endpoint is not None:
+        if (
+            not re.fullmatch(r"unix:///run/mcpbg-p4-[a-z0-9]{1,32}/engine\.sock", private_endpoint)
+            or len(argv) != 7
+            or list(argv[:6]) != ["docker", "--host", private_endpoint, "container", "cp", argv[5]]
+            or re.fullmatch(r"[0-9a-f]{64}:(/state|/trusted-output)", argv[5]) is None
+            or argv[6] != "-"
+        ):
+            raise P4AdapterError("archive endpoint, source, or CLI scope changed")
+        private_env = {
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+            "HOME": "/nonexistent",
+            "DOCKER_CONFIG": "/nonexistent",
+            "LANG": "C",
+        }
+    elif argv[0] == "docker":
+        # Pure process tests can run a local Python producer; actual Docker
+        # export is never allowed without a pinned native endpoint.
+        raise P4AdapterError("ambient Docker archive endpoint forbidden")
     process: subprocess.Popen[bytes] | None = None
     poller = selectors.DefaultSelector()
     succeeded = False
@@ -377,6 +404,7 @@ def _bounded_archive_process(
             stderr=subprocess.PIPE,
             start_new_session=True,
             close_fds=True,
+            env=private_env,
         )
         assert process.stdout is not None and process.stderr is not None
         for name, stream in (("stdout", process.stdout), ("stderr", process.stderr)):
@@ -455,6 +483,16 @@ class PrivateAttemptLease:
             ):
                 raise P4AdapterError("lock inode, owner or mode invalid")
             fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            # Flush newly created (or previously unflushed) lock directory entry.
+            dfd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                pinned = os.fstat(dfd)
+                if (pinned.st_dev, pinned.st_ino) != (info.st_dev, info.st_ino):
+                    raise P4AdapterError("private lock directory identity changed")
+                os.fsync(self.fd)
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
             named = os.stat(self.path, follow_symlinks=False)
             if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
                 raise P4AdapterError("lock inode replaced during acquisition")
@@ -519,6 +557,8 @@ class OwnedDockerAttempt:
     command_output_unknown: bool = False
     build_output_unknown: bool = False
     cleanup_output_unknown: bool = False
+    # Production native stages must inherit build admission's original deadline.
+    outer_deadline_monotonic: float | None = None
 
     def _record(
         self, event: str, item: OwnedItem | None = None, *, details: dict[str, Any] | None = None
@@ -798,6 +838,23 @@ class OwnedDockerAttempt:
             raise P4AdapterError("invalid Docker daemon execution scope")
         if self.lease_path.parent.absolute() != self.ledger_path.parent.absolute():
             raise P4AdapterError("ledger and lease scope directories differ")
+        # Check inherited authority before creating any persistent state. An
+        # invalid launch must not strand an empty ledger that blocks recovery.
+        first = bounds.AttemptDeadline.from_policy(self.policy)
+        if self.outer_deadline_monotonic is None:
+            if getattr(self.run, "requires_outer_deadline", False):
+                raise P4AdapterError("native runtime missing original build admission deadline")
+            self.attempt_deadline = first  # Legacy source-only fake seams.
+        else:
+            if (
+                type(self.outer_deadline_monotonic) is not float
+                or not time.monotonic() < self.outer_deadline_monotonic <= first.deadline
+            ):
+                raise P4AdapterError("runtime attempted to reset or expire P4 outer deadline")
+            self.attempt_deadline = bounds.AttemptDeadline(
+                deadline=self.outer_deadline_monotonic,
+                cleanup_timeout_seconds=first.cleanup_timeout_seconds,
+            )
         self._lease = PrivateAttemptLease(self.lease_path)
         self._lease.__enter__()
         self._lock_identity = self._lease.identity
@@ -823,7 +880,17 @@ class OwnedDockerAttempt:
             if hasattr(os, "O_NOFOLLOW"):
                 flags |= os.O_NOFOLLOW
             self._ledger_fd = os.open(self.ledger_path, flags, 0o600)
-            self.attempt_deadline = bounds.AttemptDeadline.from_policy(self.policy)
+            parent = self.ledger_path.parent
+            dfd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                fd_info = os.fstat(dfd)
+                expected = os.stat(parent, follow_symlinks=False)
+                if (fd_info.st_dev, fd_info.st_ino) != (expected.st_dev, expected.st_ino):
+                    raise P4RecoveryRequired("owned ledger directory changed")
+                os.fsync(self._ledger_fd)
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
             self._entered = True
             self._record("ATTEMPT_OPEN")
             return self
@@ -863,11 +930,11 @@ class OwnedDockerAttempt:
     ) -> CommandResult:
         if not self._entered:
             raise P4AdapterError("attempt lease must be active")
-        if isinstance(self.run, BoundedProcess) and (
-            self.daemon_context == "source-only-unbound"
-            or self.daemon_identity == "source-only-unbound"
-        ):
-            raise P4AdapterError("Docker daemon identity must be independently bound")
+        if isinstance(self.run, BoundedProcess):
+            # The ambient Docker CLI can target another daemon even when fields
+            # in an in-memory ledger claim an independently bound context.
+            # Native stages must supply a pinned ScopedEngineRunner instead.
+            raise P4AdapterError("native Docker CLI needs an explicit scoped Engine runner")
         if cleanup and build:
             raise P4AdapterError("build cannot use the cleanup output reserve")
         subprocess_policy = bounds.subprocess_limits(self.policy)
@@ -959,6 +1026,11 @@ class OwnedDockerAttempt:
                 "network",
                 "create",
                 "--internal",
+                "--driver",
+                "bridge",
+                "--ipv6=false",
+                "--opt",
+                "com.docker.network.bridge.gateway_mode_ipv4=isolated",
                 "--label",
                 "mcpbg.p4.owner=" + self.attempt_id,
                 item.name,
@@ -1549,15 +1621,56 @@ class OwnedDockerAttempt:
             max_bytes = bounds._positive_int(
                 archive_policy.get("compressed_bytes"), "archive bytes"
             )
-            command = ["docker", "container", "cp", f"{item.object_id}:{path}", "-"]
+            # Never bypass the verified daemon when moving from small control
+            # responses to streamed artifacts. The legacy fake test seam has
+            # no real native backend and is deliberately not a production mode.
+            native_endpoint: str | None = None
+            if getattr(self.run, "requires_outer_deadline", False):
+                from p4_scoped_engine import ScopedEngineRunner
+
+                if (
+                    not isinstance(self.run, ScopedEngineRunner)
+                    or self.run.binding.endpoint != self.daemon_context
+                    or self.run.binding.daemon_id_sha256 != self.daemon_identity
+                ):
+                    raise P4AdapterError("archive is not bound to the admitted daemon")
+                native_endpoint = self.run.binding.endpoint
+                command = [
+                    "docker",
+                    "--host",
+                    native_endpoint,
+                    "container",
+                    "cp",
+                    f"{item.object_id}:{path}",
+                    "-",
+                ]
+            else:
+                if self.daemon_context != "source-only-unbound":
+                    raise P4AdapterError("unscoped archive is forbidden in native mode")
+                command = ["docker", "container", "cp", f"{item.object_id}:{path}", "-"]
             # Explicit generator close terminates and reaps the CLI when intake
             # stops before consuming the stream. Daemon completion still needs proof.
-            with contextlib.closing(
+            stream = (
                 _bounded_archive_process(command, deadline=deadline, byte_limit=max_bytes)
-            ) as chunks:
+                if native_endpoint is None
+                else _bounded_archive_process(
+                    command,
+                    deadline=deadline,
+                    byte_limit=max_bytes,
+                    private_endpoint=native_endpoint,
+                )
+            )
+            with contextlib.closing(stream) as chunks:
                 export = receive_bounded_artifact_archive(
                     chunks, destination, self.policy, deadline=deadline
                 )
+            if native_endpoint is not None:
+                # A completed archive read is not a completed Engine identity
+                # attestation. Failure here preserves the exported evidence
+                # and leaves publication/recovery UNKNOWN.
+                result = self._checked_call(["docker", "info", "--format", "{{.ID}}"])
+                if result.exit_code != 0:
+                    raise P4AdapterError("private Engine archive readback UNKNOWN")
             self._record(
                 "ARTIFACT_EXPORT_COMPLETE",
                 item,

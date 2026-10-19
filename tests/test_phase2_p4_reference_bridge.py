@@ -41,6 +41,11 @@ def fixture(tmp_path):
         "schema_version": 1,
         "kind": "p4_stage_handoff_source_only",
         "source_commit": "a" * 40,
+        "source_tree": "b" * 40,
+        "candidate_source_sha256": "c" * 64,
+        "trusted_dockerfile_sha256": "d" * 64,
+        "build_producer_sha256": "e" * 64,
+        "native_admission_sha256": "f" * 64,
         "candidate_image": image,
         "reference_authority_sha256": m.PROMOTED_SHA256,
         "p4_policy_sha256": m.POLICY_SHA256,
@@ -52,6 +57,11 @@ def fixture(tmp_path):
     subject = {
         "schema_version": 1,
         "source_commit": "a" * 40,
+        "source_tree": "b" * 40,
+        "candidate_source_sha256": "c" * 64,
+        "trusted_dockerfile_sha256": "d" * 64,
+        "build_producer_sha256": "e" * 64,
+        "native_admission_sha256": "f" * 64,
         "candidate_image": image,
         "platform": "linux/amd64",
         "attempt_id": "p4-run-1",
@@ -118,3 +128,74 @@ def test_reference_bytes_and_reused_p3_attempt_reject(tmp_path):
     )
     with pytest.raises(m.P4BridgeError):
         m.compare_p4_saved_run(**altered)
+
+
+def test_no_nullable_or_relabelled_p4_image_before_any_comparison(tmp_path):
+    m, args, _ = fixture(tmp_path)
+    for subject, stage in (
+        (
+            {**args["subject"], "candidate_image": None},
+            {**args["stage_handoff"], "candidate_image": None},
+        ),
+        ({**args["subject"], "candidate_image": "sha256:" + "e" * 64}, args["stage_handoff"]),
+        (args["subject"], {**args["stage_handoff"], "source_tree": "not-a-git-tree"}),
+    ):
+        with pytest.raises(m.P4BridgeError):
+            m.compare_p4_saved_run(**{**args, "subject": subject, "stage_handoff": stage})
+
+
+def test_versioned_context_binds_legacy_receipt_and_each_evidence_file(tmp_path):
+    m = load()
+    image = "sha256:" + "a" * 64
+    receipt = {"run": {"run_id": "saved-run-1", "attempt_id": None}}
+    (tmp_path / "receipt.json").write_text(json.dumps(receipt))
+    stage = {"source_commit": "b" * 40, "source_tree": "c" * 40}
+    subject = {
+        "attempt_id": "p4-test-1",
+        "candidate_image": image,
+        "p4_runtime_adapter_sha256": "d" * 64,
+    }
+    evidence = {}
+    context = {
+        "schema_version": 1,
+        "kind": "p4_trusted_execution_context_v1",
+        "receipt_sha256": hashlib.sha256((tmp_path / "receipt.json").read_bytes()).hexdigest(),
+        "run_id": "saved-run-1",
+        "attempt_id": subject["attempt_id"],
+        "candidate_image": image,
+        "source_commit": stage["source_commit"],
+        "source_tree": stage["source_tree"],
+        "runtime_adapter_sha256": subject["p4_runtime_adapter_sha256"],
+    }
+    for key in ("audit", "transport", "export", "cleanup"):
+        target = tmp_path / f"p4-{key}-evidence.json"
+        target.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "attempt_id": "p4-test-1",
+                    "candidate_image": image,
+                    "status": "VERIFIED",
+                }
+            )
+        )
+        digest = hashlib.sha256(target.read_bytes()).hexdigest()
+        evidence[f"{key}_sha256"] = digest
+        context[f"{key}_sha256"] = digest
+    (tmp_path / "p4-execution-context.json").write_text(json.dumps(context))
+    digest, run_id = m._validated_context(
+        tmp_path, subject=subject, stage_handoff=stage, runtime_evidence=evidence
+    )
+    assert digest == context["receipt_sha256"] and run_id == "saved-run-1"
+    with pytest.raises(m.P4BridgeError):
+        m._validated_context(
+            tmp_path,
+            subject={**subject, "attempt_id": "relabelled"},
+            stage_handoff=stage,
+            runtime_evidence=evidence,
+        )
+    (tmp_path / "p4-audit-evidence.json").write_text("{}")
+    with pytest.raises(m.P4BridgeError):
+        m._validated_context(
+            tmp_path, subject=subject, stage_handoff=stage, runtime_evidence=evidence
+        )

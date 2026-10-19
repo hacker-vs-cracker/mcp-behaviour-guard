@@ -2205,3 +2205,36 @@ def test_prior_exports_require_exact_role_volume_and_destination(
     ):
         pass
     assert not (tmp_path / "owned-second.jsonl").exists()
+
+
+def test_ledger_and_lease_directory_entries_fsynced_before_remote_calls(tmp_path, monkeypatch):
+    import os
+    import stat
+
+    m = _module()
+    private = tmp_path / "private"
+    private.mkdir(mode=0o700)
+    fsynced = []
+    original = os.fsync
+
+    def observed(fd):
+        fsynced.append("directory" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file")
+        return original(fd)
+
+    monkeypatch.setattr(m.os, "fsync", observed)
+    called = []
+    with m.PrivateAttemptLease(private / "owned.lock"):
+        pass
+    assert "directory" in fsynced
+    # Fail before the initial durable attempt intent and ensure no daemon call.
+    fsynced.clear()
+
+    def deny_directory(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError("injected directory durability failure")
+        return original(fd)
+
+    monkeypatch.setattr(m.os, "fsync", deny_directory)
+    with pytest.raises(OSError), m.PrivateAttemptLease(private / "failed.lock"):
+        called.append("entered")
+    assert not called

@@ -51,6 +51,7 @@ class MeteredFixtureRelay:
         self.requests = 0
         self.bytes = 0
         self.failed = False
+        self.active: set[asyncio.Task[object]] = set()
 
     def _validate_limits(self) -> None:
         values = self.limits
@@ -168,13 +169,16 @@ class MeteredFixtureRelay:
         self, client_in: asyncio.StreamReader, client_out: asyncio.StreamWriter
     ) -> None:
         fixture_out: asyncio.StreamWriter | None = None
+        current = asyncio.current_task()
+        if current is not None:
+            self.active.add(current)
+        admitted = False
         try:
             async with self.lock:
                 if self.failed or self.requests >= self.limits.requests:
                     raise RelayError("fixture relay unavailable")
-                self.requests += (
-                    1  # Count attempted requests, including malformed or abandoned ones.
-                )
+                self.requests += 1  # Count malformed or incomplete admitted requests.
+                admitted = True
                 header = await self._read_header(
                     client_in, ceiling=min(8192, self.limits.request_bytes)
                 )
@@ -217,11 +221,17 @@ class MeteredFixtureRelay:
                     size=content_length,
                     allowance=self.limits.response_bytes - len(response),
                 )
+        except asyncio.CancelledError:
+            # Cancellation after admission is never healthy, including during drain.
+            if admitted:
+                self.failed = True
+            raise
         except (TimeoutError, OSError, RelayError):
-            # One ambiguous transfer invalidates this relay's authority for the
-            # rest of the attempt. The privileged controller must reconcile.
+            # One ambiguous transfer invalidates this relay's authority.
             self.failed = True
         finally:
+            if current is not None:
+                self.active.discard(current)
             # A stalled peer must not hang cleanup after the traffic deadline.
             if fixture_out is not None:
                 fixture_out.close()
@@ -239,7 +249,23 @@ async def serve_trusted_relay(
         raise RelayError("invalid isolated relay listener")
     server = await asyncio.start_server(relay.handle, listen_host, listen_port, limit=16384)
     async with server:
-        await asyncio.wait_for(server.serve_forever(), relay.remaining())
+        try:
+            await asyncio.wait_for(server.serve_forever(), relay.remaining())
+        finally:
+            # Active clients are owned, not silently abandoned on listener stop.
+            relay.failed = relay.failed or bool(relay.active)
+            clients = list(relay.active)
+            for task in clients:
+                task.cancel()
+            if clients:
+                done, pending = await asyncio.wait(clients, timeout=2.0)
+                if pending:
+                    relay.failed = True
+                for task in done:
+                    if task.cancelled():
+                        continue
+                    with contextlib.suppress(Exception):
+                        task.result()
 
 
 def main() -> None:

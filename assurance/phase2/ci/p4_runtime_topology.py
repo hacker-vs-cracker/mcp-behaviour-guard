@@ -69,6 +69,9 @@ def verify_network_isolation(
             or network.get("Attachable") is not False
             or network.get("Ingress") is not False
             or network.get("Driver") != "bridge"
+            or network.get("EnableIPv6") is not False
+            or not isinstance(network.get("Options"), dict)
+            or network["Options"].get("com.docker.network.bridge.gateway_mode_ipv4") != "isolated"
         ):
             raise P4TopologyError("effective network is not private and attempt-owned")
         peers = _mapping(network.get("Containers"), "network peer inventory missing")

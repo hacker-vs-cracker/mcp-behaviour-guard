@@ -21,10 +21,30 @@ from pathlib import Path
 from typing import Any
 
 import p4_staged_pipeline as stage
+import p4_worker_storage as worker_storage
 
 
 class P4BuildUnknown(RuntimeError):
     """The worker may have produced an image or retained daemon state."""
+
+
+@dataclass(frozen=True)
+class ReviewedBuildSpec:
+    """Exact bounded build intent. A mutable command is never executable authority."""
+
+    admission: stage.NativeBuildAdmission
+    worker_source: str
+    lease_scope: str
+    context: Path
+    dockerfile_sha256: str
+    source_sha256: str
+    base_image: str
+    owned_tag: str
+    reviewed_argv: tuple[str, ...]
+    source_commit: str
+    source_tree: str
+    storage_layout: worker_storage.WorkerStorageLayout | None = None
+    docker_info_json: bytes | None = None
 
 
 @dataclass(frozen=True)
@@ -175,15 +195,30 @@ def prepare_private_build_command(
     base_image: str,
     owned_tag: str,
     policy: dict[str, Any],
-) -> list[str]:
-    """Do not use user claims in place of a filesystem and daemon admission check."""
+    source_commit: str,
+    source_tree: str,
+    storage_layout: worker_storage.WorkerStorageLayout,
+) -> ReviewedBuildSpec:
+    """Admit and bind exact source, worker, context and reviewed command."""
+    if not stage.COMMIT.fullmatch(source_commit) or not stage.COMMIT.fullmatch(source_tree):
+        raise P4BuildUnknown("source commit or tree missing")
     admission.require_bound_stage(
         expected_worker_source=expected_worker_source, lease_scope=lease_scope
     )
     stage.verify_native_data_root(
         daemon_data_root=data_root, docker_info=docker_info, admission=admission
     )
-    return stage.plan_private_native_build(
+    if type(storage_layout) is not worker_storage.WorkerStorageLayout:
+        raise P4BuildUnknown("whole-worker native storage inventory required")
+    try:
+        worker_storage.verify_worker_storage(
+            storage_layout,
+            docker_info=docker_info,
+            expected_daemon_sha256=admission.daemon_id,
+        )
+    except worker_storage.StorageUncertain as exc:
+        raise P4BuildUnknown("whole-worker storage admission UNKNOWN") from exc
+    cmd = stage.plan_private_native_build(
         admission=admission,
         expected_worker_source=expected_worker_source,
         lease_scope=lease_scope,
@@ -194,12 +229,32 @@ def prepare_private_build_command(
         owned_tag=owned_tag,
         policy=policy,
     )
+    return ReviewedBuildSpec(
+        admission=admission,
+        worker_source=expected_worker_source,
+        lease_scope=lease_scope,
+        context=context,
+        dockerfile_sha256=trusted_dockerfile_sha256,
+        source_sha256=candidate_source_sha256,
+        base_image=base_image,
+        owned_tag=owned_tag,
+        reviewed_argv=tuple(cmd),
+        source_commit=source_commit,
+        source_tree=source_tree,
+        storage_layout=storage_layout,
+        docker_info_json=json.dumps(docker_info, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        ),
+    )
 
 
 def run_reviewed_private_build(
     *,
-    command: list[str],
-    admission: stage.NativeBuildAdmission,
+    spec: ReviewedBuildSpec,
+    expected_source_commit: str,
+    expected_source_tree: str,
+    expected_worker_source: str,
+    expected_lease_scope: str,
     journal: DurableBuildJournal,
     policy: dict[str, Any],
     deadline: float,
@@ -218,26 +273,72 @@ def run_reviewed_private_build(
     timeout = policy_build.get("timeout_seconds")
     if type(cap) is not int or cap != 1048576 or type(timeout) is not int or timeout != 300:
         raise P4BuildUnknown("build command limits differ from frozen policy")
-    # No privileged Buildx sidecar, default builder or endpoint substitution.
+    # Do not accept a caller-authored command or previously prepared mutable list.
+    if type(spec) is not ReviewedBuildSpec:
+        raise P4BuildUnknown("reviewed immutable build spec required")
     if (
-        len(command) < 5
-        or command[:3] != ["docker", "--host", admission.daemon_endpoint]
-        or command[3:5] != ["build", "--platform"]
-        or any("buildx" in arg or "--allow" in arg for arg in command)
-        or "--network=none" not in command
-        or "--pull=false" not in command
+        spec.source_commit != expected_source_commit
+        or spec.source_tree != expected_source_tree
+        or spec.worker_source != expected_worker_source
+        or spec.lease_scope != expected_lease_scope
+        or not stage.COMMIT.fullmatch(spec.source_commit)
+        or not stage.COMMIT.fullmatch(spec.source_tree)
     ):
-        raise P4BuildUnknown("build command differs from private reviewed route")
+        raise P4BuildUnknown("reviewed source, worker or lease identity changed")
+    try:
+        spec.admission.require_bound_stage(
+            expected_worker_source=spec.worker_source, lease_scope=spec.lease_scope
+        )
+    except ValueError as exc:
+        raise P4BuildUnknown("reviewed native worker identity changed") from exc
+    # A real native build cannot rely on the historical fake-runner seam.
+    if (
+        spec.storage_layout is None or spec.docker_info_json is None
+    ) and run is bounded_native_command:
+        raise P4BuildUnknown("native build lacks whole-worker storage proof")
+    if spec.storage_layout is not None or spec.docker_info_json is not None:
+        try:
+            if (
+                type(spec.storage_layout) is not worker_storage.WorkerStorageLayout
+                or type(spec.docker_info_json) is not bytes
+                or len(spec.docker_info_json) > 65536
+            ):
+                raise P4BuildUnknown("native worker storage specification incomplete")
+            native_info = json.loads(spec.docker_info_json)
+            worker_storage.verify_worker_storage(
+                spec.storage_layout,
+                docker_info=native_info,
+                expected_daemon_sha256=spec.admission.daemon_id,
+            )
+        except (ValueError, TypeError, worker_storage.StorageUncertain) as exc:
+            raise P4BuildUnknown("native worker write boundary changed before build") from exc
+    # Repeat every filesystem check immediately before command submission.
+    try:
+        command = stage.plan_private_native_build(
+            admission=spec.admission,
+            expected_worker_source=spec.worker_source,
+            lease_scope=spec.lease_scope,
+            context=spec.context,
+            trusted_dockerfile_sha256=spec.dockerfile_sha256,
+            candidate_source_sha256=spec.source_sha256,
+            base_image=spec.base_image,
+            owned_tag=spec.owned_tag,
+            policy=policy,
+        )
+    except (ValueError, OSError) as exc:
+        raise P4BuildUnknown("reviewed build inputs changed") from exc
+    if tuple(command) != spec.reviewed_argv:
+        raise P4BuildUnknown("reviewed immutable command differs")
     remaining = min(float(timeout), deadline - time.monotonic())
     if remaining <= 0:
         raise P4BuildUnknown("shared pipeline deadline expired before build")
     journal.append(
         "BUILD_SUBMITTED",
-        endpoint_sha256=hashlib.sha256(admission.daemon_endpoint.encode()).hexdigest(),
+        endpoint_sha256=hashlib.sha256(spec.admission.daemon_endpoint.encode()).hexdigest(),
     )
     try:
         result = run(
-            command, endpoint=admission.daemon_endpoint, remaining=remaining, byte_budget=cap
+            command, endpoint=spec.admission.daemon_endpoint, remaining=remaining, byte_budget=cap
         )
     except BaseException as exc:
         journal.append("BUILD_UNKNOWN")

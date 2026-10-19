@@ -166,3 +166,41 @@ def test_relay_cli_rejects_missing_or_extended_pipeline_deadline():
         outcome = subprocess.run(common + args, capture_output=True, timeout=4, check=False)
         assert outcome.returncode != 0
         assert len(outcome.stdout) + len(outcome.stderr) < 8192
+
+
+@pytest.mark.asyncio
+async def test_cancel_after_forwarded_body_marks_relay_failed_and_preserves_bytes():
+    module = _module()
+    upstream_received = asyncio.Event()
+    unblock = asyncio.Event()
+
+    async def fixture(reader, writer):
+        await reader.readuntil(b"\r\n\r\n")
+        assert await reader.readexactly(1) == b"X"
+        upstream_received.set()
+        await unblock.wait()
+        writer.close()
+        await writer.wait_closed()
+
+    upstream = await asyncio.start_server(fixture, "127.0.0.1", 0)
+    relay = module.MeteredFixtureRelay(
+        upstream_host="127.0.0.1", upstream_port=upstream.sockets[0].getsockname()[1]
+    )
+    listener = await asyncio.start_server(relay.handle, "127.0.0.1", 0)
+    async with upstream, listener:
+        reader, writer = await asyncio.open_connection(
+            "127.0.0.1", listener.sockets[0].getsockname()[1]
+        )
+        writer.write(b"POST /records/write HTTP/1.1\r\nContent-Length: 10\r\n\r\nX")
+        await writer.drain()
+        await asyncio.wait_for(upstream_received.wait(), 2)
+        tasks = list(relay.active)
+        assert len(tasks) == 1
+        for task in tasks:
+            task.cancel()
+        await asyncio.wait(tasks, timeout=2)
+        assert relay.failed is True
+        assert relay.requests == 1 and relay.bytes >= 1
+        writer.close()
+        await writer.wait_closed()
+        unblock.set()

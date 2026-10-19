@@ -59,7 +59,7 @@
   "subject_logical_fixture_alias": "fixture-app",
   "trusted_host_controller_is_container": false,
   "trusted_program_path": "assurance/phase2/ci/p4_metered_fixture_relay.py",
-  "trusted_program_sha256": "370a18fc328427937fd94252686a7923a69215babb4077eb29f80b28ac97cff7",
+  "trusted_program_sha256": "8d3d41bca5bb2c8c96e7cdc397d2857c8abf635e97ed272768e5689da6711ef7",
   "uid": 10003,
   "upstream_dns_alias": "fixture-origin"
 }

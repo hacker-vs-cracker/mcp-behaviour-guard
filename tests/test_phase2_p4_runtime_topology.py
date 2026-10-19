@@ -45,6 +45,8 @@ def networks():
             Attachable=False,
             Ingress=False,
             Driver="bridge",
+            EnableIPv6=False,
+            Options={"com.docker.network.bridge.gateway_mode_ipv4": "isolated"},
             Containers={ids[role]: {"Name": role} for role in expected[key]},
         )
         for key, hexval in (("subject", "a"), ("fixture", "b"), ("control", "c"))
@@ -291,3 +293,21 @@ def test_relay_dns_aliases_preserve_logical_fixture_without_back_routing():
     altered["endpoints"]["relay"]["c-net"] = altered["endpoints"]["relay"]["s-net"]
     with pytest.raises(m.P4TopologyError, match="unexpected network"):
         m.verify_dns_alias_routing(**altered)
+
+
+def test_internal_network_without_isolated_gateway_is_never_accepted():
+    m = module()
+    for change in (
+        {"Options": {}},
+        {"Options": {"com.docker.network.bridge.gateway_mode_ipv4": "nat"}},
+        {"EnableIPv6": True},
+    ):
+        altered = networks()
+        altered["subject"].update(change)
+        with pytest.raises(m.P4TopologyError):
+            m.verify_network_isolation(
+                network_inventory=altered,
+                assigned=assignments(),
+                owner="attempt1",
+                peer_container_ids=peers(),
+            )

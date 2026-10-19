@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -39,24 +41,46 @@ def _params(m, tmp_path):
         owner_lease_scope="c" * 64,
     )
     policy = json.loads((CI / "p4-resource-policy.json").read_text())
-    command = [
-        "docker",
-        "--host",
-        admission.daemon_endpoint,
-        "build",
-        "--platform",
-        "linux/amd64",
-        "--pull=false",
-        "--network=none",
-        "--no-cache",
-        "x",
-    ]
-    return admission, policy, command
+    context = tmp_path / "context"
+    context.mkdir()
+    (context / "Dockerfile").write_text("ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\n")
+    (context / "candidate_server.py").write_text("print('synthetic')\n")
+
+    def digest(name):
+        return hashlib.sha256((context / name).read_bytes()).hexdigest()
+
+    base = "ghcr.io/example/fixed@sha256:" + "d" * 64
+    tag = "mcpbg-p4-test:stage"
+    argv = m.stage.plan_private_native_build(
+        admission=admission,
+        expected_worker_source="a" * 40,
+        lease_scope="c" * 64,
+        context=context,
+        trusted_dockerfile_sha256=digest("Dockerfile"),
+        candidate_source_sha256=digest("candidate_server.py"),
+        base_image=base,
+        owned_tag=tag,
+        policy=policy,
+    )
+    spec = m.ReviewedBuildSpec(
+        admission=admission,
+        worker_source="a" * 40,
+        lease_scope="c" * 64,
+        context=context,
+        dockerfile_sha256=digest("Dockerfile"),
+        source_sha256=digest("candidate_server.py"),
+        base_image=base,
+        owned_tag=tag,
+        reviewed_argv=tuple(argv),
+        source_commit="a" * 40,
+        source_tree="b" * 40,
+    )
+    return admission, policy, spec
 
 
 def test_build_requires_private_journal_and_bounds(tmp_path):
     m = module()
-    admission, policy, command = _params(m, tmp_path)
+    admission, policy, spec = _params(m, tmp_path)
     private = tmp_path / "private"
     private.mkdir(mode=0o700)
     path = private / "owned-build.jsonl"
@@ -68,8 +92,11 @@ def test_build_requires_private_journal_and_bounds(tmp_path):
 
     with m.DurableBuildJournal(path) as journal:
         result = m.run_reviewed_private_build(
-            command=command,
-            admission=admission,
+            spec=spec,
+            expected_source_commit="a" * 40,
+            expected_source_tree="b" * 40,
+            expected_worker_source="a" * 40,
+            expected_lease_scope="c" * 64,
             journal=journal,
             policy=policy,
             deadline=float(time.monotonic() + 6),
@@ -89,7 +116,7 @@ def test_build_requires_private_journal_and_bounds(tmp_path):
 
 def test_failed_or_uncertain_build_never_returns_clean(tmp_path):
     m = module()
-    admission, policy, command = _params(m, tmp_path)
+    admission, policy, spec = _params(m, tmp_path)
     private = tmp_path / "private"
     private.mkdir(mode=0o700)
     with (
@@ -97,8 +124,11 @@ def test_failed_or_uncertain_build_never_returns_clean(tmp_path):
         pytest.raises(m.P4BuildUnknown),
     ):
         m.run_reviewed_private_build(
-            command=command,
-            admission=admission,
+            spec=spec,
+            expected_source_commit="a" * 40,
+            expected_source_tree="b" * 40,
+            expected_worker_source="a" * 40,
+            expected_lease_scope="c" * 64,
             journal=journal,
             policy=policy,
             deadline=float(time.monotonic() + 5),
@@ -109,20 +139,27 @@ def test_failed_or_uncertain_build_never_returns_clean(tmp_path):
 
 def test_native_build_disallows_cli_or_privileged_shortcuts(tmp_path):
     m = module()
-    admission, policy, command = _params(m, tmp_path)
+    admission, policy, spec = _params(m, tmp_path)
     private = tmp_path / "private"
     private.mkdir(mode=0o700)
     with m.DurableBuildJournal(private / "owned-build.jsonl") as journal:
         for invalid in (
-            ["docker", "buildx", "build"],
-            ["docker", "--host", "unix:///var/run/docker.sock", *command[3:]],
-            [*command, "--allow=network.host"],
-            [x for x in command if x != "--network=none"],
+            replace(spec, reviewed_argv=(*spec.reviewed_argv, "--allow=network.host")),
+            replace(spec, context=tmp_path),
+            replace(spec, base_image="ghcr.io/other/base@sha256:" + "e" * 64),
+            replace(spec, owned_tag="mcpbg-p4-foreign:stage"),
+            replace(spec, source_commit="f" * 40),
+            replace(spec, source_sha256="e" * 64),
+            replace(spec, dockerfile_sha256="e" * 64),
+            replace(spec, worker_source="f" * 40),
         ):
             with pytest.raises(m.P4BuildUnknown):
                 m.run_reviewed_private_build(
-                    command=invalid,
-                    admission=admission,
+                    spec=invalid,
+                    expected_source_commit="a" * 40,
+                    expected_source_tree="b" * 40,
+                    expected_worker_source="a" * 40,
+                    expected_lease_scope="c" * 64,
                     journal=journal,
                     policy=policy,
                     deadline=float(time.monotonic() + 5),
@@ -145,3 +182,24 @@ def test_bounded_subprocess_rejects_unbounded_specs():
     ):
         with pytest.raises(m.P4BuildUnknown):
             m.bounded_native_command(**args)
+
+
+def test_build_rechecks_input_bytes_before_fake_runner(tmp_path):
+    m = module()
+    admission, policy, spec = _params(m, tmp_path)
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    with m.DurableBuildJournal(state / "intent.jsonl") as journal:
+        (spec.context / "candidate_server.py").write_text("# swapped after planning\n")
+        with pytest.raises(m.P4BuildUnknown, match="inputs changed"):
+            m.run_reviewed_private_build(
+                spec=spec,
+                expected_source_commit="a" * 40,
+                expected_source_tree="b" * 40,
+                expected_worker_source="a" * 40,
+                expected_lease_scope="c" * 64,
+                journal=journal,
+                policy=policy,
+                deadline=float(time.monotonic() + 5),
+                run=lambda *_a, **_k: pytest.fail("changed context reached runner"),
+            )
