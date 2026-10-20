@@ -1376,6 +1376,45 @@ class OwnedDockerAttempt:
         self._record("CREATE_CONFIRMED", candidate)
         return candidate
 
+    def attest_owned_five_role_graph(
+        self,
+        *,
+        networks: dict[str, OwnedItem],
+        containers: dict[str, OwnedItem],
+        volumes: dict[str, OwnedItem],
+        expected_images: dict[str, str],
+        relay_profile: dict[str, Any],
+        relay_program: Path,
+        remaining_seconds: int,
+    ) -> dict[str, Any]:
+        """Bound source-only full-graph readback to this attempt and its ledger.
+
+        This cannot create/start roles or claim that runtime enforcement is proved.
+        A failed durable attestation receipt retains recovery-required state.
+        """
+        import p4_runtime_topology as topology
+
+        result = topology.attest_owned_prestart_graph(
+            attempt=self,
+            networks=networks,
+            containers=containers,
+            volumes=volumes,
+            expected_images=expected_images,
+            relay_profile=relay_profile,
+            relay_program=relay_program,
+            remaining_seconds=remaining_seconds,
+        )
+        identity = {
+            "roles": result["roles"],
+            "networks": result["networks"],
+            "volumes": result["volumes"],
+        }
+        digest = hashlib.sha256(
+            json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        self._record("PRESTART_GRAPH_ATTESTED", details={"readback_sha256": digest})
+        return result
+
     def attest_fixed_container(
         self, item: OwnedItem, authority_raw: bytes, *, role: str
     ) -> dict[str, str]:

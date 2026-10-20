@@ -279,7 +279,7 @@
       "assurance/phase2/ci/p4_fixture_sqlite_export.py": "5bc71b7fa05977478df614eb279258177003ef8eed825e45c814a95f27dfad92",
       "assurance/phase2/ci/p4_native_build_execution.py": "b9d2908923c0266810bfb74786875e2d5cc0878f30aa135312cdad192a77697e",
       "assurance/phase2/ci/p4_reference_bridge.py": "5a44dc0cf0875feb52b9fcf3413a83a6c2202add76e639a90148c806e99b184e",
-      "assurance/phase2/ci/p4_runtime_topology.py": "e682f3c98be311a580d4c386fc1f95f4f0e6f1dcc2697f7f3f469a6066b8563c",
+      "assurance/phase2/ci/p4_runtime_topology.py": "8df513e139e1cf0be5ae62741fa6393799e4c4a908255d14274f7d9edafe8e4c",
       "assurance/phase2/ci/p4_scoped_engine.py": "05990a7766c586215125440cd7a4e06c2d5675427ca03b491c2d72414c27dbfb",
       "assurance/phase2/ci/p4_staged_pipeline.py": "d573b12f9ff874908e3aa00cfa830526ce1f02ce98db9a6bfbf99a185f0c3d7d",
       "assurance/phase2/ci/p4_worker_storage.py": "915b4128e004b2371eb689be3b2ba5d0f209c153bcf90ca3b4df308a74c4ed39"
@@ -292,7 +292,7 @@
     "candidate_execution_enabled": false,
     "hostile_execution_authorized": false,
     "module_path": "assurance/phase2/ci/p4_trusted_runtime_adapter.py",
-    "module_sha256": "d607be295923c5083eda1d26c023b86388a21ce36e549e7aa9654389e4fbd824",
+    "module_sha256": "3e27d15e8842124c1f31c37c9dd3e81ed20c62f837e9e324ab4850fbb719fa5c",
     "runtime_enforcement_proven": false,
     "stage": "TRUSTED_NON_HOSTILE_FIXTURE_ADAPTER",
     "status": "SOURCE_WIRED_NOT_RUNTIME_PROVEN",
