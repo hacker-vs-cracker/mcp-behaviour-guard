@@ -115,6 +115,8 @@ def verify_exported_fixture_sqlite(
     fenced_snapshot: dict[str, Any],
     finalized_snapshot: dict[str, Any],
     artifact_ceiling_bytes: int,
+    reviewed_expected_records: list[dict[str, Any]] | None = None,
+    observed_fenced_file_sha256: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Cross-check finalized control RPC evidence with a self-consistent SQLite backup.
 
@@ -122,6 +124,10 @@ def verify_exported_fixture_sqlite(
     independently attested paused container export, not an arbitrary live volume.
     No writes to `exported_state`; all SQLite operations use a private copy.
     Never call this after an unknown source export or without writer fencing.
+    The optional independently reviewed projection is not inferred from the
+    exported DB. The optional source file digests must be independently observed
+    by the trusted, already-fenced coordinator, not copied from this export.
+    Without those authorities, outcomes are explicitly NOT_EVALUATED.
     """
     if (
         not isinstance(exported_state, Path)
@@ -143,6 +149,15 @@ def verify_exported_fixture_sqlite(
         with tempfile.TemporaryDirectory(prefix="mcpbg-p4-sqlite-") as stage:
             private = Path(stage)
             files = _snapshot_files(exported_state, private, artifact_ceiling_bytes)
+            if observed_fenced_file_sha256 is not None and (
+                type(observed_fenced_file_sha256) is not dict
+                or observed_fenced_file_sha256 != files
+                or any(
+                    type(x) is not str or re.fullmatch(r"[0-9a-f]{64}", x) is None
+                    for x in observed_fenced_file_sha256.values()
+                )
+            ):
+                raise ExportInconsistent("fenced source/export byte identity mismatch")
             # A read-only SQLite connection sees committed WAL frames. We never
             # use immutable=1, which silently ignores WAL content.
             uri = (private / "fixture.db").as_uri() + "?mode=ro"
@@ -211,7 +226,36 @@ def verify_exported_fixture_sqlite(
                         "SELECT record_id,value,updated_by_attempt,updated_by_request,updated_at "
                         "FROM records ORDER BY record_id"
                     ).fetchall()
-                    record_digest = _hash(_canonical({"records": [dict(x) for x in rows]}))
+                    actual_records = [dict(x) for x in rows]
+                    record_digest = _hash(_canonical({"records": actual_records}))
+                    effect_status = "NOT_EVALUATED"
+                    if reviewed_expected_records is not None:
+                        fields = {
+                            "record_id",
+                            "value",
+                            "updated_by_attempt",
+                            "updated_by_request",
+                            "updated_at",
+                        }
+                        if (
+                            type(reviewed_expected_records) is not list
+                            or any(
+                                type(x) is not dict or set(x) != fields
+                                for x in reviewed_expected_records
+                            )
+                            or len(reviewed_expected_records) > 1024
+                        ):
+                            raise ExportInconsistent("reviewed business projection malformed")
+                        # Exact equality covers wrong values, missing/extra records,
+                        # attribution and timestamp claims, without trusting the
+                        # exported rows to define their own expected state.
+                        if actual_records != sorted(
+                            reviewed_expected_records, key=lambda x: x["record_id"]
+                        ):
+                            raise ExportInconsistent(
+                                "business records differ from reviewed expectation"
+                            )
+                        effect_status = "MATCHED_REVIEWED_PROJECTION_SOURCE_ONLY"
                     return {
                         "schema_version": 1,
                         "status": "OFFLINE_SQLITE_RECONCILED_SOURCE_ONLY",
@@ -223,6 +267,12 @@ def verify_exported_fixture_sqlite(
                         "requests": len(requests),
                         "final_watermark": record["final_watermark"],
                         "records_sha256": record_digest,
+                        "business_effect_status": effect_status,
+                        "source_export_status": (
+                            "MATCHED_FENCED_SOURCE_DIGESTS_SOURCE_ONLY"
+                            if observed_fenced_file_sha256 is not None
+                            else "NOT_EVALUATED"
+                        ),
                         "runtime_enforcement_proven": False,
                         "verdict_publication_enabled": False,
                     }

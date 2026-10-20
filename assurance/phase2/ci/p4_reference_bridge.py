@@ -8,10 +8,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import stat
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+
+import p4_resource_enforcement as bounds
 
 
 class P4BridgeError(ValueError):
@@ -25,37 +29,80 @@ COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 
 
 def _read_file(path: Path, *, ceiling: int) -> bytes:
-    if path.is_symlink() or not path.is_file() or not 0 < path.stat().st_size <= ceiling:
-        raise P4BridgeError("comparison input missing, linked or oversized")
-    return path.read_bytes()
+    """Read an exact, regular, single-linked input via an O_NOFOLLOW fd.
+
+    File-level atomic identity is not producer provenance. The controller must
+    stage inputs inside a trusted private directory before invoking this bridge.
+    """
+    if type(ceiling) is not int or not 0 < ceiling <= 4_194_304:
+        raise P4BridgeError("comparison read ceiling invalid")
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            before = os.fstat(fd)
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or before.st_nlink != 1
+                or not 0 < before.st_size <= ceiling
+            ):
+                raise P4BridgeError("comparison input missing, linked or oversized")
+            chunks: list[bytes] = []
+            remaining = before.st_size
+            while remaining:
+                chunk = os.read(fd, min(65_536, remaining))
+                if not chunk:
+                    raise P4BridgeError("comparison input changed or truncated")
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            after = os.fstat(fd)
+            named = path.lstat()
+
+            def identity(st: os.stat_result) -> tuple[int, int, int, int, int]:
+                return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+            if (
+                identity(before) != identity(after)
+                or identity(before) != identity(named)
+                or not stat.S_ISREG(named.st_mode)
+            ):
+                raise P4BridgeError("comparison input changed during read")
+            return b"".join(chunks)
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        raise P4BridgeError("comparison input inaccessible or changed") from exc
 
 
 def _sha(path: Path) -> str:
     return hashlib.sha256(_read_file(path, ceiling=4_194_304)).hexdigest()
 
 
-def _json_file(path: Path) -> dict[str, Any]:
-    raw = _read_file(path, ceiling=4_194_304)
+def _json_bytes(raw: bytes, *, schema_version: int | None = 1) -> dict[str, Any]:
+    """Validate exact bytes under frozen P4 JSON limits and legacy receipt rules."""
+    shape = {
+        "max_depth": 32,
+        "max_array_items": 1024,
+        "max_object_members": 1024,
+        "max_string_bytes": 65536,
+    }
     try:
-        value = json.loads(raw, object_pairs_hook=_unique_pairs, parse_constant=_bad_constant)
-    except (UnicodeError, ValueError, TypeError, RecursionError) as exc:
-        raise P4BridgeError("comparison sidecar is invalid strict JSON") from exc
-    if type(value) is not dict:
-        raise P4BridgeError("comparison sidecar is not an object")
+        value = bounds._load_object_bytes(
+            raw, max_bytes=1_048_576, label="comparison sidecar", shape=shape
+        )
+        bounds._validate_json_shape(value, shape)
+    except bounds.P4ResourceEnforcementError as exc:
+        raise P4BridgeError("comparison sidecar is not bounded strict JSON") from exc
+    version = value.get("schema_version")
+    if schema_version is None:
+        if version is not None and (type(version) is not int or version != 1):
+            raise P4BridgeError("unsupported legacy receipt version")
+    elif type(version) is not int or version != schema_version:
+        raise P4BridgeError("comparison sidecar schema_version invalid")
     return value
 
 
-def _unique_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    value: dict[str, Any] = {}
-    for key, item in pairs:
-        if key in value:
-            raise P4BridgeError("comparison JSON duplicate key")
-        value[key] = item
-    return value
-
-
-def _bad_constant(_value: str) -> None:
-    raise P4BridgeError("comparison JSON non-finite constant")
+def _json_file(path: Path, *, schema_version: int | None = 1) -> dict[str, Any]:
+    return _json_bytes(_read_file(path, ceiling=1_048_576), schema_version=schema_version)
 
 
 def _validated_context(
@@ -70,8 +117,9 @@ def _validated_context(
     This is an integrity check, not producer authentication. Controller provenance
     and sealed storage remain required before a run can be considered trusted.
     """
-    receipt_digest = _sha(candidate_dir / "receipt.json")
-    receipt = _json_file(candidate_dir / "receipt.json")
+    receipt_bytes = _read_file(candidate_dir / "receipt.json", ceiling=1_048_576)
+    receipt_digest = hashlib.sha256(receipt_bytes).hexdigest()
+    receipt = _json_bytes(receipt_bytes, schema_version=None)
     run = receipt.get("run")
     if (
         not isinstance(run, dict)
@@ -95,10 +143,11 @@ def _validated_context(
         raise P4BridgeError("candidate saved run not bound to trusted execution context")
     for key in ("audit", "transport", "export", "cleanup"):
         name = f"p4-{key}-evidence.json"
-        raw_hash = _sha(candidate_dir / name)
+        evidence_bytes = _read_file(candidate_dir / name, ceiling=1_048_576)
+        raw_hash = hashlib.sha256(evidence_bytes).hexdigest()
         if context.get(f"{key}_sha256") != raw_hash:
             raise P4BridgeError("candidate evidence digest substitution")
-        payload = _json_file(candidate_dir / name)
+        payload = _json_bytes(evidence_bytes)
         if (
             payload.get("schema_version") != 1
             or payload.get("attempt_id") != subject["attempt_id"]

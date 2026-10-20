@@ -962,7 +962,12 @@ class OwnedDockerAttempt:
             raise P4RecoveryRequired("owned cleanup is UNKNOWN; retain ledger and recover")
 
     def _checked_call(
-        self, argv: Sequence[str], *, build: bool = False, cleanup: bool = False
+        self,
+        argv: Sequence[str],
+        *,
+        build: bool = False,
+        cleanup: bool = False,
+        structured: bool = False,
     ) -> CommandResult:
         if not self._entered:
             raise P4AdapterError("attempt lease must be active")
@@ -996,7 +1001,15 @@ class OwnedDockerAttempt:
             self.recovery_required = True
             raise P4AdapterError("attempt aggregate subprocess output budget exhausted")
         allowance = cap - spent
-        retained = min(subprocess_policy["capture_limit_bytes"], allowance)
+        if structured:
+            # A top-level import would cycle through p4_scoped_engine.CommandResult.
+            from p4_scoped_engine import ScopedEngineRunner
+
+            if build or cleanup or not isinstance(self.run, ScopedEngineRunner):
+                raise P4AdapterError("structured capture requires admitted runtime Engine")
+        retained = (
+            allowance if structured else min(subprocess_policy["capture_limit_bytes"], allowance)
+        )
         try:
             result = self.run(
                 argv,
@@ -1420,6 +1433,7 @@ class OwnedDockerAttempt:
         volumes: dict[str, OwnedItem],
         expected_images: dict[str, str],
         relay_profile: dict[str, Any],
+        role_profiles: dict[str, Any],
         relay_program: Path,
         remaining_seconds: int,
     ) -> dict[str, Any]:
@@ -1437,6 +1451,7 @@ class OwnedDockerAttempt:
             volumes=volumes,
             expected_images=expected_images,
             relay_profile=relay_profile,
+            role_profiles=role_profiles,
             relay_program=relay_program,
             remaining_seconds=remaining_seconds,
         )
@@ -1444,6 +1459,7 @@ class OwnedDockerAttempt:
             "roles": result["roles"],
             "networks": result["networks"],
             "volumes": result["volumes"],
+            "effective_profiles_sha256": result["effective_profiles_sha256"],
         }
         digest = hashlib.sha256(
             json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")

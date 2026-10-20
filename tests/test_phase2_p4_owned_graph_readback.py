@@ -26,6 +26,7 @@ def module():
 
 
 def mock_attempt():
+    from p4_effective_profiles import RoleExecutionProfile
     from p4_scoped_engine import EngineBinding, ScopedEngineRunner
 
     roles = {
@@ -99,6 +100,7 @@ def mock_attempt():
         ("fixture-app", "fixture"): ["fixture-origin"],
         ("fixture-control", "control"): ["fixture-control"],
     }
+    profiles = {}
     for role, item in containers.items():
         eps = {
             networks[k].name: {
@@ -142,11 +144,46 @@ def mock_attempt():
                 }
             ],
         }[role]
+        user = (
+            "10002:10002"
+            if role == "candidate"
+            else ("10003:10003" if role in {"relay", "evaluator"} else "10001:10001")
+        )
+        entrypoint = ["python", "-B"]
+        command = ["/trusted/fixed-" + role + ".py"]
+        env = ["LANG=C"]
+        workdir = "/work"
+        profiles[role] = RoleExecutionProfile(
+            role=role,
+            requested_image=images[role],
+            resolved_image_id=images[role],
+            user=user,
+            entrypoint=tuple(entrypoint),
+            command=tuple(command),
+            environment=tuple(env),
+            workdir=workdir,
+            pid_mode="",
+            ipc_mode="private",
+            logging_driver="local",
+            logging_options=(("max-file", "2"), ("max-size", "1m")),
+            tmpfs=(("/tmp", "rw,nosuid,nodev,size=16777216"),),
+            cap_drop=("ALL",),
+            security_options=("no-new-privileges:true",),
+        )
         rows[("container", item.object_id)] = {
             "Mounts": mounts,
             "Id": item.object_id,
             "Name": "/" + item.name,
-            "Config": {"Labels": {"mcpbg.p4.owner": owner}, "Image": images[role]},
+            "Config": {
+                "Labels": {"mcpbg.p4.owner": owner},
+                "Image": images[role],
+                "User": user,
+                "Entrypoint": entrypoint,
+                "Cmd": command,
+                "Env": env,
+                "WorkingDir": workdir,
+            },
+            "Image": images[role],
             "HostConfig": {
                 "Privileged": False,
                 "ReadonlyRootfs": True,
@@ -162,14 +199,25 @@ def mock_attempt():
                 "CapDrop": ["ALL"],
                 "CapAdd": None,
                 "SecurityOpt": ["no-new-privileges:true"],
+                "PidMode": "",
+                "IpcMode": "private",
+                "LogConfig": {"Type": "local", "Config": {"max-size": "1m", "max-file": "2"}},
+                "Tmpfs": {"/tmp": "rw,nosuid,nodev,size=16777216"},
             },
             "State": {"Running": False, "Pid": 0, "Restarting": False},
             "NetworkSettings": {"Networks": eps},
         }
-    rows[("image", images["relay"])] = {"Id": images["relay"]}
+    for image_id in images.values():
+        rows[("image", image_id)] = {
+            "Id": image_id,
+            "RepoDigests": [image_id],
+            "Os": "linux",
+            "Architecture": "amd64",
+            "Config": {"Env": ["LANG=C"]},
+        }
     calls = []
 
-    def checked(args):
+    def checked(args, **_kw):
         calls.append(tuple(args))
         try:
             content = rows[(args[1], args[-1])]
@@ -189,6 +237,7 @@ def mock_attempt():
         items=[*networks.values(), *containers.values(), *volumes.values()],
         policy=json.loads((CI / "p4-resource-policy.json").read_text()),
         _checked_call=checked,
+        role_profiles=profiles,
     )
     return attempt, networks, containers, volumes, images, rows, calls
 
@@ -201,6 +250,7 @@ def check(m, a, networks, roles, volumes, images):
         volumes=volumes,
         expected_images=images,
         relay_profile={},
+        role_profiles=a.role_profiles,
         relay_program=Path("/tmp/readonly-relay"),
         remaining_seconds=300,
     )
@@ -214,7 +264,7 @@ def test_complete_readback_invokes_all_verified_boundaries(monkeypatch):
     result = check(m, a, networks, roles, volumes, images)
     assert result["status"] == "FIVE_ROLE_PRESTART_READBACK_SOURCE_ONLY"
     assert result["runtime_execution_proven"] is False
-    assert len(calls) == 9  # 3 network, 5 container, 1 relay-image readback
+    assert len(calls) == 13  # 3 network, 5 container, 5 exact resolved images
     assert invoked and invoked[0]["container"]["Id"] == roles["relay"].object_id
     assert a.recovery_required is False
 
@@ -298,11 +348,11 @@ def test_rejects_partial_or_bypassed_prestart_graph(monkeypatch, tamper):
         previous = a._checked_call
         counts = [0]
 
-        def drift(args):
+        def drift(args, **_kw):
             counts[0] += 1
             if counts[0] == 3:
                 roles["candidate"].state = "UNKNOWN"
-            return previous(args)
+            return previous(args, **_kw)
 
         a._checked_call = drift
     elif tamper == "wrong_limits":
@@ -356,6 +406,7 @@ def test_adapter_records_only_successful_graph_readback(monkeypatch, tmp_path):
         "roles": {"candidate": "a" * 64},
         "networks": {"subject": "b" * 64},
         "volumes": {"fixture": "owned"},
+        "effective_profiles_sha256": "d" * 64,
         "runtime_execution_proven": False,
     }
     monkeypatch.setattr(topology, "attest_owned_prestart_graph", lambda **kw: expected)
@@ -367,6 +418,7 @@ def test_adapter_records_only_successful_graph_readback(monkeypatch, tmp_path):
         volumes={},
         expected_images={},
         relay_profile={},
+        role_profiles={},
         relay_program=tmp_path / "relay.py",
         remaining_seconds=100,
     )
@@ -385,6 +437,68 @@ def test_adapter_records_only_successful_graph_readback(monkeypatch, tmp_path):
             volumes={},
             expected_images={},
             relay_profile={},
+            role_profiles={},
             relay_program=tmp_path / "relay.py",
             remaining_seconds=100,
         )
+
+
+@pytest.mark.parametrize(
+    "role", ["candidate", "evaluator", "relay", "fixture-app", "fixture-control"]
+)
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("Config.User", "0:0"),
+        ("Config.Entrypoint", ["/bin/sh"]),
+        ("Config.Cmd", ["--unreviewed"]),
+        ("Config.Env", ["LANG=C", "EXTRA=1"]),
+        ("Config.WorkingDir", "/tmp"),
+        ("HostConfig.PidMode", "host"),
+        ("HostConfig.IpcMode", "host"),
+        ("HostConfig.LogConfig", {"Type": "json-file", "Config": {}}),
+        ("HostConfig.Tmpfs", {"/tmp": "rw,exec"}),
+        ("HostConfig.UsernsMode", "host"),
+    ],
+)
+def test_every_role_rejects_effective_execution_mutations(monkeypatch, role, field, value):
+    m = module()
+    attempt, networks, roles, volumes, images, rows, _ = mock_attempt()
+    monkeypatch.setattr(m, "verify_relay_prestart", lambda **_kw: None)
+    current = rows[("container", roles[role].object_id)]
+    parent, key = field.split(".")
+    current[parent][key] = value
+    with pytest.raises(m.P4TopologyError):
+        check(m, attempt, networks, roles, volumes, images)
+    assert attempt.recovery_required is True
+
+
+def test_profile_is_required_and_resolved_image_is_verified(monkeypatch):
+    m = module()
+    attempt, networks, roles, volumes, images, rows, _ = mock_attempt()
+    monkeypatch.setattr(m, "verify_relay_prestart", lambda **_kw: None)
+    del attempt.role_profiles["fixture-control"]
+    with pytest.raises(m.P4TopologyError):
+        check(m, attempt, networks, roles, volumes, images)
+    attempt, networks, roles, volumes, images, rows, _ = mock_attempt()
+    rows[("image", images["fixture-app"])]["Id"] = "a" * 64
+    with pytest.raises(m.P4TopologyError):
+        check(m, attempt, networks, roles, volumes, images)
+
+
+def test_requested_manifest_digest_and_resolved_image_id_are_distinct(monkeypatch):
+    from dataclasses import replace
+
+    m = module()
+    attempt, networks, roles, volumes, images, rows, _ = mock_attempt()
+    monkeypatch.setattr(m, "verify_relay_prestart", lambda **_kw: None)
+    old = images["candidate"]
+    manifest = "ghcr.io/example/fixture@sha256:" + "f" * 64
+    images["candidate"] = manifest
+    attempt.role_profiles["candidate"] = replace(
+        attempt.role_profiles["candidate"], requested_image=manifest
+    )
+    rows[("container", roles["candidate"].object_id)]["Config"]["Image"] = manifest
+    rows[("image", manifest)] = rows.pop(("image", old))
+    rows[("image", manifest)]["RepoDigests"] = [manifest]
+    assert check(m, attempt, networks, roles, volumes, images)["effective_profiles_sha256"]

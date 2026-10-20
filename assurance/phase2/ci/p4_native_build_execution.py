@@ -88,6 +88,9 @@ def bounded_native_command(
     selector = selectors.DefaultSelector()
     complete = False
     seen = 0
+    # Preserve every byte up to the existing aggregate allowance. Callers that
+    # deliberately retain smaller diagnostic logs truncate and label them at
+    # their boundary; Engine JSON must never be silently clipped here.
     kept: dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
     try:
         proc = subprocess.Popen(
@@ -115,9 +118,7 @@ def bounded_native_command(
                 seen += len(chunk)
                 if seen > byte_budget:
                     raise P4BuildUnknown("private Engine output budget")
-                current = kept[key.data]
-                if len(current) < 32768:
-                    current.extend(chunk[: 32768 - len(current)])
+                kept[key.data].extend(chunk)
         code = proc.wait(timeout=max(0.01, remaining - (time.monotonic() - start)))
         complete = True
         return BuildCommandResult(code, bytes(kept["stdout"]), bytes(kept["stderr"]), seen)

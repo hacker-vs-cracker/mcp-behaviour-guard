@@ -45,6 +45,7 @@
     "assurance/phase2/ci/p4_candidate_materialization.py",
     "assurance/phase2/ci/p4_control_audit.py",
     "assurance/phase2/ci/p4_controller_plan.py",
+    "assurance/phase2/ci/p4_effective_profiles.py",
     "assurance/phase2/ci/p4_fixture_sqlite_export.py",
     "assurance/phase2/ci/p4_metered_fixture_relay.py",
     "assurance/phase2/ci/p4_native_build_execution.py",
@@ -191,7 +192,7 @@
   "p4_fixture_sqlite_export": {
     "candidate_execution_enabled": false,
     "module_path": "assurance/phase2/ci/p4_fixture_sqlite_export.py",
-    "module_sha256": "5bc71b7fa05977478df614eb279258177003ef8eed825e45c814a95f27dfad92",
+    "module_sha256": "4c54cd4afb3d28128e6eb2a43bd8be1eb8ca63bed450246bd9d8a0e833311837",
     "runtime_enforcement_proven": false,
     "status": "OFFLINE_RECONCILIATION_SOURCE_ONLY",
     "verdict_publication_enabled": false
@@ -275,11 +276,12 @@
     "source_sha256": {
       "assurance/phase2/ci/p4-build-stage-profile.json": "9359966679ebbf93bca3e260f348cbbe7cfb3ea3f6870131350dbef32b279120",
       "assurance/phase2/ci/p4-relay-role-profile.json": "333f34e15c2c2af6eb92f3255e3f4de533d9ea373342fcd86e5a1fb54b6e48cb",
-      "assurance/phase2/ci/p4_control_audit.py": "6275e9e6e54835a61f88df0a1a3eb13ff11ec4bbc9e6f413235854058157cf9d",
-      "assurance/phase2/ci/p4_fixture_sqlite_export.py": "5bc71b7fa05977478df614eb279258177003ef8eed825e45c814a95f27dfad92",
-      "assurance/phase2/ci/p4_native_build_execution.py": "b9d2908923c0266810bfb74786875e2d5cc0878f30aa135312cdad192a77697e",
-      "assurance/phase2/ci/p4_reference_bridge.py": "5a44dc0cf0875feb52b9fcf3413a83a6c2202add76e639a90148c806e99b184e",
-      "assurance/phase2/ci/p4_runtime_topology.py": "8df513e139e1cf0be5ae62741fa6393799e4c4a908255d14274f7d9edafe8e4c",
+      "assurance/phase2/ci/p4_control_audit.py": "179c1d4cb8282cf03abed4336051a51c17f3f5b1c0bae2a19f57518636a37281",
+      "assurance/phase2/ci/p4_effective_profiles.py": "e5e15d84c0aabe127eb01fb5c7e91c52960722ed8d8b73b4e4acb9af4efcafb3",
+      "assurance/phase2/ci/p4_fixture_sqlite_export.py": "5a0a5c833e6fca8f9373af7f263c49988528b217d277bf8216e9df40d233eadf",
+      "assurance/phase2/ci/p4_native_build_execution.py": "45d893c6500bcd45d84127b5ff9ce6bc4e714bd98be9671772f0586f13c65a22",
+      "assurance/phase2/ci/p4_reference_bridge.py": "be362809b34f4b68b4bd31ad84b6688fd7235d2d673f18e303b6b5c5ed3031d0",
+      "assurance/phase2/ci/p4_runtime_topology.py": "20f565e02f214e1daebbaa336d34ae422dd76f74f2d4e2bc17a9fa412cf69870",
       "assurance/phase2/ci/p4_scoped_engine.py": "05990a7766c586215125440cd7a4e06c2d5675427ca03b491c2d72414c27dbfb",
       "assurance/phase2/ci/p4_staged_pipeline.py": "d573b12f9ff874908e3aa00cfa830526ce1f02ce98db9a6bfbf99a185f0c3d7d",
       "assurance/phase2/ci/p4_worker_storage.py": "915b4128e004b2371eb689be3b2ba5d0f209c153bcf90ca3b4df308a74c4ed39"
@@ -292,7 +294,7 @@
     "candidate_execution_enabled": false,
     "hostile_execution_authorized": false,
     "module_path": "assurance/phase2/ci/p4_trusted_runtime_adapter.py",
-    "module_sha256": "0b04d65ddda481990a5c146925137c57c8728a97deb21ef6155ef42ebad52124",
+    "module_sha256": "bd41aca43d48a90af8fc9aa99966001de3de17b7e392bd29b410c6e8f70c64a4",
     "runtime_enforcement_proven": false,
     "stage": "TRUSTED_NON_HOSTILE_FIXTURE_ADAPTER",
     "status": "SOURCE_WIRED_NOT_RUNTIME_PROVEN",

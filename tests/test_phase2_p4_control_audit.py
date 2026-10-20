@@ -292,3 +292,43 @@ def test_real_fixture_store_fence_finalizes_and_validates_audit(tmp_path):
             )
     finally:
         sys.path.pop(0)
+
+
+def test_metered_control_adapter_rejects_unscoped_engine():
+    from p4_control_audit import ControlUnknown, metered_control_executor
+
+    with pytest.raises(ControlUnknown):
+        metered_control_executor(object())
+
+
+def test_metered_control_adapter_translates_private_engine(monkeypatch):
+    from p4_control_audit import ControlUnknown, metered_control_executor
+    from p4_scoped_engine import EngineBinding, ScopedEngineRunner
+    from p4_trusted_runtime_adapter import CommandResult
+
+    engine = ScopedEngineRunner(EngineBinding("unix:///run/mcpbg-p4-a/engine.sock", "e" * 64, 1, 2))
+    called = []
+
+    def fake(self, command, **kw):
+        called.append((command, kw))
+        return CommandResult(0, b'{"status":"ok"}', b"", 135)
+
+    # Special method lookup bypasses an instance attribute; test with a class
+    # patch so the real conversion is exercised but no subprocess is launched.
+    monkeypatch.setattr(ScopedEngineRunner, "__call__", fake)
+    action = metered_control_executor(engine)
+    result = action(
+        ["docker", "exec", "a" * 64, "python"],
+        timeout=2,
+        output_budget=262144,
+        retained_per_stream=262144,
+    )
+    assert result.code == 0 and result.output_bytes == 135
+    assert called[0][1]["output_budget"] == 262144
+    with pytest.raises(ControlUnknown):
+        action(
+            ["docker", "--host", "wrong"],
+            timeout=2,
+            output_budget=262144,
+            retained_per_stream=262144,
+        )

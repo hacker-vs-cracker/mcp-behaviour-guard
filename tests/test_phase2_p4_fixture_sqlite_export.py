@@ -119,3 +119,77 @@ def test_rejects_export_limit_and_unfinalized_state(tmp_path: Path):
         db.execute("UPDATE attempts SET state='FENCED' WHERE attempt_id='attempt-1'")
     with pytest.raises(m.ExportInconsistent):
         _verify(m, exported, fenced, finalized)
+
+
+def test_independent_business_projection_rejects_wrong_value_and_attribution(tmp_path: Path):
+    m = _mod()
+    exported, fenced, finalized = _fixture(tmp_path)
+    with sqlite3.connect(exported / "fixture.db") as db:
+        expected = [
+            dict(
+                zip(
+                    (
+                        "record_id",
+                        "value",
+                        "updated_by_attempt",
+                        "updated_by_request",
+                        "updated_at",
+                    ),
+                    row,
+                    strict=True,
+                )
+            )
+            for row in db.execute(
+                "SELECT record_id,value,updated_by_attempt,updated_by_request,updated_at "
+                "FROM records ORDER BY record_id"
+            ).fetchall()
+        ]
+    assert len(expected) == 1
+    output = m.verify_exported_fixture_sqlite(
+        exported_state=exported,
+        attempt_id="attempt-1",
+        fenced_snapshot=fenced,
+        finalized_snapshot=finalized,
+        artifact_ceiling_bytes=16_777_216,
+        reviewed_expected_records=expected,
+    )
+    assert output["business_effect_status"] == "MATCHED_REVIEWED_PROJECTION_SOURCE_ONLY"
+    assert output["source_export_status"] == "NOT_EVALUATED"
+    with sqlite3.connect(exported / "fixture.db") as db:
+        db.execute("UPDATE records SET value='wrong-business-value'")
+    with pytest.raises(m.ExportInconsistent, match="business records"):
+        m.verify_exported_fixture_sqlite(
+            exported_state=exported,
+            attempt_id="attempt-1",
+            fenced_snapshot=fenced,
+            finalized_snapshot=finalized,
+            artifact_ceiling_bytes=16_777_216,
+            reviewed_expected_records=expected,
+        )
+    tampered = [{**expected[0], "updated_by_attempt": "another-attempt"}]
+    with pytest.raises(m.ExportInconsistent):
+        m.verify_exported_fixture_sqlite(
+            exported_state=exported,
+            attempt_id="attempt-1",
+            fenced_snapshot=fenced,
+            finalized_snapshot=finalized,
+            artifact_ceiling_bytes=16_777_216,
+            reviewed_expected_records=tampered,
+        )
+
+
+def test_independent_fenced_source_fingerprint_must_match(tmp_path: Path):
+    m = _mod()
+    exported, fenced, finalized = _fixture(tmp_path)
+    with pytest.raises(m.ExportInconsistent, match="fenced source/export"):
+        m.verify_exported_fixture_sqlite(
+            exported_state=exported,
+            attempt_id="attempt-1",
+            fenced_snapshot=fenced,
+            finalized_snapshot=finalized,
+            artifact_ceiling_bytes=16_777_216,
+            observed_fenced_file_sha256={"fixture.db": "0" * 64},
+        )
+    output = _verify(m, exported, fenced, finalized)
+    assert output["business_effect_status"] == "NOT_EVALUATED"
+    assert output["source_export_status"] == "NOT_EVALUATED"

@@ -272,6 +272,7 @@ def attest_owned_prestart_graph(
     volumes: dict[str, Any],
     expected_images: dict[str, str],
     relay_profile: dict[str, Any],
+    role_profiles: dict[str, Any],
     relay_program: Path,
     remaining_seconds: int,
 ) -> dict[str, Any]:
@@ -283,6 +284,7 @@ def attest_owned_prestart_graph(
     is UNKNOWN, not permission to start. Source acceptance is not physical proof.
     """
     import p4_resource_enforcement as bounds
+    from p4_effective_profiles import attest_effective_profiles
     from p4_scoped_engine import ScopedEngineRunner
 
     role_nets = {
@@ -304,6 +306,7 @@ def attest_owned_prestart_graph(
             or set(containers) != set(role_nets)
             or set(expected_images) != set(role_nets)
             or not isinstance(relay_profile, dict)
+            or not isinstance(role_profiles, dict)
             or type(remaining_seconds) is not int
             or not 0 < remaining_seconds <= 600
         ):
@@ -358,7 +361,8 @@ def attest_owned_prestart_graph(
 
         def inspect(kind: str, object_id: str) -> dict[str, Any]:
             result = attempt._checked_call(
-                ["docker", kind, "inspect", "--format", "{{json .}}", object_id]
+                ["docker", kind, "inspect", "--format", "{{json .}}", object_id],
+                structured=True,
             )
             if result.exit_code != 0 or not result.stdout:
                 raise P4TopologyError("private Engine inventory missing")
@@ -446,7 +450,14 @@ def attest_owned_prestart_graph(
                     raise P4TopologyError("effective role volume mount bypass")
             endpoints[role] = endpoint
         verify_dns_alias_routing(endpoints=endpoints, network_ids=net_ids, network_names=names)
-        relay_image = inspect("image", expected_images["relay"])
+        image_inventory = {role: inspect("image", ref) for role, ref in expected_images.items()}
+        profile_digest = attest_effective_profiles(
+            profiles=role_profiles,
+            inspections=role_inventory,
+            image_inspections=image_inventory,
+            expected_images=expected_images,
+        )
+        relay_image = image_inventory["relay"]
         verify_relay_prestart(
             container=role_inventory["relay"],
             image=relay_image,
@@ -472,6 +483,7 @@ def attest_owned_prestart_graph(
             "roles": ids,
             "networks": net_ids,
             "volumes": {name: item.name for name, item in volumes.items()},
+            "effective_profiles_sha256": profile_digest,
             "runtime_execution_proven": False,
             "worker_cleanup_proven": False,
             "all_writers_fenced": False,

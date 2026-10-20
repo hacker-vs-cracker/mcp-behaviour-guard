@@ -102,6 +102,55 @@ class ControlResponse:
     output_bytes: int
 
 
+def metered_control_executor(engine: Any) -> Callable[..., ControlResponse]:
+    """Adapt the exact scoped Engine output to the fixed control RPC contract.
+
+    Both daemon identity reads, the command and the response must consume the
+    same Engine budget. An arbitrary duck-typed success object cannot approve
+    fixture-control output. This adapter does not record a durable intent.
+    """
+    from p4_scoped_engine import ScopedEngineRunner
+    from p4_trusted_runtime_adapter import CommandResult
+
+    if not isinstance(engine, ScopedEngineRunner):
+        raise ControlUnknown("fixed control requires a bound private Engine")
+
+    def execute(
+        command: list[str], *, timeout: float, output_budget: int, retained_per_stream: int
+    ) -> ControlResponse:
+        if (
+            type(command) is not list
+            or command[:2] != ["docker", "exec"]
+            or type(output_budget) is not int
+            or output_budget != 262144
+            or type(retained_per_stream) is not int
+            or retained_per_stream != 262144
+        ):
+            raise ControlUnknown("fixed control command/output cap differs")
+        try:
+            result = engine(
+                command,
+                timeout=timeout,
+                output_budget=output_budget,
+                retained_per_stream=retained_per_stream,
+            )
+        except Exception as exc:
+            raise ControlUnknown("private control Engine result UNKNOWN") from exc
+        if (
+            type(result) is not CommandResult
+            or type(result.exit_code) is not int
+            or type(result.output_bytes) is not int
+            or not 0 <= result.output_bytes <= output_budget
+            or type(result.stdout) is not bytes
+            or type(result.stderr) is not bytes
+            or len(result.stdout) + len(result.stderr) > result.output_bytes
+        ):
+            raise ControlUnknown("private control output shape UNKNOWN")
+        return ControlResponse(result.exit_code, result.stdout, result.stderr, result.output_bytes)
+
+    return execute
+
+
 _ACTIONS = {
     "health": ("GET", "/health"),
     "create": ("POST", "/attempts"),
