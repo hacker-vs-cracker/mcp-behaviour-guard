@@ -2238,3 +2238,84 @@ def test_ledger_and_lease_directory_entries_fsynced_before_remote_calls(tmp_path
     with pytest.raises(OSError), m.PrivateAttemptLease(private / "failed.lock"):
         called.append("entered")
     assert not called
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [None, "early", "duplicate", "bad_digest", "extra_field", "duplicate_id", "new_resource"],
+)
+def test_prestart_graph_receipt_can_be_replayed_without_erasing_unknown(
+    tmp_path: Path, tamper: str | None
+) -> None:
+    """A valid source-only prestart receipt must not strand the next attempt.
+
+    Invalid or reordered receipts cannot turn incomplete graph creation into CLEAN.
+    """
+    module = _module()
+    policy, _ = _inputs(module)
+    lock = tmp_path / "global.lock"
+    scope = _ledger_identity(lock)
+    events = []
+
+    def row(event: str, **fields: object) -> dict:
+        return dict(event=event, attempt="first", nonce="deadbeef", utc_epoch=1, **scope, **fields)
+
+    events.append(row("ATTEMPT_OPEN"))
+    items = []
+    for kind, count in (("network", 3), ("container", 5), ("volume", 2)):
+        for i in range(count):
+            name = f"mcpbg-p4-first-deadbeef-{kind}-{i + 1}"
+            obj = name if kind == "volume" else f"{len(items) + 1:064x}"
+            if tamper == "duplicate_id" and kind == "container" and i == 0:
+                obj = "1".zfill(64)
+            items.append((kind, name, obj))
+            events.extend(
+                (
+                    row("RESERVED", kind=kind, name=name, state="INTENT", object_id=None),
+                    row(
+                        "CREATE_REQUESTED", kind=kind, name=name, state="REQUESTED", object_id=None
+                    ),
+                    row("CREATE_CONFIRMED", kind=kind, name=name, state="CREATED", object_id=obj),
+                )
+            )
+    receipt = row("PRESTART_GRAPH_ATTESTED", details={"readback_sha256": "a" * 64})
+    if tamper == "bad_digest":
+        receipt["details"] = {"readback_sha256": "broken"}
+    elif tamper == "extra_field":
+        receipt["object_id"] = None
+    if tamper == "early":
+        events.insert(2, receipt)
+    else:
+        events.append(receipt)
+    if tamper == "duplicate":
+        events.append(receipt)
+    if tamper == "new_resource":
+        events.append(
+            row(
+                "RESERVED",
+                kind="network",
+                name="mcpbg-p4-first-deadbeef-network-4",
+                state="INTENT",
+                object_id=None,
+            )
+        )
+    for kind, name, obj in reversed(items):
+        events.append(row("ABSENCE_VERIFIED", kind=kind, name=name, state="ABSENT", object_id=obj))
+    events.append(row("FINISH_CLEAN"))
+    prior = tmp_path / "owned-first.jsonl"
+    prior.write_text("".join(json.dumps(e, sort_keys=True) + "\n" for e in events))
+    prior.chmod(0o600)
+    fake = FakeDocker()
+    second = tmp_path / "owned-second.jsonl"
+    if tamper is None:
+        with module.OwnedDockerAttempt(policy, "second", lock, second, run=fake):
+            pass
+        assert second.is_file()
+    else:
+        with (
+            pytest.raises(module.P4RecoveryRequired),
+            module.OwnedDockerAttempt(policy, "second", lock, second, run=fake),
+        ):
+            pass
+        assert not second.exists()
+    assert fake.commands == []

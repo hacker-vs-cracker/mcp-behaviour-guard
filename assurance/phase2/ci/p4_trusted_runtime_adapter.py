@@ -691,9 +691,45 @@ class OwnedDockerAttempt:
                 export_pending: dict[str, dict[str, str]] = {}
                 export_finished: set[str] = set()
                 export_destinations: set[str] = set()
+                graph_attested = False
                 for event in events[1:-1]:
                     name, kind, state = event.get("name"), event.get("kind"), event.get("event")
                     object_id = event.get("object_id")
+                    if state == "PRESTART_GRAPH_ATTESTED":
+                        details = event.get("details")
+                        created = [entry for entry in pending.values() if entry[1] == "CREATED"]
+                        kind_counts = {
+                            resource: sum(entry[0] == resource for entry in created)
+                            for resource in ("network", "container", "volume")
+                        }
+                        fixed_ids = [
+                            entry[2] for entry in created if entry[0] in {"network", "container"}
+                        ]
+                        if (
+                            graph_attested
+                            or any(
+                                field in event for field in ("kind", "name", "state", "object_id")
+                            )
+                            or not isinstance(details, dict)
+                            or set(details) != {"readback_sha256"}
+                            or not isinstance(details["readback_sha256"], str)
+                            or re.fullmatch(r"[0-9a-f]{64}", details["readback_sha256"]) is None
+                            or len(pending) != 10
+                            or kind_counts != {"network": 3, "container": 5, "volume": 2}
+                            or len(set(fixed_ids)) != 8
+                        ):
+                            raise P4RecoveryRequired(
+                                "prior graph attestation malformed or incomplete"
+                            )
+                        graph_attested = True
+                        continue
+                    if graph_attested and state in {
+                        "RESERVED",
+                        "CREATE_REQUESTED",
+                        "CREATE_CONFIRMED",
+                        "NOT_SUBMITTED",
+                    }:
+                        raise P4RecoveryRequired("resource creation after graph attestation")
                     if (
                         not isinstance(name, str)
                         or not isinstance(kind, str)
