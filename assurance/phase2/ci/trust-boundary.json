@@ -45,6 +45,7 @@
     "assurance/phase2/ci/p4_candidate_materialization.py",
     "assurance/phase2/ci/p4_control_audit.py",
     "assurance/phase2/ci/p4_controller_plan.py",
+    "assurance/phase2/ci/p4_fixture_sqlite_export.py",
     "assurance/phase2/ci/p4_metered_fixture_relay.py",
     "assurance/phase2/ci/p4_native_build_execution.py",
     "assurance/phase2/ci/p4_reference_bridge.py",
@@ -187,6 +188,14 @@
     "workflow_path": ".github/workflows/phase2-trusted-intake.yml",
     "workflow_sha256": "f22da6a01594f32aa3cdd21b3e0158dcd204f002c8d8cb03f8d64bc778a9197e"
   },
+  "p4_fixture_sqlite_export": {
+    "candidate_execution_enabled": false,
+    "module_path": "assurance/phase2/ci/p4_fixture_sqlite_export.py",
+    "module_sha256": "5bc71b7fa05977478df614eb279258177003ef8eed825e45c814a95f27dfad92",
+    "runtime_enforcement_proven": false,
+    "status": "OFFLINE_RECONCILIATION_SOURCE_ONLY",
+    "verdict_publication_enabled": false
+  },
   "p4_live_materialization_proof": {
     "candidate_execution_performed": false,
     "hostile_execution_authorized": false,
@@ -267,6 +276,7 @@
       "assurance/phase2/ci/p4-build-stage-profile.json": "9359966679ebbf93bca3e260f348cbbe7cfb3ea3f6870131350dbef32b279120",
       "assurance/phase2/ci/p4-relay-role-profile.json": "333f34e15c2c2af6eb92f3255e3f4de533d9ea373342fcd86e5a1fb54b6e48cb",
       "assurance/phase2/ci/p4_control_audit.py": "6275e9e6e54835a61f88df0a1a3eb13ff11ec4bbc9e6f413235854058157cf9d",
+      "assurance/phase2/ci/p4_fixture_sqlite_export.py": "5bc71b7fa05977478df614eb279258177003ef8eed825e45c814a95f27dfad92",
       "assurance/phase2/ci/p4_native_build_execution.py": "b9d2908923c0266810bfb74786875e2d5cc0878f30aa135312cdad192a77697e",
       "assurance/phase2/ci/p4_reference_bridge.py": "5a44dc0cf0875feb52b9fcf3413a83a6c2202add76e639a90148c806e99b184e",
       "assurance/phase2/ci/p4_runtime_topology.py": "e682f3c98be311a580d4c386fc1f95f4f0e6f1dcc2697f7f3f469a6066b8563c",
