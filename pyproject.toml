@@ -57,6 +57,7 @@ Changelog = "https://github.com/hacker-vs-cracker/mcp-behaviour-guard/blob/main/
 packages = ["src/mcp_behaviour_guard"]
 
 [tool.pytest.ini_options]
+pythonpath = ["."]
 addopts = "-q"
 asyncio_mode = "auto"
 testpaths = ["tests"]

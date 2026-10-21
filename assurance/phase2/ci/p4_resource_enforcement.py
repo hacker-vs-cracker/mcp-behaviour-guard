@@ -557,11 +557,11 @@ def _bounded_tar_stream(path: Path, limit: int, entries: int, *, deadline: float
             with gzip.GzipFile(fileobj=source) as reader:
                 drain(reader)
         elif magic.startswith(b"BZh"):
-            with bz2.BZ2File(source) as reader:
-                drain(reader)
+            with bz2.BZ2File(source) as bz_reader:
+                drain(bz_reader)
         elif magic == b"\xfd7zXZ\x00":
-            with lzma.LZMAFile(source) as reader:
-                drain(reader)
+            with lzma.LZMAFile(source) as lz_reader:
+                drain(lz_reader)
         else:
             drain(source)
         spool.seek(0)
@@ -672,9 +672,14 @@ def _extract_tar(
 
 
 def safe_extract_archive(
-    archive_path: Path, destination: Path, policy: dict[str, Any]
+    archive_path: Path, destination: Path, policy: dict[str, Any], *, deadline: float | None = None
 ) -> dict[str, int]:
-    deadline = time.monotonic() + 30.0
+    now = time.monotonic()
+    if deadline is None:
+        deadline = now + 30.0
+    elif not isinstance(deadline, (float, int)) or not math.isfinite(deadline) or deadline <= now:
+        raise P4ResourceEnforcementError("archive extraction deadline invalid or expired")
+    deadline = min(float(deadline), now + 30.0)
     try:
         if archive_path.is_symlink() or not archive_path.is_file():
             raise P4ResourceEnforcementError("archive input must be a regular file")
