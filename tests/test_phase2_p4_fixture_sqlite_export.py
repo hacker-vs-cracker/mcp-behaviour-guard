@@ -193,3 +193,33 @@ def test_independent_fenced_source_fingerprint_must_match(tmp_path: Path):
     output = _verify(m, exported, fenced, finalized)
     assert output["business_effect_status"] == "NOT_EVALUATED"
     assert output["source_export_status"] == "NOT_EVALUATED"
+
+
+def test_bounded_sqlite_rejects_expired_outer_deadline(tmp_path: Path):
+    import time
+
+    m = _mod()
+    exported, fenced, finalized = _fixture(tmp_path)
+    with pytest.raises(m.ExportInconsistent, match="admission invalid"):
+        m.verify_exported_fixture_sqlite(
+            exported_state=exported,
+            attempt_id="attempt-1",
+            fenced_snapshot=fenced,
+            finalized_snapshot=finalized,
+            artifact_ceiling_bytes=16_777_216,
+            original_deadline_monotonic=time.monotonic() - 1,
+        )
+
+
+def test_bounded_sqlite_rejects_more_than_1024_business_rows(tmp_path: Path):
+    m = _mod()
+    exported, fenced, finalized = _fixture(tmp_path)
+    with sqlite3.connect(exported / "fixture.db") as db:
+        db.executemany(
+            "INSERT INTO records "
+            "(record_id,value,updated_by_attempt,updated_by_request,updated_at) "
+            "VALUES(?,?,?,?,?)",
+            [(f"extra-{x:04d}", "value", "attempt-1", "request-1", "now") for x in range(1025)],
+        )
+    with pytest.raises(m.ExportInconsistent, match="bounded SQLite result rows"):
+        _verify(m, exported, fenced, finalized)

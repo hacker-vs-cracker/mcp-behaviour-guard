@@ -15,6 +15,7 @@ import re
 import sqlite3
 import stat
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -117,6 +118,7 @@ def verify_exported_fixture_sqlite(
     artifact_ceiling_bytes: int,
     reviewed_expected_records: list[dict[str, Any]] | None = None,
     observed_fenced_file_sha256: dict[str, str] | None = None,
+    original_deadline_monotonic: float | None = None,
 ) -> dict[str, Any]:
     """Cross-check finalized control RPC evidence with a self-consistent SQLite backup.
 
@@ -135,6 +137,13 @@ def verify_exported_fixture_sqlite(
         or _ATTEMPT.fullmatch(attempt_id) is None
         or type(artifact_ceiling_bytes) is not int
         or not 0 < artifact_ceiling_bytes <= 16_777_216
+        or (
+            original_deadline_monotonic is not None
+            and (
+                type(original_deadline_monotonic) is not float
+                or not time.monotonic() < original_deadline_monotonic <= time.monotonic() + 600
+            )
+        )
     ):
         raise ExportInconsistent("export admission invalid")
     try:
@@ -145,10 +154,30 @@ def verify_exported_fixture_sqlite(
         )
     except ControlUnknown as exc:
         raise ExportInconsistent("fenced/finalized control transcript invalid") from exc
+    # The original coordinator deadline is not reset at export. Offline callers
+    # use a tighter local window without manufacturing native time authority.
+    until = min(time.monotonic() + 60, original_deadline_monotonic or float("inf"))
+
+    def time_left() -> None:
+        if time.monotonic() >= until:
+            raise ExportInconsistent("bounded SQLite reconciliation deadline exceeded")
+
+    def rows_bounded(
+        db: sqlite3.Connection, statement: str, args: tuple[str, ...] = ()
+    ) -> list[sqlite3.Row]:
+        time_left()
+        cursor = db.execute(statement, args)
+        result = cursor.fetchmany(1025)
+        if len(result) > 1024:
+            raise ExportInconsistent("bounded SQLite result rows exceed frozen JSON array limit")
+        time_left()
+        return result
+
     try:
         with tempfile.TemporaryDirectory(prefix="mcpbg-p4-sqlite-") as stage:
             private = Path(stage)
             files = _snapshot_files(exported_state, private, artifact_ceiling_bytes)
+            time_left()
             if observed_fenced_file_sha256 is not None and (
                 type(observed_fenced_file_sha256) is not dict
                 or observed_fenced_file_sha256 != files
@@ -163,13 +192,33 @@ def verify_exported_fixture_sqlite(
             uri = (private / "fixture.db").as_uri() + "?mode=ro"
             with contextlib.closing(sqlite3.connect(uri, uri=True, timeout=1)) as read_db:
                 read_db.row_factory = sqlite3.Row
+                read_db.set_progress_handler(lambda: int(time.monotonic() >= until), 1000)
                 read_db.execute("PRAGMA trusted_schema = OFF")
                 read_db.execute("PRAGMA query_only = ON")
+                # Check the WAL-aware logical image before allocating the backup.
+                # The compressed file ceiling is not a bound on expanded pages.
+                source_page_size = rows_bounded(read_db, "PRAGMA page_size")[0][0]
+                source_page_count = rows_bounded(read_db, "PRAGMA page_count")[0][0]
+                if source_page_size * source_page_count > artifact_ceiling_bytes:
+                    raise ExportInconsistent("expanded SQLite memory exceeds artifact cap")
                 with contextlib.closing(sqlite3.connect(":memory:")) as snapshot:
                     snapshot.row_factory = sqlite3.Row
+                    snapshot.set_progress_handler(lambda: int(time.monotonic() >= until), 1000)
                     snapshot.execute("PRAGMA trusted_schema = OFF")
-                    read_db.backup(snapshot, pages=32, sleep=0)
-                    checks = snapshot.execute("PRAGMA integrity_check").fetchall()
+
+                    def backup_progress(_status: int, _remaining: int, _total: int) -> None:
+                        time_left()
+
+                    read_db.backup(snapshot, pages=32, progress=backup_progress, sleep=0)
+                    size_rows = rows_bounded(snapshot, "PRAGMA page_size")
+                    page_rows = rows_bounded(snapshot, "PRAGMA page_count")
+                    if (
+                        len(size_rows) != 1
+                        or len(page_rows) != 1
+                        or size_rows[0][0] * page_rows[0][0] > artifact_ceiling_bytes
+                    ):
+                        raise ExportInconsistent("expanded SQLite memory exceeds artifact cap")
+                    checks = rows_bounded(snapshot, "PRAGMA integrity_check")
                     if len(checks) != 1 or checks[0][0] != "ok":
                         raise ExportInconsistent("exported SQLite integrity check failed")
                     if snapshot.execute("PRAGMA foreign_key_check").fetchone() is not None:
@@ -199,16 +248,18 @@ def verify_exported_fixture_sqlite(
                         raise ExportInconsistent("fixture still has an active attempt")
                     requests = [
                         dict(x)
-                        for x in snapshot.execute(
+                        for x in rows_bounded(
+                            snapshot,
                             "SELECT * FROM requests WHERE attempt_id = ? "
                             "ORDER BY created_at, request_id",
                             (attempt_id,),
                         )
                     ]
-                    audit_rows = snapshot.execute(
+                    audit_rows = rows_bounded(
+                        snapshot,
                         "SELECT * FROM audit_events WHERE attempt_id = ? ORDER BY seq",
                         (attempt_id,),
-                    ).fetchall()
+                    )
                     audit = [dict(x) for x in audit_rows]
                     if (
                         requests != finalized_snapshot["requests"]
@@ -222,10 +273,11 @@ def verify_exported_fixture_sqlite(
                     # Reuse the fixture's audited hash-chain validator instead of
                     # maintaining a potentially divergent second implementation.
                     FixtureStore(private / "fixture.db")._validate_ledger(attempt, audit_rows)
-                    rows = snapshot.execute(
+                    rows = rows_bounded(
+                        snapshot,
                         "SELECT record_id,value,updated_by_attempt,updated_by_request,updated_at "
-                        "FROM records ORDER BY record_id"
-                    ).fetchall()
+                        "FROM records ORDER BY record_id",
+                    )
                     actual_records = [dict(x) for x in rows]
                     record_digest = _hash(_canonical({"records": actual_records}))
                     effect_status = "NOT_EVALUATED"

@@ -311,3 +311,45 @@ def test_internal_network_without_isolated_gateway_is_never_accepted():
                 owner="attempt1",
                 peer_container_ids=peers(),
             )
+
+
+def test_configured_network_checkpoint_does_not_require_started_peers():
+    m = module()
+    configured = networks()
+    for entry in configured.values():
+        entry["Containers"] = {}
+    m.verify_network_isolation(
+        network_inventory=configured,
+        assigned=assignments(),
+        owner="attempt1",
+        peer_container_ids=peers(),
+        checkpoint="configured",
+    )
+    # An already running or foreign container violates the prestart boundary.
+    configured["subject"]["Containers"] = {peers()["candidate"]: {"Name": "candidate"}}
+    with pytest.raises(m.P4TopologyError, match="premature active peer"):
+        m.verify_network_isolation(
+            network_inventory=configured,
+            assigned=assignments(),
+            owner="attempt1",
+            peer_container_ids=peers(),
+            checkpoint="configured",
+        )
+    # Created/configured evidence must not be accepted as post-start topology.
+    configured["subject"]["Containers"] = {}
+    with pytest.raises(m.P4TopologyError, match="missing role"):
+        m.verify_network_isolation(
+            network_inventory=configured,
+            assigned=assignments(),
+            owner="attempt1",
+            peer_container_ids=peers(),
+            checkpoint="active",
+        )
+    with pytest.raises(m.P4TopologyError, match="unknown network checkpoint"):
+        m.verify_network_isolation(
+            network_inventory=configured,
+            assigned=assignments(),
+            owner="attempt1",
+            peer_container_ids=peers(),
+            checkpoint="stopped-but-attached",
+        )

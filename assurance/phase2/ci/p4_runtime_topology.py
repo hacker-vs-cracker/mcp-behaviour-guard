@@ -35,13 +35,21 @@ def verify_network_isolation(
     assigned: dict[str, set[str]],
     owner: str,
     peer_container_ids: dict[str, str],
+    checkpoint: str = "active",
 ) -> None:
-    """Reject bypass edges and public/foreign networks, not merely route names."""
+    """Distinguish configured empty networks from post-start active peers.
+
+    A configured checkpoint never asserts that any container has executed.
+    Active peers must match every intended role exactly. Neither checkpoint
+    authorizes candidate startup without an independently proved barrier.
+    """
     expected = {
         "subject": {"candidate", "evaluator", "relay"},
         "fixture": {"fixture-app", "relay"},
         "control": {"fixture-control"},
     }
+    if checkpoint not in {"configured", "active"}:
+        raise P4TopologyError("unknown network checkpoint")
     if set(assigned) != set(expected) or any(assigned[k] != v for k, v in expected.items()):
         raise P4TopologyError("unmetered fixture or control network edge")
     if set(network_inventory) != set(expected) or len(network_inventory) != 3:
@@ -77,7 +85,10 @@ def verify_network_isolation(
         peers = _mapping(network.get("Containers"), "network peer inventory missing")
         actual_ids = set(peers)
         intended_ids = {peer_container_ids[role] for role in expected[key]}
-        if actual_ids != intended_ids:
+        if checkpoint == "configured":
+            if actual_ids:
+                raise P4TopologyError("created network has a premature active peer")
+        elif actual_ids != intended_ids:
             raise P4TopologyError("effective network contains bypass or missing role")
         for peer_id, peer in peers.items():
             if not _valid_id(peer_id) or not isinstance(peer, dict):
