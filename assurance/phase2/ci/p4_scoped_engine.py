@@ -1,8 +1,8 @@
 """Explicit, fail-closed native Engine endpoint for P4 controller operations.
 
 No daemon is contacted on import or construction. The caller still owns durable
-operation intents, resource accounting and replay. This adapter binds all
-runtime Docker CLI calls to the *same* private daemon as the build stage.
+operation intents, resource accounting and replay. Each ScopedEngineRunner binds to one explicit, separately admitted worker
+Engine. Build and runtime stages must use different daemon/socket identities.
 A CLI exit is not a daemon-side cleanup attestation.
 """
 

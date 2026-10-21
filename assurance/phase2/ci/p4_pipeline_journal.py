@@ -470,6 +470,61 @@ class PipelineJournal:
             observe=observe,
         )
 
+    def reconcile_live_writer_fence(
+        self,
+        *,
+        operation_id: str,
+        runtime_runner: Any,
+        owned_container_ids: dict[str, str],
+        active_requests: Callable[[], int],
+    ) -> dict[str, Any]:
+        """Join durable intent to bounded, exact-Engine two-writer readback.
+
+        This never authorizes new container starts or asserts permanent native
+        writer quiescence. The owner must maintain the restart fence until export.
+        """
+        from p4_live_writer_fence import observe_both_writers_fenced
+
+        if self.stage_index != _STAGES.index("WRITERS_FENCED"):
+            raise JournalUnknown("control must be finalized before writer readback")
+
+        def readback() -> dict[str, Any]:
+            return observe_both_writers_fenced(
+                runtime_runner=runtime_runner,
+                runtime_daemon_sha256=self.identity.runtime_daemon,
+                attempt_id=self.identity.attempt_id,
+                owned_container_ids=owned_container_ids,
+                active_requests=active_requests,
+                original_deadline_monotonic=self.deadline,
+            )
+
+        def observe(result: object) -> bytes:
+            if not isinstance(result, dict) or result.get("writer_observation_status") != (
+                "BOUND_ENGINE_DOUBLE_READ_SOURCE_ONLY"
+            ):
+                raise JournalUnknown("no trusted source-side writer fence observation")
+            return _canonical(
+                {
+                    "schema_version": 1,
+                    "attempt_id": self.identity.attempt_id,
+                    "operation_id": operation_id,
+                    "stage": "WRITERS_FENCED",
+                    "worker": self.identity.runtime_worker,
+                    "daemon": self.identity.runtime_daemon,
+                    **result,
+                }
+            )
+
+        # Reserve four bounded complete Engine command output envelopes before
+        # the first daemon inspection; no failed readback refunds that allowance.
+        return self.advance(
+            "WRITERS_FENCED",
+            operation_id=operation_id,
+            mutate=readback,
+            observe=observe,
+            output_bytes=4 * 65_536,
+        )
+
     def reconcile_exported_fixture(
         self,
         *,
