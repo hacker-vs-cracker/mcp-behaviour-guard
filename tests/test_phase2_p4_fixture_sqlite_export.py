@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
-import shutil
 import sqlite3
 import sys
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -43,7 +43,14 @@ def _fixture(tmp_path: Path):
     store.finalize_attempt("attempt-1")
     finalized = store.snapshot("attempt-1")
     exported = tmp_path / "exported"
-    shutil.copytree(live, exported)
+    exported.mkdir()
+    # Deterministic logical SQLite snapshot: do not race transient WAL/SHM
+    # deletion while copying a live directory. Raw WAL cases need separate coverage.
+    with (
+        closing(sqlite3.connect(live / "fixture.db")) as source,
+        closing(sqlite3.connect(exported / "fixture.db")) as target,
+    ):
+        source.backup(target)
     return exported, fenced, finalized
 
 
@@ -223,3 +230,68 @@ def test_bounded_sqlite_rejects_more_than_1024_business_rows(tmp_path: Path):
         )
     with pytest.raises(m.ExportInconsistent, match="bounded SQLite result rows"):
         _verify(m, exported, fenced, finalized)
+
+
+def test_committed_wal_only_business_effect_is_read_and_torn_wal_rejected(tmp_path: Path):
+    """A stable logical fixture must not erase coverage for real WAL-backed exports."""
+    import hashlib
+    import shutil
+
+    m = _mod()
+    exported, fenced, finalized = _fixture(tmp_path)
+    wal_source = exported / "fixture.db"
+    raw_export = tmp_path / "raw-wal-export"
+    raw_export.mkdir()
+    with closing(sqlite3.connect(wal_source)) as writer:
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.execute("UPDATE records SET value = 'committed-only-in-wal'")
+        writer.commit()
+        assert (exported / "fixture.db-wal").stat().st_size > 32
+        # No mutations occur during this copy; the writer stays open to prevent
+        # SQLite from checkpointing/deleting the WAL on final close.
+        for name in ("fixture.db", "fixture.db-wal", "fixture.db-shm"):
+            file = exported / name
+            if file.exists():
+                shutil.copy2(file, raw_export / name)
+        columns = ("record_id", "value", "updated_by_attempt", "updated_by_request", "updated_at")
+        expected = [
+            dict(zip(columns, row, strict=True))
+            for row in writer.execute(
+                "SELECT record_id,value,updated_by_attempt,updated_by_request,updated_at "
+                "FROM records ORDER BY record_id"
+            ).fetchall()
+        ]
+    assert expected[0]["value"] == "committed-only-in-wal"
+    # Snapshot a torn variant before SQLite itself can checkpoint a readonly WAL.
+    torn = tmp_path / "torn-wal-export"
+    torn.mkdir()
+    for item in raw_export.iterdir():
+        shutil.copy2(item, torn / item.name)
+    wal = torn / "fixture.db-wal"
+    assert wal.exists()
+    wal.write_bytes(wal.read_bytes()[:-1])
+    hashes = {
+        path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in raw_export.iterdir()
+    }
+    verified = m.verify_exported_fixture_sqlite(
+        exported_state=raw_export,
+        attempt_id="attempt-1",
+        fenced_snapshot=fenced,
+        finalized_snapshot=finalized,
+        artifact_ceiling_bytes=16_777_216,
+        observed_fenced_file_sha256=hashes,
+        reviewed_expected_records=expected,
+    )
+    assert verified["source_export_status"] == "MATCHED_FENCED_SOURCE_DIGESTS_SOURCE_ONLY"
+    assert verified["business_effect_status"] == "MATCHED_REVIEWED_PROJECTION_SOURCE_ONLY"
+    with pytest.raises(m.ExportInconsistent, match="fenced source/export"):
+        m.verify_exported_fixture_sqlite(
+            exported_state=torn,
+            attempt_id="attempt-1",
+            fenced_snapshot=fenced,
+            finalized_snapshot=finalized,
+            artifact_ceiling_bytes=16_777_216,
+            observed_fenced_file_sha256=hashes,
+            reviewed_expected_records=expected,
+        )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import sys
@@ -277,7 +278,6 @@ def test_source_outputs_do_not_mint_native_authority(tmp_path: Path):
 
 
 def test_composed_export_calls_real_fenced_sqlite_business_verifier(tmp_path: Path):
-    import shutil
     import sqlite3
 
     from assurance.phase2.fixture.store import FixtureStore
@@ -294,7 +294,13 @@ def test_composed_export_calls_real_fenced_sqlite_business_verifier(tmp_path: Pa
     store.finalize_attempt("attempt-a")
     finalized = store.snapshot("attempt-a")
     exported = tmp_path / "exported"
-    shutil.copytree(live, exported)
+    exported.mkdir()
+    # Snapshot the finalized logical state without copying disappearing WAL/SHM paths.
+    with (
+        contextlib.closing(sqlite3.connect(live / "fixture.db")) as source,
+        contextlib.closing(sqlite3.connect(exported / "fixture.db")) as target,
+    ):
+        source.backup(target)
     with sqlite3.connect(exported / "fixture.db") as db:
         db.row_factory = sqlite3.Row
         expected = [
@@ -325,7 +331,6 @@ def test_composed_export_calls_real_fenced_sqlite_business_verifier(tmp_path: Pa
 
 
 def test_composed_export_rejects_wrong_business_effect(tmp_path: Path):
-    import shutil
     import sqlite3
 
     from assurance.phase2.fixture.store import FixtureStore
@@ -342,7 +347,13 @@ def test_composed_export_rejects_wrong_business_effect(tmp_path: Path):
     store.finalize_attempt("attempt-a")
     finalized = store.snapshot("attempt-a")
     exported = tmp_path / "exported"
-    shutil.copytree(live, exported)
+    exported.mkdir()
+    # Snapshot the finalized logical state without copying disappearing WAL/SHM paths.
+    with (
+        contextlib.closing(sqlite3.connect(live / "fixture.db")) as source,
+        contextlib.closing(sqlite3.connect(exported / "fixture.db")) as target,
+    ):
+        source.backup(target)
     with sqlite3.connect(exported / "fixture.db") as db:
         db.row_factory = sqlite3.Row
         expected = [
