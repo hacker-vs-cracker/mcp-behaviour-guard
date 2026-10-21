@@ -300,7 +300,7 @@
     "candidate_execution_enabled": false,
     "hostile_execution_authorized": false,
     "module_path": "assurance/phase2/ci/p4_trusted_runtime_adapter.py",
-    "module_sha256": "bd41aca43d48a90af8fc9aa99966001de3de17b7e392bd29b410c6e8f70c64a4",
+    "module_sha256": "71f347f15e53edc69989e09429ef39efae64a8694d1544c38481a7809a381619",
     "runtime_enforcement_proven": false,
     "stage": "TRUSTED_NON_HOSTILE_FIXTURE_ADAPTER",
     "status": "SOURCE_WIRED_NOT_RUNTIME_PROVEN",

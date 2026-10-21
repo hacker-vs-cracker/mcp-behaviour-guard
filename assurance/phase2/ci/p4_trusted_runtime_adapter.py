@@ -547,6 +547,7 @@ class OwnedDockerAttempt:
     _scope_digest: str | None = None
     _lock_identity: str | None = None
     _durably_finished: bool = False
+    _attested_role_ids: dict[str, str] | None = None
     _entered: bool = False
     _cleanup_deadline: float | None = None
     _ledger_fd: int | None = None
@@ -1465,7 +1466,125 @@ class OwnedDockerAttempt:
             json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
         self._record("PRESTART_GRAPH_ATTESTED", details={"readback_sha256": digest})
+        # Cache only the independently inspected, owned identifiers after the
+        # complete graph receipt has been durably appended.
+        self._attested_role_ids = {
+            role: item.object_id
+            for role, item in containers.items()
+            if isinstance(item.object_id, str)
+        }
         return result
+
+    def start_attested_trusted_role(
+        self, *, role: str, item: OwnedItem, journal: Any
+    ) -> dict[str, Any]:
+        """Start one trusted helper under an already durable ACTIVE_GRAPH intent.
+
+        The candidate is intentionally prohibited: physical enforcement of its
+        startup barrier is not established by a prestart graph readback. This
+        method does not claim active topology or readiness from CLI success.
+        """
+        from p4_pipeline_journal import _STAGES, PipelineJournal
+        from p4_scoped_engine import ScopedEngineRunner
+
+        if (
+            role not in {"evaluator", "relay", "fixture-app", "fixture-control"}
+            or not self._entered
+            or self.recovery_required
+            or not isinstance(self.run, ScopedEngineRunner)
+            or type(journal) is not PipelineJournal
+            or journal.fd is None
+            or not journal.pending
+            or journal.unknown
+            or journal.stage_index != _STAGES.index("ACTIVE_GRAPH_OBSERVED")
+            or not journal.events
+            or journal.events[-1]["status"] != "INTENT"
+            or journal.events[-1]["stage"] != "ACTIVE_GRAPH_OBSERVED"
+            or journal.identity.attempt_id != self.attempt_id
+            or journal.identity.runtime_daemon != self.daemon_identity
+            or self._attested_role_ids is None
+            or set(self._attested_role_ids)
+            != {"candidate", "evaluator", "relay", "fixture-app", "fixture-control"}
+            or not any(owned is item for owned in self.items)
+            or item.kind != "container"
+            or item.state != "CREATED"
+            or not isinstance(item.object_id, str)
+            or re.fullmatch(r"[a-f0-9]{64}", item.object_id) is None
+            or self._attested_role_ids.get(role) != item.object_id
+            or self.outer_deadline_monotonic is None
+            or time.monotonic() >= min(self.outer_deadline_monotonic, journal.deadline)
+        ):
+            raise P4AdapterError("trusted role start admission or durable graph intent missing")
+        try:
+            # Must be durable before a mutating Engine command. Never retry an
+            # ambiguous start, even when a later read sees the role running.
+            item.state = "START_REQUESTED"
+            self._record("START_REQUESTED", item, details={"role": role})
+            result = self._checked_call(["docker", "start", item.object_id], structured=True)
+            if (
+                result.exit_code != 0
+                or result.stderr
+                or result.stdout.strip() != item.object_id.encode("ascii")
+            ):
+                raise P4RecoveryRequired("trusted role start reply UNKNOWN")
+            inspected = self._checked_call(
+                ["docker", "container", "inspect", "--format", "{{json .}}", item.object_id],
+                structured=True,
+            )
+            if inspected.exit_code != 0 or inspected.stderr:
+                raise P4RecoveryRequired("trusted role start readback UNKNOWN")
+            raw = inspected.stdout
+            parsed = bounds._load_object_bytes(
+                raw,
+                max_bytes=65536,
+                label="trusted role post-start Engine readback",
+                shape={
+                    "max_depth": 32,
+                    "max_array_items": 1024,
+                    "max_object_members": 1024,
+                    "max_string_bytes": 65536,
+                },
+            )
+            config = parsed.get("Config")
+            host = parsed.get("HostConfig")
+            state = parsed.get("State")
+            if (
+                parsed.get("Id") != item.object_id
+                or type(config) is not dict
+                or type(config.get("Labels")) is not dict
+                or config["Labels"].get("mcpbg.p4.owner") != self.attempt_id
+                or type(host) is not dict
+                or type(host.get("RestartPolicy")) is not dict
+                or host["RestartPolicy"].get("Name") != "no"
+                or type(state) is not dict
+                or state.get("Running") is not True
+                or state.get("Restarting") is not False
+                or state.get("Dead") is not False
+                or type(state.get("Pid")) is not int
+                or state["Pid"] <= 0
+                or time.monotonic() >= min(self.outer_deadline_monotonic, journal.deadline)
+            ):
+                raise P4RecoveryRequired("trusted role post-start state UNKNOWN")
+            item.state = "RUNNING"
+            self._record("START_CONFIRMED", item, details={"role": role})
+            return {
+                "role": role,
+                "container_id": item.object_id,
+                "status": "TRUSTED_HELPER_STARTED_SOURCE_ONLY",
+                "runtime_enforcement_proven": False,
+                "complete_integrated_runtime_wiring": False,
+                "approval_outcome": "NOT_EVALUATED",
+            }
+        except BaseException as exc:
+            item.state = "UNKNOWN"
+            self.recovery_required = True
+            try:
+                self._record("START_UNKNOWN", item, details={"role": role})
+            except BaseException as record_exc:
+                raise P4RecoveryRequired(
+                    "start outcome and durable recovery record UNKNOWN"
+                ) from record_exc
+            raise P4RecoveryRequired("trusted helper start requires fresh reconciliation") from exc
 
     def attest_fixed_container(
         self, item: OwnedItem, authority_raw: bytes, *, role: str
