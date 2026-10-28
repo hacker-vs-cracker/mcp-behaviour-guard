@@ -48,7 +48,7 @@ def verify_network_isolation(
         "fixture": {"fixture-app", "relay"},
         "control": {"fixture-control"},
     }
-    if checkpoint not in {"configured", "active"}:
+    if checkpoint not in {"configured", "helpers_active", "active"}:
         raise P4TopologyError("unknown network checkpoint")
     if set(assigned) != set(expected) or any(assigned[k] != v for k, v in expected.items()):
         raise P4TopologyError("unmetered fixture or control network edge")
@@ -88,6 +88,12 @@ def verify_network_isolation(
         if checkpoint == "configured":
             if actual_ids:
                 raise P4TopologyError("created network has a premature active peer")
+        elif checkpoint == "helpers_active":
+            # The candidate remains stopped and may not appear as an active
+            # network peer. No sixth role or early candidate peer is allowed.
+            helper_ids = {peer_container_ids[role] for role in expected[key] - {"candidate"}}
+            if actual_ids != helper_ids:
+                raise P4TopologyError("helper-only network has unexpected or missing peer")
         elif actual_ids != intended_ids:
             raise P4TopologyError("effective network contains bypass or missing role")
         for peer_id, peer in peers.items():

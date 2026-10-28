@@ -90,8 +90,16 @@ def _expected(stage: str, evidence: dict[str, Any]) -> None:
             or type(evidence.get("scratch_entries")) is not int
             or evidence["scratch_entries"] != 0
             or evidence.get("remaining_owned_resources") != []
+            or not _valid_sha(evidence.get("disposal_readback_sha256"))
+            or evidence.get("daemon_socket_present") is not False
+            or evidence.get("data_root_mounted") is not False
+            or evidence.get("builder_present") is not False
+            or evidence.get("disposal_inspected_source_only") is not True
+            or evidence.get("physical_disposal_proven") is not False
         ):
-            raise JournalUnknown("build worker or storage disposal UNKNOWN")
+            raise JournalUnknown(
+                "build worker disposal needs external readbacks, not a cleanup claim"
+            )
     elif stage == "CREATED_GRAPH_OBSERVED":
         roles = evidence.get("roles")
         if (
@@ -107,6 +115,32 @@ def _expected(stage: str, evidence: dict[str, Any]) -> None:
         # enforced pre-execution barrier remains separately required.
         if evidence.get("startup_barrier_proven") is not False:
             raise JournalUnknown("source inventory cannot claim a native startup barrier")
+        if "helper_start_receipts" in evidence:
+            helpers = ("fixture-control", "fixture-app", "relay", "evaluator")
+            receipts = evidence["helper_start_receipts"]
+            descriptors = evidence.get("helper_descriptors_sha256")
+            if (
+                type(receipts) is not dict
+                or set(receipts) != set(helpers)
+                or not all(
+                    isinstance(receipts[x], str) and _valid_sha(receipts[x]) for x in helpers
+                )
+                or len(set(receipts.values())) != 4
+                or type(descriptors) is not dict
+                or set(descriptors) != set(helpers)
+                or not all(_valid_sha(descriptors[x]) for x in helpers)
+                or not _valid_sha(evidence.get("candidate_descriptor_sha256"))
+                or evidence.get("candidate_started") is not False
+                or evidence.get("active_network_verified") is not False
+                or evidence.get("helper_network_membership_verified_source_only") is not True
+                or type(evidence.get("helper_network_descriptors_sha256")) is not dict
+                or set(evidence["helper_network_descriptors_sha256"])
+                != {"subject", "fixture", "control"}
+                or not all(
+                    _valid_sha(x) for x in evidence["helper_network_descriptors_sha256"].values()
+                )
+            ):
+                raise JournalUnknown("helper group source readbacks malformed or overstated")
     elif stage == "RELAY_DRAINED":
         if (
             evidence.get("admission_closed") is not True
@@ -407,6 +441,147 @@ class PipelineJournal:
                 # durable INTENT still requires explicit remote readback.
                 raise JournalUnknown("cannot durably record uncertain remote operation") from exc
             raise
+
+    def reconcile_build_worker_disposal(
+        self,
+        *,
+        operation_id: str,
+        dispose_worker: Callable[[], object],
+        independently_inspect: Callable[[], bytes],
+    ) -> dict[str, Any]:
+        """Bind build-worker teardown to two trusted-supervisor observations.
+
+        The caller must connect ``independently_inspect`` to the *outside*
+        supervisor of the disposable native build worker, not the deleted
+        worker itself, candidate output or a prewritten JSON sidecar. This
+        source boundary cannot attest that supervisor's physical identity.
+        The two matching replies remain source-only, never native proof.
+        """
+        if (
+            self.fd is None
+            or self.unknown
+            or self.pending
+            or self.stage_index != _STAGES.index("BUILD_WORKER_DISPOSED")
+            or not callable(dispose_worker)
+            or not callable(independently_inspect)
+            or time.monotonic() >= self.deadline
+        ):
+            raise JournalUnknown("build worker disposal stage unavailable")
+
+        def readback() -> tuple[dict[str, Any], str]:
+            raw = independently_inspect()
+            if type(raw) is not bytes or not 0 < len(raw) <= 65_536:
+                raise JournalUnknown("bounded external build disposal observation missing")
+            try:
+                value = bounds._load_object_bytes(
+                    raw,
+                    max_bytes=65_536,
+                    label="external native build worker disposal readback",
+                    shape={
+                        "max_depth": 16,
+                        "max_array_items": 128,
+                        "max_object_members": 64,
+                        "max_string_bytes": 4096,
+                    },
+                )
+            except bounds.P4ResourceEnforcementError as exc:
+                raise JournalUnknown("external worker disposal JSON malformed") from exc
+            expected = {
+                "schema_version",
+                "worker",
+                "daemon",
+                "worker_alive",
+                "daemon_alive",
+                "daemon_socket_present",
+                "data_root_mounted",
+                "builder_present",
+                "cache_entries",
+                "scratch_entries",
+                "remaining_owned_resources",
+                "inspection_complete",
+            }
+            if (
+                set(value) != expected
+                or type(value.get("schema_version")) is not int
+                or value["schema_version"] != 1
+                or value.get("worker") != self.identity.build_worker
+                or value.get("daemon") != self.identity.build_daemon
+                or any(
+                    value.get(field) is not False
+                    for field in (
+                        "worker_alive",
+                        "daemon_alive",
+                        "daemon_socket_present",
+                        "data_root_mounted",
+                        "builder_present",
+                    )
+                )
+                or any(
+                    type(value.get(field)) is not int or value[field] != 0
+                    for field in ("cache_entries", "scratch_entries")
+                )
+                or value.get("remaining_owned_resources") != []
+                or value.get("inspection_complete") is not True
+                or time.monotonic() >= self.deadline
+            ):
+                raise JournalUnknown("build worker or whole-worker storage cleanup UNKNOWN")
+            return value, _sha(raw)
+
+        def perform() -> dict[str, Any]:
+            # advance() writes and fsyncs one INTENT before any remote teardown.
+            dispose_worker()
+            first, first_hash = readback()
+            second, second_hash = readback()
+            if first != second:
+                raise JournalUnknown("build worker disposal changed between observations")
+            return {"observation": second, "readback_hashes": [first_hash, second_hash]}
+
+        def observe(result: object) -> bytes:
+            if type(result) is not dict or set(result) != {"observation", "readback_hashes"}:
+                raise JournalUnknown("external disposal observations missing")
+            readbacks = result["readback_hashes"]
+            if (
+                type(readbacks) is not list
+                or len(readbacks) != 2
+                or not all(_valid_sha(value) for value in readbacks)
+            ):
+                raise JournalUnknown("two bounded disposal readbacks required")
+            value = result["observation"]
+            if type(value) is not dict:
+                raise JournalUnknown("external disposal observation invalid")
+            receipt = {
+                "schema_version": 1,
+                "attempt_id": self.identity.attempt_id,
+                "operation_id": operation_id,
+                "stage": "BUILD_WORKER_DISPOSED",
+                "worker": self.identity.build_worker,
+                "daemon": self.identity.build_daemon,
+                "runtime_enforcement_proven": False,
+                "complete_integrated_runtime_wiring": False,
+                "approval_outcome": "NOT_EVALUATED",
+                "worker_alive": False,
+                "daemon_alive": False,
+                "cache_entries": 0,
+                "scratch_entries": 0,
+                "remaining_owned_resources": [],
+                "daemon_socket_present": False,
+                "data_root_mounted": False,
+                "builder_present": False,
+                "disposal_inspected_source_only": True,
+                "physical_disposal_proven": False,
+                "disposal_readback_sha256": _sha(
+                    _canonical({"first": readbacks[0], "second": readbacks[1]})
+                ),
+            }
+            return _canonical(receipt)
+
+        return self.advance(
+            "BUILD_WORKER_DISPOSED",
+            operation_id=operation_id,
+            mutate=perform,
+            observe=observe,
+            output_bytes=8192,
+        )
 
     def reconcile_staged_image_archive(
         self,

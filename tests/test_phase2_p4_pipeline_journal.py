@@ -65,6 +65,12 @@ def observation(ident: PipelineIdentity, stage: str, operation: str) -> dict:
             "cache_entries": 0,
             "scratch_entries": 0,
             "remaining_owned_resources": [],
+            "disposal_readback_sha256": SHA,
+            "daemon_socket_present": False,
+            "data_root_mounted": False,
+            "builder_present": False,
+            "disposal_inspected_source_only": True,
+            "physical_disposal_proven": False,
         },
         "CREATED_GRAPH_OBSERVED": {
             "roles": dict.fromkeys(
@@ -214,6 +220,10 @@ def test_crash_between_intent_and_observation_retained(tmp_path: Path):
         ("IMAGE_TRANSFER_OBSERVED", {"platform": "linux/arm64"}),
         ("BUILD_WORKER_DISPOSED", {"daemon_alive": True}),
         ("BUILD_WORKER_DISPOSED", {"cache_entries": 1}),
+        ("BUILD_WORKER_DISPOSED", {"disposal_readback_sha256": None}),
+        ("BUILD_WORKER_DISPOSED", {"disposal_inspected_source_only": False}),
+        ("BUILD_WORKER_DISPOSED", {"physical_disposal_proven": True}),
+        ("BUILD_WORKER_DISPOSED", {"data_root_mounted": True}),
         ("CREATED_GRAPH_OBSERVED", {"candidate_started": True}),
         ("ACTIVE_GRAPH_OBSERVED", {"startup_barrier_proven": True}),
         ("RELAY_DRAINED", {"active_requests": 1}),
@@ -560,3 +570,137 @@ def test_recovery_rejects_rehashed_output_budget_overdraw(tmp_path: Path):
     path.write_text("".join(json.dumps(x, sort_keys=True) + "\n" for x in rows))
     with pytest.raises(JournalUnknown, match="output allowance exceeded"):
         PipelineJournal.inspect_recovery(path, i)
+
+
+def _outside_disposal_readback(ident: PipelineIdentity, **mutants: object) -> bytes:
+    """Synthetic *external* supervisor fixture, not physical worker proof."""
+    obj = {
+        "schema_version": 1,
+        "worker": ident.build_worker,
+        "daemon": ident.build_daemon,
+        "worker_alive": False,
+        "daemon_alive": False,
+        "daemon_socket_present": False,
+        "data_root_mounted": False,
+        "builder_present": False,
+        "cache_entries": 0,
+        "scratch_entries": 0,
+        "remaining_owned_resources": [],
+        "inspection_complete": True,
+    }
+    obj.update(mutants)
+    return json.dumps(obj, sort_keys=True).encode()
+
+
+def test_journaled_external_disposal_binds_intent_and_two_readbacks(tmp_path: Path):
+    i = identity()
+    path = tmp_path / "owned-p4-attempt-a.jsonl"
+    with PipelineJournal(path, i, deadline=time.monotonic() + 300) as j:
+        for previous in _STAGES[:3]:
+            advance(j, previous)
+        events = []
+
+        def dispose():
+            lines = [json.loads(x) for x in path.read_text().splitlines()]
+            assert lines[-1]["status"] == "INTENT"
+            assert lines[-1]["stage"] == "BUILD_WORKER_DISPOSED"
+            events.append("dispose")
+
+        def inspect():
+            events.append("outside-readback")
+            return _outside_disposal_readback(i)
+
+        receipt = j.reconcile_build_worker_disposal(
+            operation_id="outside-disposal",
+            dispose_worker=dispose,
+            independently_inspect=inspect,
+        )
+        assert events == ["dispose", "outside-readback", "outside-readback"]
+        assert receipt["next_stage"] == "RUNTIME_WORKER_ADMITTED"
+        assert receipt["runtime_enforcement_proven"] is False
+        assert receipt["approval_outcome"] == "NOT_EVALUATED"
+    recovered = PipelineJournal.inspect_recovery(path, i)
+    assert recovered["remote_operation_unresolved"] is False
+    assert recovered["stages_observed"] == 4
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        {"worker_alive": True},
+        {"daemon_alive": True},
+        {"daemon_socket_present": True},
+        {"data_root_mounted": True},
+        {"builder_present": True},
+        {"cache_entries": 1},
+        {"scratch_entries": 1},
+        {"remaining_owned_resources": ["hidden-cache"]},
+        {"worker": "a" * 64},
+        {"daemon": "b" * 64},
+        {"inspection_complete": False},
+        {"cache_entries": False},
+    ],
+)
+def test_external_disposal_refuses_false_cleanup(tmp_path: Path, changed: dict):
+    i = identity()
+    path = tmp_path / "owned-p4-attempt-a.jsonl"
+    with PipelineJournal(path, i, deadline=time.monotonic() + 300) as j:
+        for previous in _STAGES[:3]:
+            advance(j, previous)
+        calls = []
+
+        def dispose():
+            calls.append("dispose")
+
+        def inspect():
+            calls.append("inspect")
+            return _outside_disposal_readback(i, **changed)
+
+        with pytest.raises(JournalUnknown):
+            j.reconcile_build_worker_disposal(
+                operation_id="failed-disposal",
+                dispose_worker=dispose,
+                independently_inspect=inspect,
+            )
+        assert j.unknown and j.pending
+        with pytest.raises(JournalUnknown):
+            j.reconcile_build_worker_disposal(
+                operation_id="retry-disposal",
+                dispose_worker=dispose,
+                independently_inspect=inspect,
+            )
+        assert calls == ["dispose", "inspect"]
+    assert PipelineJournal.inspect_recovery(path, i)["remote_operation_unresolved"]
+
+
+def test_external_disposal_drift_and_lost_ack_keep_unknown(tmp_path: Path):
+    i = identity()
+    for variant in ("second-changes", "lost-ack", "malformed"):
+        path = tmp_path / variant / "owned-p4-attempt-a.jsonl"
+        path.parent.mkdir()
+        with PipelineJournal(path, i, deadline=time.monotonic() + 300) as j:
+            for previous in _STAGES[:3]:
+                advance(j, previous)
+            inspected = 0
+
+            def dispose(variant=variant):
+                if variant == "lost-ack":
+                    raise TimeoutError("worker gone but acknowledgment lost")
+
+            def inspect(variant=variant):
+                nonlocal inspected
+                inspected += 1
+                if variant == "malformed":
+                    return b'{"worker":'
+                if variant == "second-changes" and inspected == 2:
+                    return _outside_disposal_readback(i, inspection_complete=False)
+                return _outside_disposal_readback(i)
+
+            with pytest.raises((JournalUnknown, TimeoutError)):
+                j.reconcile_build_worker_disposal(
+                    operation_id="uncertain-disposal",
+                    dispose_worker=dispose,
+                    independently_inspect=inspect,
+                )
+            assert j.unknown is True
+        assert PipelineJournal.inspect_recovery(path, i)["remote_operation_unresolved"] is True
