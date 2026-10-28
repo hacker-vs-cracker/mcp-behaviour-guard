@@ -153,6 +153,24 @@ def observation(ident: PipelineIdentity, stage: str, operation: str) -> dict:
 def advance(j: PipelineJournal, stage: str, *, modify=None):
     op = "op-" + stage.lower().replace("_", "-")
     data = observation(j.identity, stage, op)
+    if stage == "BUILD_RESULT_OBSERVED" and "BUILD_WORKER_ADMITTED" in j.observed_receipts:
+        data["reviewed_build_spec_sha256"] = j.observed_receipts["BUILD_WORKER_ADMITTED"][
+            "reviewed_build_spec_sha256"
+        ]
+    elif stage == "IMAGE_TRANSFER_OBSERVED" and "BUILD_RESULT_OBSERVED" in j.observed_receipts:
+        data["source_image_id"] = j.observed_receipts["BUILD_RESULT_OBSERVED"]["resolved_image_id"]
+        data["destination_image_id"] = data["source_image_id"]
+    elif stage == "RUNTIME_WORKER_ADMITTED" and "BUILD_WORKER_DISPOSED" in j.observed_receipts:
+        data["private_engine_endpoint_sha256"] = "b" * 64
+        data["build_disposal_receipt_sha256"] = j.observed_receipts["BUILD_WORKER_DISPOSED"][
+            "observation_sha256"
+        ]
+        data["image_transfer_receipt_sha256"] = j.observed_receipts["IMAGE_TRANSFER_OBSERVED"][
+            "observation_sha256"
+        ]
+        data["resolved_image_id"] = j.observed_receipts["IMAGE_TRANSFER_OBSERVED"][
+            "destination_image_id"
+        ]
     if modify is not None:
         modify(data)
     return j.advance(
@@ -836,3 +854,52 @@ def test_early_source_stage_rejects_boolean_only_shortcuts(tmp_path: Path, stage
             )
         assert journal.unknown is True
     assert PipelineJournal.inspect_recovery(path, ident)["remote_operation_unresolved"] is True
+
+
+@pytest.mark.parametrize(
+    "stage,changed_field,wrong",
+    [
+        ("BUILD_RESULT_OBSERVED", "reviewed_build_spec_sha256", "b" * 64),
+        ("IMAGE_TRANSFER_OBSERVED", "source_image_id", "sha256:" + "b" * 64),
+        ("RUNTIME_WORKER_ADMITTED", "build_disposal_receipt_sha256", "b" * 64),
+        ("RUNTIME_WORKER_ADMITTED", "image_transfer_receipt_sha256", "b" * 64),
+        ("RUNTIME_WORKER_ADMITTED", "resolved_image_id", "sha256:" + "b" * 64),
+        ("RUNTIME_WORKER_ADMITTED", "private_engine_endpoint_sha256", SHA),
+    ],
+)
+def test_rejects_cross_stage_identity_substitution(
+    tmp_path: Path, stage: str, changed_field: str, wrong: str
+):
+    ident = identity()
+    path = tmp_path / "owned-p4-attempt-a.jsonl"
+    with PipelineJournal(path, ident, deadline=time.monotonic() + 500) as journal:
+        for prior in _STAGES[: _STAGES.index(stage)]:
+            advance(journal, prior)
+        with pytest.raises(JournalUnknown):
+            advance(journal, stage, modify=lambda event: event.update({changed_field: wrong}))
+        assert journal.unknown is True
+        assert journal.pending is True
+    recovered = PipelineJournal.inspect_recovery(path, ident)
+    assert recovered["remote_operation_unresolved"] is True
+    assert recovered["historical_receipts_are_startup_authority"] is False
+
+
+def test_runtime_stage_anchors_are_bound_to_current_attempt(tmp_path: Path):
+    with PipelineJournal(
+        tmp_path / "owned-p4-attempt-a.jsonl", identity(), deadline=time.monotonic() + 500
+    ) as journal:
+        for stage in _STAGES[: _STAGES.index("CREATED_GRAPH_OBSERVED")]:
+            advance(journal, stage)
+        links = journal.observed_receipts
+        assert (
+            links["IMAGE_TRANSFER_OBSERVED"]["source_image_id"]
+            == links["BUILD_RESULT_OBSERVED"]["resolved_image_id"]
+        )
+        assert (
+            links["RUNTIME_WORKER_ADMITTED"]["resolved_image_id"]
+            == links["IMAGE_TRANSFER_OBSERVED"]["destination_image_id"]
+        )
+        assert (
+            links["BUILD_WORKER_ADMITTED"]["private_engine_endpoint_sha256"]
+            != links["RUNTIME_WORKER_ADMITTED"]["private_engine_endpoint_sha256"]
+        )

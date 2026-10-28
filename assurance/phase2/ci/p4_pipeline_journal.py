@@ -293,6 +293,9 @@ class PipelineJournal:
         self.unknown = False
         self.pending = False
         self.bytes_accounted = 0
+        # These anchors come only from observations made in this live, locked
+        # attempt. A recovered journal is never resumed as operational authority.
+        self.observed_receipts: dict[str, dict[str, Any]] = {}
 
     def __enter__(self) -> PipelineJournal:
         if not self.path.parent.is_dir() or self.path.parent.is_symlink():
@@ -366,6 +369,43 @@ class PipelineJournal:
             raise JournalUnknown("short durable journal write")
         os.fsync(self.fd)
         self.events.append(row)
+
+    def _require_stage_continuity(self, stage: str, evidence: dict[str, Any]) -> None:
+        """Bind consecutive stage observations, not separately valid claims.
+
+        The journal never treats equality between caller-supplied hashes as
+        physical proof. The authoritative observer/supervisor is still required.
+        Past journals are read-only recovery records, never sources of new
+        execution authority.
+        """
+        prior = self.observed_receipts
+        if stage == "BUILD_RESULT_OBSERVED":
+            admitted = prior.get("BUILD_WORKER_ADMITTED")
+            if admitted is None or evidence.get("reviewed_build_spec_sha256") != admitted.get(
+                "reviewed_build_spec_sha256"
+            ):
+                raise JournalUnknown("build spec differs from admitted worker source")
+        elif stage == "IMAGE_TRANSFER_OBSERVED":
+            built = prior.get("BUILD_RESULT_OBSERVED")
+            if built is None or evidence.get("source_image_id") != built.get("resolved_image_id"):
+                raise JournalUnknown("staged source image differs from observed native build")
+        elif stage == "RUNTIME_WORKER_ADMITTED":
+            admitted = prior.get("BUILD_WORKER_ADMITTED")
+            transferred = prior.get("IMAGE_TRANSFER_OBSERVED")
+            disposed = prior.get("BUILD_WORKER_DISPOSED")
+            if (
+                admitted is None
+                or transferred is None
+                or disposed is None
+                or evidence.get("build_disposal_receipt_sha256")
+                != disposed.get("observation_sha256")
+                or evidence.get("image_transfer_receipt_sha256")
+                != transferred.get("observation_sha256")
+                or evidence.get("resolved_image_id") != transferred.get("destination_image_id")
+                or evidence.get("private_engine_endpoint_sha256")
+                == admitted.get("private_engine_endpoint_sha256")
+            ):
+                raise JournalUnknown("runtime stage is not bound to prior image and disposal")
 
     def advance(
         self,
@@ -452,12 +492,30 @@ class PipelineJournal:
             ):
                 raise JournalUnknown("source observation identity/context invalid")
             _expected(stage, evidence)
+            self._require_stage_continuity(stage, evidence)
             self._append(
                 "OBSERVED_SOURCE_ONLY",
                 stage,
                 operation_id,
                 {"observation_sha256": _sha(raw), "output_bytes": output_bytes},
             )
+            # Persist only bounded continuity anchors from this observation.
+            # A later stage must not infer admission from a raw sidecar alone.
+            anchors = {
+                "observation_sha256": _sha(raw),
+                **{
+                    key: evidence[key]
+                    for key in (
+                        "reviewed_build_spec_sha256",
+                        "private_engine_endpoint_sha256",
+                        "resolved_image_id",
+                        "source_image_id",
+                        "destination_image_id",
+                    )
+                    if key in evidence
+                },
+            }
+            self.observed_receipts[stage] = anchors
             self.stage_index += 1
             self.pending = False
             return {
