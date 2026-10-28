@@ -756,7 +756,7 @@ def test_external_disposal_drift_and_lost_ack_keep_unknown(tmp_path: Path):
     i = identity()
     for variant in ("second-changes", "lost-ack", "malformed"):
         path = tmp_path / variant / "owned-p4-attempt-a.jsonl"
-        path.parent.mkdir()
+        path.parent.mkdir(mode=0o700)
         with PipelineJournal(path, i, deadline=time.monotonic() + 300) as j:
             for previous in _STAGES[:3]:
                 advance(j, previous)
@@ -903,3 +903,40 @@ def test_runtime_stage_anchors_are_bound_to_current_attempt(tmp_path: Path):
             links["BUILD_WORKER_ADMITTED"]["private_engine_endpoint_sha256"]
             != links["RUNTIME_WORKER_ADMITTED"]["private_engine_endpoint_sha256"]
         )
+
+
+@pytest.mark.parametrize("mode", [0o777, 0o750, 0o701, 0o770])
+def test_source_journal_rejects_exposed_parent_before_writing(tmp_path: Path, mode: int):
+    parent = tmp_path / "open-scope"
+    parent.mkdir(mode=0o700)
+    parent.chmod(mode)
+    path = parent / "owned-p4-attempt-a.jsonl"
+    try:
+        with (
+            pytest.raises(JournalUnknown, match="private, owned and canonical"),
+            PipelineJournal(path, identity(), deadline=time.monotonic() + 100),
+        ):
+            pass
+        assert not path.exists() and not (parent / "p4-pipeline-scope.lock").exists()
+    finally:
+        parent.chmod(0o700)
+
+
+def test_recovery_rejects_exposed_or_aliased_scope(tmp_path: Path):
+    parent = tmp_path / "owned"
+    parent.mkdir(mode=0o700)
+    path = parent / "owned-p4-attempt-a.jsonl"
+    ident = identity()
+    with PipelineJournal(path, ident, deadline=time.monotonic() + 100):
+        pass
+    assert PipelineJournal.inspect_recovery(path, ident)["stages_observed"] == 0
+    parent.chmod(0o755)
+    try:
+        with pytest.raises(JournalUnknown, match="private, owned and canonical"):
+            PipelineJournal.inspect_recovery(path, ident)
+    finally:
+        parent.chmod(0o700)
+    alias = tmp_path / "alias"
+    alias.symlink_to(parent, target_is_directory=True)
+    with pytest.raises(JournalUnknown, match="private, owned and canonical"):
+        PipelineJournal.inspect_recovery(alias / path.name, ident)

@@ -268,6 +268,28 @@ class PipelineIdentity:
             raise JournalUnknown("stage identity cannot be reused or is malformed")
 
 
+def _require_private_journal_scope(path: Path) -> None:
+    """Reject writable/aliased parent directories before trusting journal bytes.
+
+    The file's own O_NOFOLLOW and 0600 modes do not make an attacker-writable
+    parent safe: a rename could swap the pathname between recovery operations.
+    Path resolution is deliberately not a substitute for this permission check.
+    """
+    parent = path.parent
+    try:
+        info = parent.lstat()
+        canonical = parent.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise JournalUnknown("private journal scope missing or changed") from exc
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or canonical != parent
+        or info.st_uid != os.getuid()
+        or info.st_mode & 0o077
+    ):
+        raise JournalUnknown("journal scope must be private, owned and canonical")
+
+
 class PipelineJournal:
     """One owner and chain-verified intent/observation log for a single attempt.
 
@@ -298,11 +320,7 @@ class PipelineJournal:
         self.observed_receipts: dict[str, dict[str, Any]] = {}
 
     def __enter__(self) -> PipelineJournal:
-        if not self.path.parent.is_dir() or self.path.parent.is_symlink():
-            raise JournalUnknown("private owned journal directory missing")
-        directory = self.path.parent.stat(follow_symlinks=False)
-        if not stat.S_ISDIR(directory.st_mode) or directory.st_uid != os.getuid():
-            raise JournalUnknown("journal scope ownership invalid")
+        _require_private_journal_scope(self.path)
         lease = self.path.parent / "p4-pipeline-scope.lock"
         try:
             self.lease_fd = os.open(lease, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
@@ -920,6 +938,7 @@ class PipelineJournal:
     @classmethod
     def inspect_recovery(cls, path: Path, identity: PipelineIdentity) -> dict[str, Any]:
         """Read and verify existing bytes without replaying a pending operation."""
+        _require_private_journal_scope(path)
         if path.is_symlink() or not path.is_file():
             raise JournalUnknown("recovery journal missing or linked")
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
