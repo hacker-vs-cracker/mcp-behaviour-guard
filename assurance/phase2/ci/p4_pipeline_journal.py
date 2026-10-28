@@ -432,9 +432,13 @@ class PipelineJournal:
         operation_id: str,
         mutate: Callable[[], object],
         observe: Callable[[object], bytes],
-        output_bytes: int = 0,
+        output_bytes: int = 8192,
     ) -> dict[str, Any]:
         """Write intent before mutation; independently read back or retain UNKNOWN.
+
+        Receipt bytes must fit the allowance durably reserved before mutation.
+        Historical journal reservations remain recovery-only and never grant
+        new execution authority.
 
         The caller must provide a trusted source-side observer, not a candidate
         path or an unchecked success flag. All outcomes remain source-only.
@@ -451,7 +455,7 @@ class PipelineJournal:
             or not callable(mutate)
             or not callable(observe)
             or type(output_bytes) is not int
-            or output_bytes < 0
+            or output_bytes <= 0
             or self.bytes_accounted + output_bytes > 1_048_576
             or time.monotonic() >= self.deadline
         ):
@@ -475,8 +479,8 @@ class PipelineJournal:
         try:
             result = mutate()
             raw = observe(result)
-            if type(raw) is not bytes or not 0 < len(raw) <= _MAX_RECEIPT_BYTES:
-                raise JournalUnknown("bounded independent observation required")
+            if type(raw) is not bytes or not 0 < len(raw) <= min(output_bytes, _MAX_RECEIPT_BYTES):
+                raise JournalUnknown("independent observation exceeded durable reservation")
             evidence = bounds._load_object_bytes(
                 raw,
                 max_bytes=_MAX_RECEIPT_BYTES,

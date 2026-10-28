@@ -178,7 +178,7 @@ def advance(j: PipelineJournal, stage: str, *, modify=None):
         operation_id=op,
         mutate=lambda: object(),
         observe=lambda _: json.dumps(data, sort_keys=True).encode(),
-        output_bytes=13,
+        output_bytes=8192,
     )
 
 
@@ -940,3 +940,54 @@ def test_recovery_rejects_exposed_or_aliased_scope(tmp_path: Path):
     alias.symlink_to(parent, target_is_directory=True)
     with pytest.raises(JournalUnknown, match="private, owned and canonical"):
         PipelineJournal.inspect_recovery(alias / path.name, ident)
+
+
+def test_observation_must_fit_durable_reservation(tmp_path: Path):
+    i = identity()
+    path = tmp_path / "owned-p4-attempt-a.jsonl"
+    raw = json.dumps(observation(i, _STAGES[0], "overrun-identity")).encode()
+    assert len(raw) > 32
+    with PipelineJournal(path, i, deadline=time.monotonic() + 500) as journal:
+        called = []
+        with pytest.raises(JournalUnknown, match="exceeded durable reservation"):
+            journal.advance(
+                _STAGES[0],
+                operation_id="overrun-identity",
+                mutate=lambda: called.append("mutated"),
+                observe=lambda _: raw,
+                output_bytes=32,
+            )
+        assert called == ["mutated"]
+        assert journal.unknown
+        assert journal.bytes_accounted == 32
+    recovery = PipelineJournal.inspect_recovery(path, i)
+    assert recovery["remote_operation_unresolved"] is True
+    assert recovery["durable_output_bytes_accounted"] == 32
+
+
+def test_exact_observation_reservation_and_zero_allowance(tmp_path: Path):
+    i = identity()
+    path = tmp_path / "owned-p4-attempt-a.jsonl"
+    op = "exact-reservation"
+    raw = json.dumps(observation(i, _STAGES[0], op)).encode()
+    with PipelineJournal(path, i, deadline=time.monotonic() + 500) as journal:
+        with pytest.raises(JournalUnknown, match="stage, original budget"):
+            journal.advance(
+                _STAGES[0],
+                operation_id="zero-reservation",
+                mutate=lambda: pytest.fail("zero reservation must not mutate"),
+                observe=lambda _: raw,
+                output_bytes=0,
+            )
+        assert journal.events[-1]["status"] == "OPEN"
+        journal.advance(
+            _STAGES[0],
+            operation_id=op,
+            mutate=lambda: None,
+            observe=lambda _: raw,
+            output_bytes=len(raw),
+        )
+        assert journal.bytes_accounted == len(raw)
+    recovered = PipelineJournal.inspect_recovery(path, i)
+    assert recovered["remote_operation_unresolved"] is False
+    assert recovered["durable_output_bytes_accounted"] == len(raw)
