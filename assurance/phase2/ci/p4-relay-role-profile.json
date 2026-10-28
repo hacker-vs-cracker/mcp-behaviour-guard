@@ -1,0 +1,65 @@
+{
+  "allowed_extra_environment": [],
+  "argv": [
+    "/trusted/p4_metered_fixture_relay.py",
+    "--upstream-host",
+    "fixture-origin",
+    "--upstream-port",
+    "8001",
+    "--listen-port",
+    "8001",
+    "--remaining-seconds",
+    "{remaining_seconds}"
+  ],
+  "candidate_can_contact_fixture_directly": false,
+  "container_program_target": "/trusted/p4_metered_fixture_relay.py",
+  "control_endpoints_reachable_from_subject_or_relay": false,
+  "effective_image_command_uid_gid_env_network_mount_attestation_required": true,
+  "entrypoint": [
+    "python",
+    "-B"
+  ],
+  "fixture_control_image_role": "fixture (same immutable base, distinct P4 control command and network)",
+  "fixture_control_requires_writer_fence_before_volume_export": true,
+  "gid": 10003,
+  "image_source": "p3-promoted-authority.json evaluator image immutable ref, reused as base only",
+  "internet_egress": false,
+  "name": "p4-metered-relay-role-v1",
+  "network_topology": {
+    "control_network": [
+      "fixture-control"
+    ],
+    "fixture_network": [
+      "fixture-app",
+      "relay"
+    ],
+    "max_networks": 3,
+    "subject_network": [
+      "candidate",
+      "evaluator",
+      "relay"
+    ]
+  },
+  "outer_pipeline_deadline_required": true,
+  "p3_evaluator_role_inheritance": false,
+  "platform": "linux/amd64",
+  "program_mount": "read-only,nosuid,nodev,noexec,exact-hash-attested",
+  "public_ports": false,
+  "relay_code_binding_required": true,
+  "runtime_enforcement_proven": false,
+  "runtime_execution_enabled": false,
+  "runtime_role_budget": {
+    "containers": 5,
+    "docker_managed_volumes": 2,
+    "networks": 3
+  },
+  "schema_version": 1,
+  "source_code_executable_by_candidate": false,
+  "status": "SOURCE_PROFILE_NOT_RUNTIME_PROVEN",
+  "subject_logical_fixture_alias": "fixture-app",
+  "trusted_host_controller_is_container": false,
+  "trusted_program_path": "assurance/phase2/ci/p4_metered_fixture_relay.py",
+  "trusted_program_sha256": "8d3d41bca5bb2c8c96e7cdc397d2857c8abf635e97ed272768e5689da6711ef7",
+  "uid": 10003,
+  "upstream_dns_alias": "fixture-origin"
+}
