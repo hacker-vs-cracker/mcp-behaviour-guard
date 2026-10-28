@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -991,3 +992,83 @@ def test_exact_observation_reservation_and_zero_allowance(tmp_path: Path):
     recovered = PipelineJournal.inspect_recovery(path, i)
     assert recovered["remote_operation_unresolved"] is False
     assert recovered["durable_output_bytes_accounted"] == len(raw)
+
+
+@pytest.mark.parametrize(
+    "attack",
+    [
+        "parent_renamed",
+        "parent_symlink",
+        "journal_replaced",
+        "journal_hardlinked",
+        "lease_replaced",
+        "lease_hardlinked",
+        "parent_exposed",
+        "journal_exposed",
+        "lease_exposed",
+    ],
+)
+def test_pipeline_live_journal_identity_drift_blocks_mutation(tmp_path: Path, attack: str):
+    """No remote effect is issued after the owned pathname or privacy drifts."""
+    parent = tmp_path / "trusted-pipeline"
+    parent.mkdir(mode=0o700)
+    path = parent / "owned-p4-attempt-a.jsonl"
+    fired = []
+    with PipelineJournal(path, identity(), deadline=time.monotonic() + 500) as j:
+        lease = parent / "p4-pipeline-scope.lock"
+        if attack in {"parent_renamed", "parent_symlink"}:
+            old = tmp_path / "renamed-pipeline"
+            parent.rename(old)
+            if attack == "parent_symlink":
+                parent.symlink_to(old, target_is_directory=True)
+            else:
+                parent.mkdir(mode=0o700)
+        elif attack == "journal_replaced":
+            path.unlink()
+            path.write_text("attacker substitute", encoding="utf-8")
+        elif attack == "journal_hardlinked":
+            os.link(path, tmp_path / "extra-journal-hardlink")
+        elif attack == "lease_replaced":
+            lease.unlink()
+            lease.write_text("attacker substitute", encoding="utf-8")
+        elif attack == "lease_hardlinked":
+            os.link(lease, tmp_path / "extra-lease-hardlink")
+        elif attack == "parent_exposed":
+            parent.chmod(0o755)
+        elif attack == "journal_exposed":
+            path.chmod(0o644)
+        elif attack == "lease_exposed":
+            lease.chmod(0o644)
+        with pytest.raises(JournalUnknown):
+            j.advance(
+                _STAGES[0],
+                operation_id="drifted-op",
+                mutate=lambda: fired.append("remote effect"),
+                observe=lambda _: b"{}",
+            )
+        assert fired == []
+
+
+def test_pipeline_mutation_replaces_journal_path_retains_unknown(tmp_path: Path):
+    parent = tmp_path / "trusted-pipeline"
+    parent.mkdir(mode=0o700)
+    path = parent / "owned-p4-attempt-a.jsonl"
+    with PipelineJournal(path, identity(), deadline=time.monotonic() + 500) as j:
+        effects = []
+
+        def mut():
+            effects.append("started")
+            path.unlink()
+            path.write_text("substitute", encoding="utf-8")
+            return object()
+
+        with pytest.raises(JournalUnknown, match="cannot durably record uncertain"):
+            j.advance(
+                _STAGES[0],
+                operation_id="drift-after-mutation",
+                mutate=mut,
+                observe=lambda _: b"{}",
+            )
+        assert effects == ["started"]
+        assert j.unknown is True
+        assert j.pending is True

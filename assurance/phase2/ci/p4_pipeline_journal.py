@@ -310,6 +310,10 @@ class PipelineJournal:
         self.deadline = deadline
         self.fd: int | None = None
         self.lease_fd: int | None = None
+        self.directory_fd: int | None = None
+        self.directory_identity: tuple[int, int] | None = None
+        self.journal_identity: tuple[int, int] | None = None
+        self.lease_identity: tuple[int, int] | None = None
         self.events: list[dict[str, Any]] = []
         self.stage_index = 0
         self.unknown = False
@@ -319,11 +323,73 @@ class PipelineJournal:
         # attempt. A recovered journal is never resumed as operational authority.
         self.observed_receipts: dict[str, dict[str, Any]] = {}
 
+    def _check_live_path_identities(self) -> None:
+        """Reconcile both open descriptors against their *current* pathnames.
+
+        Open descriptors alone remain usable after a directory rename, unlink,
+        replacement or privacy drift. Those descriptors are not sufficient
+        evidence that an externally reconciled journal still occupies its
+        original trusted pathname. Never continue remote mutations on drift.
+        """
+        if self.fd is None or self.lease_fd is None or self.directory_fd is None:
+            raise JournalUnknown("pipeline journal or lease not available")
+        try:
+            parent = self.path.parent.lstat()
+            if self.path.parent.resolve(strict=True) != self.path.parent:
+                raise JournalUnknown("pipeline directory pathname became aliased")
+            opened_parent = os.fstat(self.directory_fd)
+            journal = os.fstat(self.fd)
+            lease = os.fstat(self.lease_fd)
+            named_journal = os.stat(self.path.name, dir_fd=self.directory_fd, follow_symlinks=False)
+            named_lease = os.stat(
+                "p4-pipeline-scope.lock", dir_fd=self.directory_fd, follow_symlinks=False
+            )
+            if (
+                not stat.S_ISDIR(opened_parent.st_mode)
+                or not stat.S_ISREG(journal.st_mode)
+                or not stat.S_ISREG(lease.st_mode)
+                or any(
+                    x.st_uid != os.getuid() or x.st_mode & 0o077
+                    for x in (parent, opened_parent, journal, lease)
+                )
+                or journal.st_nlink != 1
+                or lease.st_nlink != 1
+                or self.directory_identity != (parent.st_dev, parent.st_ino)
+                or self.directory_identity != (opened_parent.st_dev, opened_parent.st_ino)
+                or self.journal_identity != (journal.st_dev, journal.st_ino)
+                or self.journal_identity != (named_journal.st_dev, named_journal.st_ino)
+                or self.lease_identity != (lease.st_dev, lease.st_ino)
+                or self.lease_identity != (named_lease.st_dev, named_lease.st_ino)
+            ):
+                raise JournalUnknown("pipeline journal/lease identity or privacy changed")
+        except JournalUnknown:
+            raise
+        except (OSError, RuntimeError) as exc:
+            raise JournalUnknown("pipeline journal pathname reconciliation UNKNOWN") from exc
+
     def __enter__(self) -> PipelineJournal:
         _require_private_journal_scope(self.path)
-        lease = self.path.parent / "p4-pipeline-scope.lock"
         try:
-            self.lease_fd = os.open(lease, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            opened_parent = os.open(
+                self.path.parent,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            )
+            self.directory_fd = opened_parent
+            parent = os.fstat(opened_parent)
+            named_parent = self.path.parent.lstat()
+            if (
+                (parent.st_dev, parent.st_ino) != (named_parent.st_dev, named_parent.st_ino)
+                or parent.st_uid != os.getuid()
+                or parent.st_mode & 0o077
+            ):
+                raise JournalUnknown("pipeline directory changed during open")
+            self.directory_identity = (parent.st_dev, parent.st_ino)
+            self.lease_fd = os.open(
+                "p4-pipeline-scope.lock",
+                os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                0o600,
+                dir_fd=opened_parent,
+            )
             lease_info = os.fstat(self.lease_fd)
             if (
                 not stat.S_ISREG(lease_info.st_mode)
@@ -332,21 +398,26 @@ class PipelineJournal:
                 or lease_info.st_nlink != 1
             ):
                 raise JournalUnknown("untrusted pipeline lease")
+            self.lease_identity = (lease_info.st_dev, lease_info.st_ino)
             fcntl.flock(self.lease_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            # A prior attempt's unreviewed recovery state cannot be cleared by
-            # a process restart or another entrypoint. No glob-based deletion.
+            # Unreconciled prior journals cannot be cleared by process restart.
             if any(self.path.parent.glob("owned-p4-*.jsonl")):
                 raise JournalUnknown("prior pipeline journal needs owner reconciliation")
             if not re.fullmatch(r"owned-p4-[a-z][a-z0-9-]{0,31}\.jsonl", self.path.name):
                 raise JournalUnknown("unexpected pipeline journal filename")
-            self.fd = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            self.fd = os.open(
+                self.path.name,
+                os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                0o600,
+                dir_fd=opened_parent,
+            )
             fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            journal = os.fstat(self.fd)
+            self.journal_identity = (journal.st_dev, journal.st_ino)
+            self._check_live_path_identities()
             self._append("OPEN", "", "", {})
-            dfd = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-            try:
-                os.fsync(dfd)
-            finally:
-                os.close(dfd)
+            os.fsync(opened_parent)
+            self._check_live_path_identities()
             return self
         except BaseException:
             self.__exit__(None, None, None)
@@ -359,10 +430,14 @@ class PipelineJournal:
         if self.lease_fd is not None:
             os.close(self.lease_fd)
             self.lease_fd = None
+        if self.directory_fd is not None:
+            os.close(self.directory_fd)
+            self.directory_fd = None
 
     def _append(self, status: str, stage: str, operation_id: str, details: dict[str, Any]) -> None:
         if self.fd is None or len(self.events) >= _MAX_EVENTS:
             raise JournalUnknown("durable journal unavailable or exceeds event ceiling")
+        self._check_live_path_identities()
         prior = self.events[-1]["digest"] if self.events else "0" * 64
         body = {
             "schema_version": _JOURNAL_SCHEMA,
@@ -386,6 +461,7 @@ class PipelineJournal:
         if os.write(self.fd, data) != len(data):
             raise JournalUnknown("short durable journal write")
         os.fsync(self.fd)
+        self._check_live_path_identities()
         self.events.append(row)
 
     def _require_stage_continuity(self, stage: str, evidence: dict[str, Any]) -> None:
