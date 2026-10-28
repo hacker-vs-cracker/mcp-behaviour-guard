@@ -81,3 +81,34 @@ def test_symlink_and_hardlink_refused(tmp_path: Path):
     os.link(args["source_archive"], args["destination_archive"])
     with pytest.raises(HandoverUnknown):
         reconcile_staged_image(**args)
+
+
+def test_archive_path_aliases_cannot_masquerade_as_cross_worker_transfer(tmp_path: Path):
+    args = reconcile(tmp_path)
+    # The second lexical path resolves to the same inode as the first.
+    args["destination_archive"] = tmp_path / "unused" / ".." / "source.tar"
+    (tmp_path / "unused").mkdir()
+    with pytest.raises(HandoverUnknown, match="alias the same file"):
+        reconcile_staged_image(**args)
+
+
+def test_archive_rewrite_with_restored_mtime_is_rejected(tmp_path: Path, monkeypatch):
+    args = reconcile(tmp_path, content=b"0123456789")
+    target = args["source_archive"]
+    stamp = target.stat()
+    original_read = os.read
+    changed = False
+
+    def changed_during_read(fd: int, size: int) -> bytes:
+        nonlocal changed
+        data = original_read(fd, size)
+        if not changed:
+            changed = True
+            target.write_bytes(b"9876543210")
+            os.utime(target, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        return data
+
+    monkeypatch.setattr(os, "read", changed_during_read)
+    with pytest.raises(HandoverUnknown, match="changed during read"):
+        reconcile_staged_image(**args)
+    assert changed

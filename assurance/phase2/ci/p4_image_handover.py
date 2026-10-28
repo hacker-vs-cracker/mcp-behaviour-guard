@@ -39,7 +39,9 @@ def _image_readback(value: dict[str, Any]) -> str:
     return value["Id"]
 
 
-def _fingerprint(path: Path, *, remaining_bytes: int, deadline: float) -> tuple[str, int]:
+def _fingerprint(
+    path: Path, *, remaining_bytes: int, deadline: float
+) -> tuple[str, int, tuple[int, int]]:
     if (
         not isinstance(path, Path)
         or not path.is_absolute()
@@ -60,8 +62,20 @@ def _fingerprint(path: Path, *, remaining_bytes: int, deadline: float) -> tuple[
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
         try:
             opened = os.fstat(fd)
-            stamp = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
-            actual = (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+            stamp = (
+                before.st_dev,
+                before.st_ino,
+                before.st_size,
+                before.st_mtime_ns,
+                before.st_ctime_ns,
+            )
+            actual = (
+                opened.st_dev,
+                opened.st_ino,
+                opened.st_size,
+                opened.st_mtime_ns,
+                opened.st_ctime_ns,
+            )
             if actual != stamp or opened.st_nlink != 1:
                 raise HandoverUnknown("image archive changed before open")
             h = hashlib.sha256()
@@ -82,9 +96,10 @@ def _fingerprint(path: Path, *, remaining_bytes: int, deadline: float) -> tuple[
                     item.st_ino,
                     item.st_size,
                     item.st_mtime_ns,
+                    item.st_ctime_ns,
                 ) != stamp or item.st_nlink != 1:
                     raise HandoverUnknown("image archive changed during read")
-            return h.hexdigest(), total
+            return h.hexdigest(), total, (opened.st_dev, opened.st_ino)
         finally:
             os.close(fd)
     except OSError as exc:
@@ -116,16 +131,21 @@ def reconcile_staged_image(
         raise HandoverUnknown("stage transfer must have separate bounded contexts")
     build_id = _image_readback(source_image_inspect)
     runtime_id = _image_readback(destination_image_inspect)
-    source_digest, source_size = _fingerprint(
+    source_digest, source_size, source_file_identity = _fingerprint(
         source_archive,
         remaining_bytes=remaining_transfer_bytes,
         deadline=original_deadline_monotonic,
     )
-    dest_digest, dest_size = _fingerprint(
+    dest_digest, dest_size, dest_file_identity = _fingerprint(
         destination_archive,
         remaining_bytes=remaining_transfer_bytes,
         deadline=original_deadline_monotonic,
     )
+    # A lexical pathname difference does not prove a cross-worker transfer.
+    # The same inode observed through aliases is one local archive, not two.
+    # Distinct inodes do NOT prove physical isolation or producer provenance.
+    if source_file_identity == dest_file_identity:
+        raise HandoverUnknown("source and destination archives alias the same file")
     if source_digest != dest_digest or source_size != dest_size or build_id != runtime_id:
         raise HandoverUnknown("stage transfer archive or resolved image identity drift")
     return {
