@@ -13,6 +13,7 @@ import os
 import re
 import selectors
 import signal
+import stat
 import subprocess
 import time
 from collections.abc import Callable, Sequence
@@ -139,48 +140,108 @@ def bounded_native_command(
 
 
 class DurableBuildJournal:
-    """One private append-only intent record, never reopened for truncation."""
+    """An exclusively owned, directory-anchored durable build intent log.
+
+    A renamed/symlinked/replaced log or parent cannot be used as continuing
+    evidence. If the pathname becomes uncertain after a write, the write may
+    have happened; the controller must reconcile rather than retry a build.
+    """
 
     def __init__(self, path: Path) -> None:
         self.path = path
         self.fd: int | None = None
+        self.parent_fd: int | None = None
+        self.parent_identity: tuple[int, int] | None = None
+        self.file_identity: tuple[int, int] | None = None
+
+    def _check_identity(self) -> None:
+        if self.fd is None or self.parent_fd is None:
+            raise P4BuildUnknown("build journal not available")
+        try:
+            directory = os.fstat(self.parent_fd)
+            named_directory = self.path.parent.lstat()
+            journal = os.fstat(self.fd)
+            named_journal = os.stat(self.path.name, dir_fd=self.parent_fd, follow_symlinks=False)
+            if (
+                not stat.S_ISDIR(directory.st_mode)
+                or not stat.S_ISREG(journal.st_mode)
+                or directory.st_uid != os.getuid()
+                or directory.st_mode & 0o077
+                or journal.st_uid != os.getuid()
+                or journal.st_mode & 0o077
+                or journal.st_nlink != 1
+                or self.parent_identity != (directory.st_dev, directory.st_ino)
+                or self.parent_identity != (named_directory.st_dev, named_directory.st_ino)
+                or self.file_identity != (journal.st_dev, journal.st_ino)
+                or self.file_identity != (named_journal.st_dev, named_journal.st_ino)
+            ):
+                raise P4BuildUnknown("build journal path identity or privacy changed")
+        except P4BuildUnknown:
+            raise
+        except (OSError, RuntimeError) as exc:
+            raise P4BuildUnknown("build journal pathname reconciliation UNKNOWN") from exc
 
     def __enter__(self) -> DurableBuildJournal:
         parent = self.path.parent
-        if (
-            parent.is_symlink()
-            or not parent.is_dir()
-            or parent.stat().st_uid != os.getuid()
-            or parent.stat().st_mode & 0o077
-            or self.path.is_symlink()
-        ):
-            raise P4BuildUnknown("build journal is not in private owned state")
-        self.fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
-        pfd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
         try:
+            info = parent.lstat()
+            if (
+                not stat.S_ISDIR(info.st_mode)
+                or info.st_uid != os.getuid()
+                or info.st_mode & 0o077
+                or parent.resolve(strict=True) != parent
+                or self.path.name in {".", ".."}
+            ):
+                raise P4BuildUnknown("build journal is not in private owned state")
+            pfd = os.open(
+                parent,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            )
+            self.parent_fd = pfd
+            actual_parent = os.fstat(pfd)
+            if (actual_parent.st_dev, actual_parent.st_ino) != (info.st_dev, info.st_ino):
+                raise P4BuildUnknown("build journal directory changed during open")
+            self.parent_identity = (info.st_dev, info.st_ino)
+            fd = os.open(
+                self.path.name,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                0o600,
+                dir_fd=pfd,
+            )
+            self.fd = fd
+            st = os.fstat(fd)
+            self.file_identity = (st.st_dev, st.st_ino)
+            self._check_identity()
             os.fsync(pfd)
-        finally:
-            os.close(pfd)
-        return self
+            self._check_identity()
+            return self
+        except BaseException:
+            self.__exit__(None, None, None)
+            raise
 
     def append(self, event: str, **details: str | int | bool) -> None:
         if self.fd is None or not re.fullmatch(r"[A-Z_]{3,48}", event):
             raise P4BuildUnknown("build journal not available")
         row = json.dumps({"event": event, **details}, sort_keys=True, separators=(",", ":"))
-        if len(row.encode()) > 2048:
+        encoded = (row + "\n").encode()
+        if len(encoded) > 2048:
             raise P4BuildUnknown("build journal entry oversized")
+        self._check_identity()
         try:
-            written = os.write(self.fd, (row + "\n").encode())
-            if written != len(row.encode()) + 1:
+            if os.write(self.fd, encoded) != len(encoded):
                 raise OSError("short journal write")
             os.fsync(self.fd)
         except OSError as exc:
             raise P4BuildUnknown("build journal durability UNKNOWN") from exc
+        self._check_identity()
 
     def __exit__(self, *_args: object) -> None:
         if self.fd is not None:
             os.close(self.fd)
             self.fd = None
+        if self.parent_fd is not None:
+            os.close(self.parent_fd)
+            self.parent_fd = None
 
 
 def prepare_private_build_command(

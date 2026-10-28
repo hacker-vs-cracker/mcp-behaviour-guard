@@ -203,3 +203,48 @@ def test_build_rechecks_input_bytes_before_fake_runner(tmp_path):
                 deadline=float(time.monotonic() + 5),
                 run=lambda *_a, **_k: pytest.fail("changed context reached runner"),
             )
+
+
+def test_build_journal_rejects_replaced_file_and_parent(tmp_path):
+    m = module()
+    private = tmp_path / "private"
+    private.mkdir(mode=0o700)
+    path = private / "owned-build.jsonl"
+    with m.DurableBuildJournal(path) as journal:
+        journal.append("BUILD_SUBMITTED", attempt="first")
+        path.rename(private / "retired")
+        path.write_text("substituted\n")
+        with pytest.raises(m.P4BuildUnknown, match="identity"):
+            journal.append("BUILD_CLI_RETURNED", attempt="swapped")
+        assert (private / "retired").read_text().count("BUILD_SUBMITTED") == 1
+        assert path.read_text() == "substituted\n"
+
+    second = tmp_path / "separate"
+    second.mkdir(mode=0o700)
+    with m.DurableBuildJournal(second / "owned-build.jsonl") as journal:
+        second.rename(tmp_path / "moved")
+        second.mkdir(mode=0o700)
+        with pytest.raises(m.P4BuildUnknown, match="identity"):
+            journal.append("BUILD_UNKNOWN", attempt="renamed")
+        assert (second / "owned-build.jsonl").exists() is False
+
+
+def test_build_journal_rejects_permissions_linking_and_removed_path(tmp_path):
+    m = module()
+    for variant in ("directory_mode", "file_mode", "hardlink", "unlink"):
+        root = tmp_path / variant
+        root.mkdir(mode=0o700)
+        path = root / "journal.jsonl"
+        with m.DurableBuildJournal(path) as journal:
+            if variant == "directory_mode":
+                root.chmod(0o755)
+            elif variant == "file_mode":
+                path.chmod(0o644)
+            elif variant == "hardlink":
+                import os
+
+                os.link(path, root / "alias")
+            else:
+                path.unlink()
+            with pytest.raises(m.P4BuildUnknown):
+                journal.append("BUILD_UNKNOWN")
