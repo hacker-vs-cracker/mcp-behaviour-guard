@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -53,6 +54,102 @@ def test_rejects_ambient_endpoint_override_before_daemon(monkeypatch):
         with pytest.raises(scoped.EngineUncertain):
             runner(args, timeout=4, output_budget=512, retained_per_stream=100)
     assert called == []
+
+
+@pytest.mark.parametrize(
+    "override",
+    (
+        "--host=unix:///other.sock",
+        "--context=default",
+        "--config=/tmp/unreviewed",
+        "-H",
+        "-Hunix:///other.sock",
+        "-H=unix:///other.sock",
+        "-c",
+    ),
+)
+def test_rejects_alternate_endpoint_flag_spellings_before_io(override):
+    binding = scoped.EngineBinding("unix:///run/mcpbg-p4-a/engine.sock", "0" * 64, 1, 1)
+    called = []
+    runner = scoped.ScopedEngineRunner(binding, invoke=lambda *a, **k: called.append(a))
+    with pytest.raises(scoped.EngineUncertain, match="override"):
+        runner(
+            ["docker", "container", "inspect", override],
+            timeout=4,
+            output_budget=512,
+            retained_per_stream=100,
+        )
+    assert called == []
+
+
+@pytest.fixture
+def short_unix_socket_parent():
+    """Use a short, canonical path: Darwin AF_UNIX paths are ~104 bytes max.
+
+    Avoid weakening the Engine socket checks or mocking the socket itself.
+    Resolve /tmp first because on macOS it is usually a symlink to /private/tmp.
+    """
+    with tempfile.TemporaryDirectory(
+        prefix="mbg-", dir=str(Path("/tmp").resolve(strict=True))
+    ) as path:
+        yield Path(path)
+
+
+@pytest.mark.parametrize("fault", ("symlink", "world_writable", "owner_drift", "missing", "valid"))
+def test_private_socket_parent_revalidated_on_every_call(
+    monkeypatch, short_unix_socket_parent, fault
+):
+    import os
+    import re
+    import socket
+
+    monkeypatch.setattr(scoped, "_ENDPOINT", re.compile(r"unix://.*/engine\.sock\Z"))
+    directory = short_unix_socket_parent / "private"
+    directory.mkdir(mode=0o700)
+    sock = socket.socket(socket.AF_UNIX)
+    sock_path = directory / "engine.sock"
+    sock.bind(str(sock_path))
+    os.chmod(sock_path, 0o600)
+    try:
+        real = sock_path.lstat()
+        binding = scoped.EngineBinding(
+            "unix://" + str(sock_path), "0" * 64, real.st_dev, real.st_ino
+        )
+        original = Path.lstat
+
+        def lstat(path):
+            if path == directory and fault == "missing":
+                raise FileNotFoundError("injected lost parent")
+            raw = list(original(path))
+            # The test's temporary UNIX socket/parent are unprivileged; model
+            # independently admitted root ownership and change one property.
+            if path in (directory, sock_path):
+                raw[4] = 0
+            if path == directory:
+                if fault == "world_writable":
+                    raw[0] |= 0o002
+                if fault == "owner_drift":
+                    raw[4] = 1
+            return os.stat_result(raw)
+
+        monkeypatch.setattr(Path, "lstat", lstat)
+        if fault == "symlink":
+            original_resolve = Path.resolve
+
+            def resolve(path, *args, **kwargs):
+                if path == directory:
+                    return short_unix_socket_parent / "different-directory"
+                return original_resolve(path, *args, **kwargs)
+
+            monkeypatch.setattr(Path, "resolve", resolve)
+        runner = scoped.ScopedEngineRunner(binding, invoke=lambda *a, **k: pytest.fail("IO"))
+        if fault == "valid":
+            runner._socket_check()
+        else:
+            with pytest.raises(scoped.EngineUncertain, match="socket|directory"):
+                runner._socket_check()
+    finally:
+        sock.close()
 
 
 def test_daemon_identity_change_prevents_action(monkeypatch):

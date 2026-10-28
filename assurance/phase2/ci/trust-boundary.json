@@ -290,7 +290,7 @@
       "assurance/phase2/ci/p4_pipeline_journal.py": "d34b9f6d70222742f637597fe8a4ce4d3d058aa17d6e45c0336f8ab3baeb18ef",
       "assurance/phase2/ci/p4_reference_bridge.py": "be362809b34f4b68b4bd31ad84b6688fd7235d2d673f18e303b6b5c5ed3031d0",
       "assurance/phase2/ci/p4_runtime_topology.py": "9330f96279bb19c3d21fa2d0082754e405bc6331061c172b1156bb4ec5931361",
-      "assurance/phase2/ci/p4_scoped_engine.py": "94347fd87734093ee07d1d3030699f3aa4b03c3c19e262a571081e0ff17094dc",
+      "assurance/phase2/ci/p4_scoped_engine.py": "2e5dc6ae07a3de24bdb776b028dcf67de66b7705d509d6b86342cb2399c28513",
       "assurance/phase2/ci/p4_staged_pipeline.py": "d573b12f9ff874908e3aa00cfa830526ce1f02ce98db9a6bfbf99a185f0c3d7d",
       "assurance/phase2/ci/p4_worker_storage.py": "915b4128e004b2371eb689be3b2ba5d0f209c153bcf90ca3b4df308a74c4ed39"
     },

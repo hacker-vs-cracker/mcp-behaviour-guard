@@ -119,17 +119,27 @@ class ScopedEngineRunner:
 
     def _socket_check(self) -> None:
         path = Path(self.binding.endpoint.removeprefix("unix://"))
+        parent = path.parent
         try:
+            directory = parent.lstat()
+            resolved = parent.resolve(strict=True)
             info = path.lstat()
-        except OSError as exc:
-            raise EngineUncertain("Engine socket disappeared") from exc
+        except (OSError, RuntimeError) as exc:
+            raise EngineUncertain("private Engine socket/directory disappeared") from exc
+        # A previously admitted socket inode is not enough if the parent
+        # becomes a symlink or newly writable between CLI commands. Recheck
+        # the exact private, root-owned directory on every Engine call.
         if (
-            not stat.S_ISSOCK(info.st_mode)
+            not stat.S_ISDIR(directory.st_mode)
+            or resolved != parent
+            or directory.st_uid != 0
+            or directory.st_mode & 0o022
+            or not stat.S_ISSOCK(info.st_mode)
             or info.st_uid != 0
             or info.st_mode & 0o077
             or (info.st_dev, info.st_ino) != (self.binding.socket_dev, self.binding.socket_ino)
         ):
-            raise EngineUncertain("Engine socket identity changed")
+            raise EngineUncertain("private Engine socket or directory identity changed")
 
     def _invoke(self, args: Sequence[str], seconds: float, budget: int) -> BuildCommandResult:
         if type(seconds) not in (int, float) or not 0 < seconds <= 300:
@@ -195,7 +205,15 @@ class ScopedEngineRunner:
             raise EngineUncertain("invalid scoped Engine command")
         # Control command, role command and archive command must be constructed
         # by trusted reviewed callers, never forwarded from candidate source.
-        if any(arg in {"--host", "--context", "--config"} for arg in argv[1:]):
+        # Exact binary/endpoint injection is not permitted through option
+        # aliases or --option=value spellings either. No alternate Engine
+        # selection may be introduced after the first trusted subcommand.
+        if any(
+            arg in {"--host", "--context", "--config", "-H", "-c"}
+            or arg.startswith(("--host=", "--context=", "--config=", "-H="))
+            or (arg.startswith("-H") and len(arg) > 2)
+            for arg in argv[1:]
+        ):
             raise EngineUncertain("Docker endpoint/config override forbidden")
         end = time.monotonic() + timeout
         # Meter the identity readbacks against the SAME aggregate command-output
