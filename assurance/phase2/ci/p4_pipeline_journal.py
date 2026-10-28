@@ -70,7 +70,46 @@ def _valid_sha(value: object) -> bool:
 
 def _expected(stage: str, evidence: dict[str, Any]) -> None:
     """Reject synthetic shortcuts, absent identities and incomplete fence evidence."""
-    if stage == "IMAGE_TRANSFER_OBSERVED":
+    if stage == "BUILD_WORKER_ADMITTED":
+        # The source journal never treats a caller's platform/storage boolean as
+        # physical admission. Require the reviewed build spec and the independent
+        # whole-worker storage verifier's identities before recording the stage.
+        if (
+            evidence.get("platform") != "linux/amd64"
+            or not _valid_sha(evidence.get("whole_worker_storage_sha256"))
+            or not _valid_sha(evidence.get("reviewed_build_spec_sha256"))
+            or not _valid_sha(evidence.get("private_engine_endpoint_sha256"))
+            or type(evidence.get("whole_worker_storage_bytes")) is not int
+            or not 0 < evidence["whole_worker_storage_bytes"] <= 1_073_741_824
+            or evidence.get("physical_admission_proven") is not False
+        ):
+            raise JournalUnknown("native build admission identities or whole-worker bound missing")
+    elif stage == "BUILD_RESULT_OBSERVED":
+        if (
+            evidence.get("platform") != "linux/amd64"
+            or not _valid_sha(evidence.get("reviewed_build_spec_sha256"))
+            or not _valid_sha(evidence.get("bounded_build_receipt_sha256"))
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", str(evidence.get("resolved_image_id")))
+            or type(evidence.get("build_exit_code")) is not int
+            or evidence["build_exit_code"] != 0
+            or evidence.get("build_observed_source_only") is not True
+            or evidence.get("physical_build_proven") is not False
+        ):
+            raise JournalUnknown("bounded build output and resolved image readback required")
+    elif stage == "RUNTIME_WORKER_ADMITTED":
+        if (
+            evidence.get("platform") != "linux/amd64"
+            or not _valid_sha(evidence.get("private_engine_endpoint_sha256"))
+            or not _valid_sha(evidence.get("build_disposal_receipt_sha256"))
+            or not _valid_sha(evidence.get("image_transfer_receipt_sha256"))
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", str(evidence.get("resolved_image_id")))
+            or evidence.get("candidate_started") is not False
+            or evidence.get("native_runtime_admission_proven") is not False
+        ):
+            raise JournalUnknown(
+                "runtime admission needs bounded handover and fresh daemon identities"
+            )
+    elif stage == "IMAGE_TRANSFER_OBSERVED":
         if (
             evidence.get("platform") != "linux/amd64"
             or not _valid_sha(evidence.get("source_archive_sha256"))

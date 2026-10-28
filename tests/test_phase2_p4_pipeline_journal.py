@@ -51,6 +51,32 @@ def observation(ident: PipelineIdentity, stage: str, operation: str) -> dict:
         "approval_outcome": "NOT_EVALUATED",
     }
     cases = {
+        "BUILD_WORKER_ADMITTED": {
+            "platform": "linux/amd64",
+            "whole_worker_storage_sha256": SHA,
+            "whole_worker_storage_bytes": 1_073_741_824,
+            "reviewed_build_spec_sha256": SHA,
+            "private_engine_endpoint_sha256": SHA,
+            "physical_admission_proven": False,
+        },
+        "BUILD_RESULT_OBSERVED": {
+            "platform": "linux/amd64",
+            "reviewed_build_spec_sha256": SHA,
+            "bounded_build_receipt_sha256": SHA,
+            "resolved_image_id": "sha256:" + SHA,
+            "build_exit_code": 0,
+            "build_observed_source_only": True,
+            "physical_build_proven": False,
+        },
+        "RUNTIME_WORKER_ADMITTED": {
+            "platform": "linux/amd64",
+            "private_engine_endpoint_sha256": SHA,
+            "build_disposal_receipt_sha256": SHA,
+            "image_transfer_receipt_sha256": SHA,
+            "resolved_image_id": "sha256:" + SHA,
+            "candidate_started": False,
+            "native_runtime_admission_proven": False,
+        },
         "IMAGE_TRANSFER_OBSERVED": {
             "platform": "linux/amd64",
             "source_archive_sha256": SHA,
@@ -238,6 +264,18 @@ def test_crash_between_intent_and_observation_retained(tmp_path: Path):
 @pytest.mark.parametrize(
     "stage,mutant",
     [
+        ("BUILD_WORKER_ADMITTED", {"whole_worker_storage_bytes": 1_073_741_825}),
+        ("BUILD_WORKER_ADMITTED", {"whole_worker_storage_sha256": None}),
+        ("BUILD_WORKER_ADMITTED", {"physical_admission_proven": True}),
+        ("BUILD_WORKER_ADMITTED", {"platform": "linux/arm64"}),
+        ("BUILD_RESULT_OBSERVED", {"build_exit_code": True}),
+        ("BUILD_RESULT_OBSERVED", {"bounded_build_receipt_sha256": None}),
+        ("BUILD_RESULT_OBSERVED", {"resolved_image_id": "old-untagged"}),
+        ("BUILD_RESULT_OBSERVED", {"physical_build_proven": True}),
+        ("RUNTIME_WORKER_ADMITTED", {"build_disposal_receipt_sha256": None}),
+        ("RUNTIME_WORKER_ADMITTED", {"image_transfer_receipt_sha256": None}),
+        ("RUNTIME_WORKER_ADMITTED", {"native_runtime_admission_proven": True}),
+        ("RUNTIME_WORKER_ADMITTED", {"candidate_started": True}),
         ("IMAGE_TRANSFER_OBSERVED", {"destination_archive_sha256": "b" * 64}),
         ("IMAGE_TRANSFER_OBSERVED", {"transfer_bytes": 1_073_741_825}),
         ("IMAGE_TRANSFER_OBSERVED", {"platform": "linux/arm64"}),
@@ -756,3 +794,45 @@ def test_active_graph_rejects_missing_or_legacy_source_receipt(tmp_path: Path, f
         with pytest.raises(JournalUnknown):
             advance(j, "ACTIVE_GRAPH_OBSERVED", modify=mutate)
         assert j.unknown and j.pending
+
+
+@pytest.mark.parametrize(
+    "stage",
+    [
+        "BUILD_WORKER_ADMITTED",
+        "BUILD_RESULT_OBSERVED",
+        "RUNTIME_WORKER_ADMITTED",
+    ],
+)
+def test_early_source_stage_rejects_boolean_only_shortcuts(tmp_path: Path, stage: str):
+    ident = identity()
+    path = tmp_path / "owned-p4-attempt-a.jsonl"
+    with PipelineJournal(path, ident, deadline=time.monotonic() + 500) as journal:
+        for prior in _STAGES[: _STAGES.index(stage)]:
+            advance(journal, prior)
+        op = "shortcut-" + stage.lower().replace("_", "-")
+        shortened = {
+            key: value
+            for key, value in observation(ident, stage, op).items()
+            if key
+            in {
+                "schema_version",
+                "attempt_id",
+                "operation_id",
+                "stage",
+                "worker",
+                "daemon",
+                "runtime_enforcement_proven",
+                "approval_outcome",
+            }
+        }
+        shortened["admitted"] = shortened["build_succeeded"] = True
+        with pytest.raises(JournalUnknown):
+            journal.advance(
+                stage,
+                operation_id=op,
+                mutate=lambda: True,
+                observe=lambda _: json.dumps(shortened).encode(),
+            )
+        assert journal.unknown is True
+    assert PipelineJournal.inspect_recovery(path, ident)["remote_operation_unresolved"] is True
