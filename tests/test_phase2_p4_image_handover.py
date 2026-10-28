@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "assurance/phase2/ci"))
+import p4_image_handover as handover  # noqa: E402
 from p4_image_handover import HandoverUnknown, reconcile_staged_image  # noqa: E402
 
 IMAGE = "sha256:" + "a" * 64
@@ -112,3 +113,65 @@ def test_archive_rewrite_with_restored_mtime_is_rejected(tmp_path: Path, monkeyp
     with pytest.raises(HandoverUnknown, match="changed during read"):
         reconcile_staged_image(**args)
     assert changed
+
+
+def test_source_replaced_between_source_and_destination_observation(tmp_path: Path, monkeypatch):
+    args = reconcile(tmp_path)
+    original_fingerprint = handover._fingerprint
+    calls = 0
+
+    def swap_after_source(*fargs, **fkwargs):
+        nonlocal calls
+        result = original_fingerprint(*fargs, **fkwargs)
+        calls += 1
+        if calls == 1:
+            source = args["source_archive"]
+            source.unlink()
+            source.write_bytes(b"image-bytes")
+        return result
+
+    monkeypatch.setattr(handover, "_fingerprint", swap_after_source)
+    with pytest.raises(HandoverUnknown, match="changed after first observation"):
+        reconcile_staged_image(**args)
+    assert calls == 2
+
+
+def test_source_rewritten_with_restored_mtime_after_source_read(tmp_path: Path, monkeypatch):
+    args = reconcile(tmp_path)
+    original_fingerprint = handover._fingerprint
+    source = args["source_archive"]
+    stamp = source.stat()
+    calls = 0
+
+    def mutate_after_source(*fargs, **fkwargs):
+        nonlocal calls
+        result = original_fingerprint(*fargs, **fkwargs)
+        calls += 1
+        if calls == 1:
+            source.write_bytes(b"image-bytex")
+            os.utime(source, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        return result
+
+    monkeypatch.setattr(handover, "_fingerprint", mutate_after_source)
+    with pytest.raises(HandoverUnknown, match="changed after first observation"):
+        reconcile_staged_image(**args)
+    assert calls == 2
+
+
+def test_source_disappears_during_second_observation(tmp_path: Path, monkeypatch):
+    args = reconcile(tmp_path)
+    original_fingerprint = handover._fingerprint
+    calls = 0
+
+    def remove_after_source(*fargs, **fkwargs):
+        nonlocal calls
+        result = original_fingerprint(*fargs, **fkwargs)
+        calls += 1
+        if calls == 1:
+            args["source_archive"].unlink()
+        return result
+
+    monkeypatch.setattr(handover, "_fingerprint", remove_after_source)
+    with pytest.raises(HandoverUnknown, match="unavailable after destination read"):
+        reconcile_staged_image(**args)
+    assert calls == 2

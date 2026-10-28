@@ -284,7 +284,7 @@
       "assurance/phase2/ci/p4_effective_profiles.py": "e5e15d84c0aabe127eb01fb5c7e91c52960722ed8d8b73b4e4acb9af4efcafb3",
       "assurance/phase2/ci/p4_fixture_sqlite_export.py": "bdc4da3a02c9654cdcbd0ce0fff21a1bd849ce9ab75d1cf83b773ae1d88c9a95",
       "assurance/phase2/ci/p4_helper_active_controller.py": "cd5d97f785d3dcfa37108c2a6008eb2054adcbac24fc7b503db9edd170fab86e",
-      "assurance/phase2/ci/p4_image_handover.py": "d3a4b0ae38fe5c5e99e35a1b7b88b863f48e0e6d18eee37526341f96cd9895e0",
+      "assurance/phase2/ci/p4_image_handover.py": "220d935ebc38c6b9bb0c60aea6fe828cf78ff0e0c497bf6a59f669be618776a8",
       "assurance/phase2/ci/p4_live_writer_fence.py": "01c56d3717da6cbf7951f4090d3fc096d7404fe931d934c293a3d08b1decaf5f",
       "assurance/phase2/ci/p4_native_build_execution.py": "c3b93adee1d28f86d0db6e6bb7da31a572f0d98859d6596645797a997399b887",
       "assurance/phase2/ci/p4_pipeline_journal.py": "85f659ee76112f216d15a38888473723b711ee8801aa04af1eca321842e8bc67",

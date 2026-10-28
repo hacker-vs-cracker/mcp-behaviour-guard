@@ -41,7 +41,7 @@ def _image_readback(value: dict[str, Any]) -> str:
 
 def _fingerprint(
     path: Path, *, remaining_bytes: int, deadline: float
-) -> tuple[str, int, tuple[int, int]]:
+) -> tuple[str, int, tuple[int, int, int, int, int]]:
     if (
         not isinstance(path, Path)
         or not path.is_absolute()
@@ -99,7 +99,7 @@ def _fingerprint(
                     item.st_ctime_ns,
                 ) != stamp or item.st_nlink != 1:
                     raise HandoverUnknown("image archive changed during read")
-            return h.hexdigest(), total, (opened.st_dev, opened.st_ino)
+            return h.hexdigest(), total, stamp
         finally:
             os.close(fd)
     except OSError as exc:
@@ -144,8 +144,30 @@ def reconcile_staged_image(
     # A lexical pathname difference does not prove a cross-worker transfer.
     # The same inode observed through aliases is one local archive, not two.
     # Distinct inodes do NOT prove physical isolation or producer provenance.
-    if source_file_identity == dest_file_identity:
+    if source_file_identity[:2] == dest_file_identity[:2]:
         raise HandoverUnknown("source and destination archives alias the same file")
+    # The source was read *before* the destination. A rename or in-place edit
+    # after that first read but during the destination read used to escape its
+    # per-file checks. Reconcile the first pathname after both observations;
+    # this is only a bounded source assertion, not a worker/transport proof.
+    try:
+        source_final = source_archive.lstat()
+    except OSError as exc:
+        raise HandoverUnknown("source archive unavailable after destination read") from exc
+    if (
+        time.monotonic() >= original_deadline_monotonic
+        or not stat.S_ISREG(source_final.st_mode)
+        or source_final.st_nlink != 1
+        or (
+            source_final.st_dev,
+            source_final.st_ino,
+            source_final.st_size,
+            source_final.st_mtime_ns,
+            source_final.st_ctime_ns,
+        )
+        != source_file_identity
+    ):
+        raise HandoverUnknown("source archive changed after first observation")
     if source_digest != dest_digest or source_size != dest_size or build_id != runtime_id:
         raise HandoverUnknown("stage transfer archive or resolved image identity drift")
     return {
