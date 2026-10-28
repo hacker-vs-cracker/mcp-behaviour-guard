@@ -287,7 +287,7 @@
       "assurance/phase2/ci/p4_image_handover.py": "2d229327b645e8ae03b69edf7cb119f84c57668755ddf268fb52c3bebc9c9c2d",
       "assurance/phase2/ci/p4_live_writer_fence.py": "01c56d3717da6cbf7951f4090d3fc096d7404fe931d934c293a3d08b1decaf5f",
       "assurance/phase2/ci/p4_native_build_execution.py": "45d893c6500bcd45d84127b5ff9ce6bc4e714bd98be9671772f0586f13c65a22",
-      "assurance/phase2/ci/p4_pipeline_journal.py": "07552cfa26a92190bbe9ed5fce938a1ec3fe657a103a35dadb3fd4aaa9279f11",
+      "assurance/phase2/ci/p4_pipeline_journal.py": "473a98bdc229b9c634ac6d829645d90e821fcff7fb67caebb1b82f9272b20401",
       "assurance/phase2/ci/p4_reference_bridge.py": "be362809b34f4b68b4bd31ad84b6688fd7235d2d673f18e303b6b5c5ed3031d0",
       "assurance/phase2/ci/p4_runtime_topology.py": "9330f96279bb19c3d21fa2d0082754e405bc6331061c172b1156bb4ec5931361",
       "assurance/phase2/ci/p4_scoped_engine.py": "94347fd87734093ee07d1d3030699f3aa4b03c3c19e262a571081e0ff17094dc",

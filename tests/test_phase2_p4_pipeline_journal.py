@@ -79,7 +79,30 @@ def observation(ident: PipelineIdentity, stage: str, operation: str) -> dict:
             "candidate_started": False,
             "profiles_sha256": SHA,
         },
-        "ACTIVE_GRAPH_OBSERVED": {"startup_barrier_proven": False},
+        "ACTIVE_GRAPH_OBSERVED": {
+            "startup_barrier_proven": False,
+            "candidate_started": False,
+            "active_network_verified": False,
+            "helper_network_membership_verified_source_only": True,
+            "helper_start_receipts": {
+                "fixture-control": "1" * 64,
+                "fixture-app": "2" * 64,
+                "relay": "3" * 64,
+                "evaluator": "4" * 64,
+            },
+            "helper_descriptors_sha256": {
+                "fixture-control": SHA,
+                "fixture-app": SHA,
+                "relay": SHA,
+                "evaluator": SHA,
+            },
+            "candidate_descriptor_sha256": SHA,
+            "helper_network_descriptors_sha256": {
+                "subject": SHA,
+                "fixture": SHA,
+                "control": SHA,
+            },
+        },
         "RELAY_DRAINED": {"admission_closed": True, "active_requests": 0, "drain_complete": True},
         "CONTROL_FINALIZED": {"audit_complete": True, "active_requests": 0},
         "WRITERS_FENCED": {
@@ -704,3 +727,32 @@ def test_external_disposal_drift_and_lost_ack_keep_unknown(tmp_path: Path):
                 )
             assert j.unknown is True
         assert PipelineJournal.inspect_recovery(path, i)["remote_operation_unresolved"] is True
+
+
+@pytest.mark.parametrize(
+    "field,changed",
+    [
+        ("helper_start_receipts", None),
+        ("helper_start_receipts", {}),
+        ("helper_descriptors_sha256", None),
+        ("candidate_descriptor_sha256", None),
+        ("helper_network_descriptors_sha256", {}),
+        ("active_network_verified", True),
+        ("helper_network_membership_verified_source_only", False),
+        ("candidate_started", True),
+    ],
+)
+def test_active_graph_rejects_missing_or_legacy_source_receipt(tmp_path: Path, field, changed):
+    i = identity()
+    with PipelineJournal(
+        tmp_path / "owned-p4-active.jsonl", i, deadline=time.monotonic() + 500
+    ) as j:
+        for prior in _STAGES[: _STAGES.index("ACTIVE_GRAPH_OBSERVED")]:
+            advance(j, prior)
+
+        def mutate(value):
+            value[field] = changed
+
+        with pytest.raises(JournalUnknown):
+            advance(j, "ACTIVE_GRAPH_OBSERVED", modify=mutate)
+        assert j.unknown and j.pending

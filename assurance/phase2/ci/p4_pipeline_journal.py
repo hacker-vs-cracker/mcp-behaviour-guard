@@ -115,32 +115,32 @@ def _expected(stage: str, evidence: dict[str, Any]) -> None:
         # enforced pre-execution barrier remains separately required.
         if evidence.get("startup_barrier_proven") is not False:
             raise JournalUnknown("source inventory cannot claim a native startup barrier")
-        if "helper_start_receipts" in evidence:
-            helpers = ("fixture-control", "fixture-app", "relay", "evaluator")
-            receipts = evidence["helper_start_receipts"]
-            descriptors = evidence.get("helper_descriptors_sha256")
-            if (
-                type(receipts) is not dict
-                or set(receipts) != set(helpers)
-                or not all(
-                    isinstance(receipts[x], str) and _valid_sha(receipts[x]) for x in helpers
-                )
-                or len(set(receipts.values())) != 4
-                or type(descriptors) is not dict
-                or set(descriptors) != set(helpers)
-                or not all(_valid_sha(descriptors[x]) for x in helpers)
-                or not _valid_sha(evidence.get("candidate_descriptor_sha256"))
-                or evidence.get("candidate_started") is not False
-                or evidence.get("active_network_verified") is not False
-                or evidence.get("helper_network_membership_verified_source_only") is not True
-                or type(evidence.get("helper_network_descriptors_sha256")) is not dict
-                or set(evidence["helper_network_descriptors_sha256"])
-                != {"subject", "fixture", "control"}
-                or not all(
-                    _valid_sha(x) for x in evidence["helper_network_descriptors_sha256"].values()
-                )
-            ):
-                raise JournalUnknown("helper group source readbacks malformed or overstated")
+        # R38/R39 source-only active graph must never fall back to the older
+        # boolean-only journal receipt. Historical journals remain readable
+        # through inspect_recovery(), which does not grant fresh startup.
+        helpers = ("fixture-control", "fixture-app", "relay", "evaluator")
+        receipts = evidence.get("helper_start_receipts")
+        descriptors = evidence.get("helper_descriptors_sha256")
+        if (
+            type(receipts) is not dict
+            or set(receipts) != set(helpers)
+            or not all(isinstance(receipts[x], str) and _valid_sha(receipts[x]) for x in helpers)
+            or len(set(receipts.values())) != 4
+            or type(descriptors) is not dict
+            or set(descriptors) != set(helpers)
+            or not all(_valid_sha(descriptors[x]) for x in helpers)
+            or not _valid_sha(evidence.get("candidate_descriptor_sha256"))
+            or evidence.get("candidate_started") is not False
+            or evidence.get("active_network_verified") is not False
+            or evidence.get("helper_network_membership_verified_source_only") is not True
+            or type(evidence.get("helper_network_descriptors_sha256")) is not dict
+            or set(evidence["helper_network_descriptors_sha256"])
+            != {"subject", "fixture", "control"}
+            or not all(
+                _valid_sha(x) for x in evidence["helper_network_descriptors_sha256"].values()
+            )
+        ):
+            raise JournalUnknown("helper group source readbacks malformed or overstated")
     elif stage == "RELAY_DRAINED":
         if (
             evidence.get("admission_closed") is not True
